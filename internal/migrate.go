@@ -2,12 +2,9 @@ package internal
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +20,7 @@ const StepExecutorInterval = 5 * time.Second
 var stepLogger *log.Logger
 
 // RunAPIServer starts the Gin server and prints environment/setup info
+// (Task and step logic is now in tasks.go and steps.go)
 func RunAPIServer(listenAddr string) error {
 	// Load config and set up logging
 	cfg, err := LoadConfig()
@@ -93,73 +91,7 @@ func RunAPIServer(listenAddr string) error {
 	return r.Run(listenAddr)
 }
 
-// executePendingSteps pulls 'new' steps from 'active' tasks with a non-empty local_path and executes them
-func executePendingSteps() {
-	pgURL, err := getPgURLFromEnv()
-	if err != nil {
-		stepLogger.Println("DB config error:", err)
-		return
-	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		stepLogger.Println("DB open error:", err)
-		return
-	}
-	defer db.Close()
-
-	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'new' AND t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> ''`
-	rows, err := db.Query(query)
-	if err != nil {
-		stepLogger.Println("Query error:", err)
-		return
-	}
-	defer rows.Close()
-
-	type stepExec struct {
-		StepID    int
-		TaskID    int
-		Settings  string
-		LocalPath string
-	}
-	var steps []stepExec
-	for rows.Next() {
-		var s stepExec
-		if err := rows.Scan(&s.StepID, &s.TaskID, &s.Settings, &s.LocalPath); err != nil {
-			fmt.Println("[StepExecutor] Row scan error:", err)
-			continue
-		}
-		steps = append(steps, s)
-	}
-	for _, step := range steps {
-		var settings map[string]interface{}
-		if err := json.Unmarshal([]byte(step.Settings), &settings); err != nil {
-			storeStepResult(db, step.StepID, map[string]interface{}{"result":"failure","message":"invalid settings json"})
-			stepLogger.Printf("Step %d: invalid settings json\n", step.StepID)
-			continue
-		}
-		// Only handle file_exists for now
-		filePath, ok := settings["file_exists"].(string)
-		if ok {
-			absPath := filepath.Join(step.LocalPath, filePath)
-			if _, err := os.Stat(absPath); err == nil {
-				storeStepResult(db, step.StepID, map[string]interface{}{"result":"success"})
-				stepLogger.Printf("Step %d: file_exists '%s' SUCCESS\n", step.StepID, absPath)
-			} else {
-				storeStepResult(db, step.StepID, map[string]interface{}{"result":"failure","message":err.Error()})
-				stepLogger.Printf("Step %d: file_exists '%s' FAILURE: %s\n", step.StepID, absPath, err.Error())
-			}
-		}
-		// Future: handle more actions
-	}
-}
-
-func storeStepResult(db *sql.DB, stepID int, result map[string]interface{}) {
-	resJson, _ := json.Marshal(result)
-	_, err := db.Exec(`UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2`, string(resJson), stepID)
-	if err != nil {
-		fmt.Println("[StepExecutor] Failed to update results for step", stepID, ":", err)
-	}
-}
+// (Step execution logic moved to steps.go)
 
 
 // RunMigrate runs DB migrations up or down
@@ -210,141 +142,6 @@ func RunMigrate(direction string) error {
 	return nil
 }
 
-// ListTasks prints all tasks in the DB
-func ListTasks() error {
-	pgURL, err := getPgURLFromEnv()
-	if err != nil {
-		return err
-	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	rows, err := db.Query(`SELECT id, name, status, local_path, created_at, updated_at FROM tasks ORDER BY id`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	fmt.Printf("%-4s %-20s %-10s %-30s %-25s %-25s\n", "ID", "Name", "Status", "Local Path", "Created At", "Updated At")
-	for rows.Next() {
-		var id int
-		var name, status string
-		var localPath sql.NullString
-		var createdAt, updatedAt string
-		if err := rows.Scan(&id, &name, &status, &localPath, &createdAt, &updatedAt); err != nil {
-			return err
-		}
-		lp := ""
-		if localPath.Valid {
-			lp = localPath.String
-		}
-		fmt.Printf("%-4d %-20s %-10s %-30s %-25s %-25s\n", id, name, status, lp, createdAt, updatedAt)
-	}
-	return nil
-}
-
-// ListSteps prints all steps in the DB. If full is true, prints settings column too.
-func ListSteps(full bool) error {
-	pgURL, err := getPgURLFromEnv()
-	if err != nil {
-		return err
-	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	var rows *sql.Rows
-	if full {
-		rows, err = db.Query(`SELECT id, task_id, title, status, settings, created_at, updated_at FROM steps ORDER BY id`)
-	} else {
-		rows, err = db.Query(`SELECT id, task_id, title, status, created_at, updated_at FROM steps ORDER BY id`)
-	}
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	if full {
-		fmt.Printf("%-4s %-7s %-20s %-10s %-30s %-25s %-25s\n", "ID", "TaskID", "Title", "Status", "Settings", "Created At", "Updated At")
-		for rows.Next() {
-			var id, taskID int
-			var title, status, settings, createdAt, updatedAt string
-			if err := rows.Scan(&id, &taskID, &title, &status, &settings, &createdAt, &updatedAt); err != nil {
-				return err
-			}
-			fmt.Printf("%-4d %-7d %-20s %-10s %-30s %-25s %-25s\n", id, taskID, title, status, settings, createdAt, updatedAt)
-		}
-	} else {
-		fmt.Printf("%-4s %-7s %-20s %-10s %-25s %-25s\n", "ID", "TaskID", "Title", "Status", "Created At", "Updated At")
-		for rows.Next() {
-			var id, taskID int
-			var title, status, createdAt, updatedAt string
-			if err := rows.Scan(&id, &taskID, &title, &status, &createdAt, &updatedAt); err != nil {
-				return err
-			}
-			fmt.Printf("%-4d %-7d %-20s %-10s %-25s %-25s\n", id, taskID, title, status, createdAt, updatedAt)
-		}
-	}
-	return nil
-}
-
-// CreateStep inserts a new step for a task. taskRef can be the task id or name. Settings must be a valid JSON string.
-func CreateStep(taskRef, title, settings string) error {
-	pgURL, err := getPgURLFromEnv()
-	if err != nil {
-		return err
-	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	// Try to parse settings as JSON
-	var js interface{}
-	if err := json.Unmarshal([]byte(settings), &js); err != nil {
-		return fmt.Errorf("settings must be valid JSON: %w", err)
-	}
-
-	// Find task_id
-	var taskID int
-	if id, err := strconv.Atoi(taskRef); err == nil {
-		err = db.QueryRow("SELECT id FROM tasks WHERE id = $1", id).Scan(&taskID)
-		if err != nil {
-			return fmt.Errorf("no task found with id %d", id)
-		}
-	} else {
-		err = db.QueryRow("SELECT id FROM tasks WHERE name = $1", taskRef).Scan(&taskID)
-		if err != nil {
-			return fmt.Errorf("no task found with name '%s'", taskRef)
-		}
-	}
-
-	_, err = db.Exec(`INSERT INTO steps (task_id, title, status, settings, created_at, updated_at) VALUES ($1, $2, 'new', $3::jsonb, now(), now())`, taskID, title, settings)
-	return err
-}
-
-// CreateTask inserts a new task with name and status. Only allows status: active, inactive, disabled, running.
-func CreateTask(name, status string) error {
-	valid := map[string]bool{"active": true, "inactive": true, "disabled": true, "running": true}
-	if !valid[status] {
-		return fmt.Errorf("invalid status: %s (must be one of active|inactive|disabled|running)", status)
-	}
-	pgURL, err := getPgURLFromEnv()
-	if err != nil {
-		return err
-	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	_, err = db.Exec(`INSERT INTO tasks (name, status, created_at, updated_at) VALUES ($1, $2, now(), now())`, name, status)
-	return err
-}
-
-// RunMigrateReset resets the database by dropping everything and rerunning all migrations
 func RunMigrateReset() error {
 	pgURL, err := getPgURLFromEnv()
 	if err != nil {

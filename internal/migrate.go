@@ -7,12 +7,58 @@ import (
 	"os"
 	"strconv"
 
-	_ "github.com/lib/pq"
+	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
+
+// RunAPIServer starts the Gin server and prints environment/setup info
+func RunAPIServer(listenAddr string) error {
+	mode := "LOCAL"
+	if listenAddr == "0.0.0.0:8080" {
+		mode = "REMOTE"
+	}
+	fmt.Println("==============================")
+	fmt.Println("Task Sync API Server Starting...")
+	fmt.Printf("Listening on:   http://%s\n", listenAddr)
+	fmt.Printf("Mode:           %s\n", mode)
+	fmt.Println("\nSupported API endpoints:")
+	fmt.Println("  GET    /status       - API status/health check")
+	fmt.Println("  POST   /tasks        - Create a new task")
+	fmt.Println("  GET    /tasks        - List all tasks")
+	fmt.Println("  POST   /steps        - Create a new step")
+	fmt.Println("  GET    /steps        - List all steps (use ?full=1 for settings)")
+	fmt.Println("==============================")
+	fmt.Println()
+
+	r := gin.Default()
+
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(200, gin.H{"message": "Welcome to Task Sync"})
+	})
+
+	r.GET("/status", func(c *gin.Context) {
+		c.JSON(200, gin.H{})
+	})
+
+	r.POST("/tasks", func(c *gin.Context) {
+		c.JSON(501, gin.H{"message": "Not implemented"})
+	})
+	r.GET("/tasks", func(c *gin.Context) {
+		c.JSON(501, gin.H{"message": "Not implemented"})
+	})
+	r.POST("/steps", func(c *gin.Context) {
+		c.JSON(501, gin.H{"message": "Not implemented"})
+	})
+	r.GET("/steps", func(c *gin.Context) {
+		c.JSON(501, gin.H{"message": "Not implemented"})
+	})
+
+	return r.Run(listenAddr)
+}
 
 // RunMigrate runs DB migrations up or down
 func getPgURLFromEnv() (string, error) {
@@ -140,8 +186,6 @@ func ListSteps(full bool) error {
 	}
 	return nil
 }
-
-
 
 // CreateStep inserts a new step for a task. taskRef can be the task id or name. Settings must be a valid JSON string.
 func CreateStep(taskRef, title, settings string) error {

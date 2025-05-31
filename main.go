@@ -9,11 +9,27 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: task-sync migrate [up|down]")
-		os.Exit(1)
+		// Default to running the API server in remote mode if no arguments are provided
+		if err := internal.RunAPIServer("0.0.0.0:8064"); err != nil {
+			fmt.Printf("API server error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	switch os.Args[1] {
+	case "serve":
+		listenAddr := "127.0.0.1:8064"
+		for i := 2; i < len(os.Args); i++ {
+			if os.Args[i] == "--remote" {
+				listenAddr = "0.0.0.0:8064"
+			}
+		}
+		if err := internal.RunAPIServer(listenAddr); err != nil {
+			fmt.Printf("API server error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	case "tasks":
 		if len(os.Args) < 3 || os.Args[2] != "list" {
 			fmt.Println("Usage: task-sync tasks list")
@@ -98,7 +114,15 @@ func main() {
 
 	case "migrate":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: task-sync migrate [up|down|status|reset]")
+			fmt.Println("Usage:")
+			fmt.Println("  task-sync migrate [up|down|status|reset]")
+			fmt.Println("  task-sync task create --name <name> --status <status>")
+			fmt.Println("  task-sync tasks list")
+			fmt.Println("  task-sync step create --task <id|name> --title <title> --settings <json>")
+			fmt.Println("  task-sync steps list [--full]")
+			fmt.Println("  task-sync serve [--remote]")
+			fmt.Println()
+			fmt.Println("  --remote: Listen on all interfaces (not just localhost) for API server")
 			os.Exit(1)
 		}
 		if os.Args[2] == "status" {
@@ -118,7 +142,19 @@ func main() {
 			}
 		}
 	default:
-		fmt.Println("Unknown command")
-		os.Exit(1)
+		valid := map[string]bool{"migrate": true, "task": true, "tasks": true, "step": true, "steps": true, "serve": true}
+		if !valid[os.Args[1]] {
+			fmt.Println("Unknown command:", os.Args[1])
+			fmt.Println("Commands:")
+			fmt.Println("  task-sync migrate [up|down|status|reset]")
+			fmt.Println("  task-sync task create --name <name> --status <status>")
+			fmt.Println("  task-sync tasks list")
+			fmt.Println("  task-sync step create --task <id|name> --title <title> --settings <json>")
+			fmt.Println("  task-sync steps list [--full]")
+			fmt.Println("  task-sync serve [--remote]")
+			fmt.Println()
+			fmt.Println("  --remote: Listen on all interfaces (not just localhost) for API server")
+			os.Exit(1)
+		}
 	}
 }

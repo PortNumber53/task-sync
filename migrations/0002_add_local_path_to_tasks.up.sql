@@ -1,1 +1,1 @@
-ALTER TABLE tasks ADD COLUMN local_path TEXT;
+ALTER TABLE tasks ADD COLUMN local_path TEXT

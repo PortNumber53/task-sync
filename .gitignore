@@ -1,0 +1,22 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Output of build tools
+/build/
+
+# Dependency directories
+vendor/
+
+# IDE/editor
+.idea/
+.vscode/
+*.swp
+
+# DB data
+pgdata/

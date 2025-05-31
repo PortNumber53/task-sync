@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
@@ -15,8 +18,38 @@ import (
 	_ "github.com/lib/pq"
 )
 
+const StepExecutorInterval = 5 * time.Second
+
+var stepLogger *log.Logger
+
 // RunAPIServer starts the Gin server and prints environment/setup info
 func RunAPIServer(listenAddr string) error {
+	// Load config and set up logging
+	cfg, err := LoadConfig()
+	if err != nil {
+		fmt.Println("[Config] Error loading config:", err)
+	}
+	if cfg != nil && cfg.LogFile != "" {
+		f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Println("[Config] Failed to open log file:", err)
+			stepLogger = log.New(os.Stdout, "[StepExecutor] ", log.LstdFlags)
+		} else {
+			stepLogger = log.New(f, "[StepExecutor] ", log.LstdFlags)
+			fmt.Println("[Config] Logging step execution to:", cfg.LogFile)
+		}
+	} else {
+		stepLogger = log.New(os.Stdout, "[StepExecutor] ", log.LstdFlags)
+	}
+
+	// Start background step executor
+	go func() {
+		for {
+			executePendingSteps()
+			time.Sleep(StepExecutorInterval)
+		}
+	}()
+
 	mode := "LOCAL"
 	if listenAddr == "0.0.0.0:8080" {
 		mode = "REMOTE"
@@ -59,6 +92,75 @@ func RunAPIServer(listenAddr string) error {
 
 	return r.Run(listenAddr)
 }
+
+// executePendingSteps pulls 'new' steps from 'active' tasks with a non-empty local_path and executes them
+func executePendingSteps() {
+	pgURL, err := getPgURLFromEnv()
+	if err != nil {
+		stepLogger.Println("DB config error:", err)
+		return
+	}
+	db, err := sql.Open("postgres", pgURL)
+	if err != nil {
+		stepLogger.Println("DB open error:", err)
+		return
+	}
+	defer db.Close()
+
+	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'new' AND t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> ''`
+	rows, err := db.Query(query)
+	if err != nil {
+		stepLogger.Println("Query error:", err)
+		return
+	}
+	defer rows.Close()
+
+	type stepExec struct {
+		StepID    int
+		TaskID    int
+		Settings  string
+		LocalPath string
+	}
+	var steps []stepExec
+	for rows.Next() {
+		var s stepExec
+		if err := rows.Scan(&s.StepID, &s.TaskID, &s.Settings, &s.LocalPath); err != nil {
+			fmt.Println("[StepExecutor] Row scan error:", err)
+			continue
+		}
+		steps = append(steps, s)
+	}
+	for _, step := range steps {
+		var settings map[string]interface{}
+		if err := json.Unmarshal([]byte(step.Settings), &settings); err != nil {
+			storeStepResult(db, step.StepID, map[string]interface{}{"result":"failure","message":"invalid settings json"})
+			stepLogger.Printf("Step %d: invalid settings json\n", step.StepID)
+			continue
+		}
+		// Only handle file_exists for now
+		filePath, ok := settings["file_exists"].(string)
+		if ok {
+			absPath := filepath.Join(step.LocalPath, filePath)
+			if _, err := os.Stat(absPath); err == nil {
+				storeStepResult(db, step.StepID, map[string]interface{}{"result":"success"})
+				stepLogger.Printf("Step %d: file_exists '%s' SUCCESS\n", step.StepID, absPath)
+			} else {
+				storeStepResult(db, step.StepID, map[string]interface{}{"result":"failure","message":err.Error()})
+				stepLogger.Printf("Step %d: file_exists '%s' FAILURE: %s\n", step.StepID, absPath, err.Error())
+			}
+		}
+		// Future: handle more actions
+	}
+}
+
+func storeStepResult(db *sql.DB, stepID int, result map[string]interface{}) {
+	resJson, _ := json.Marshal(result)
+	_, err := db.Exec(`UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2`, string(resJson), stepID)
+	if err != nil {
+		fmt.Println("[StepExecutor] Failed to update results for step", stepID, ":", err)
+	}
+}
+
 
 // RunMigrate runs DB migrations up or down
 func getPgURLFromEnv() (string, error) {

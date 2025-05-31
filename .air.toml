@@ -1,0 +1,10 @@
+[build]
+  cmd = "go build -o ./tmp/main ./main.go"
+  rerun = true
+
+[log]
+  color = "auto"
+  time = true
+
+[run]
+  cmd = "./tmp/main server --remote"

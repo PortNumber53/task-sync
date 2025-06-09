@@ -7,199 +7,22 @@ import (
 	"strconv"
 	"strings"
 
+	_ "github.com/lib/pq"
+
+	helpPkg "github.com/yourusername/task-sync/help"
 	"github.com/yourusername/task-sync/internal"
 )
 
-func printStepsListHelp() {
-	helpText := `List all steps in the task system.
-
-Usage:
-  task-sync steps list [flags]
-
-Flags:
-  --full    Show additional details including step settings
-  -h, --help  Show this help message and exit
-
-Examples:
-  # List all steps
-  task-sync steps list
-
-  # Show all steps with full details
-  task-sync steps list --full`
-	fmt.Println(helpText)
-}
-
-func printTaskDeleteHelp() {
-	helpText := `Delete a task and all its associated steps.
-
-Usage:
-  task-sync task delete --id TASK_ID
-
-Required Flags:
-  --id int  ID of the task to delete
-  -h, --help  Show this help message and exit
-
-Examples:
-  # Delete task with ID 1
-  task-sync task delete --id 1
-
-  # Show this help message
-  task-sync task delete --help`
-	fmt.Println(helpText)
-}
-
-func printTaskCreateHelp() {
-	helpText := `Create a new task in the system.
-
-Usage:
-  task-sync task create --name NAME --status STATUS [--local-path PATH]
-
-Required Flags:
-  --name string    Name of the task (must be unique)
-  --status string  Status of the task (must be one of: active, inactive, disabled, running)
-
-Optional Flags:
-  --local-path string  Local filesystem path associated with the task
-  -h, --help          Show this help message and exit
-
-Examples:
-  # Create a new active task
-  task-sync task create --name "deploy-api" --status active
-
-  # Create a task with a local path
-  task-sync task create --name "frontend" --status inactive --local-path "/projects/frontend"
-
-  # Show this help message
-  task-sync task create --help`
-	fmt.Println(helpText)
-}
-
-func printStepCopyHelp() {
-	helpText := `Copy a step to a different task.
-
-Usage:
-  task-sync step copy --id STEP_ID --to-task-id TASK_ID
-
-Required Flags:
-  --id int         ID of the step to copy
-  --to-task-id int ID of the target task
-
-Options:
-  -h, --help    Show this help message and exit
-
-Examples:
-  # Copy step with ID 5 to task with ID 3
-  task-sync step copy --id 5 --to-task-id 3
-
-  # Show this help message
-  task-sync step copy --help`
-	fmt.Println(helpText)
-}
-
-func printStepCreateHelp() {
-	helpText := `Create a new step for a task.
-
-Usage:
-  task-sync step create --task TASK_REF --title TITLE --settings JSON
-
-Required Flags:
-  --task string    Task ID or name to attach the step to
-  --title string   Title of the step
-  --settings JSON  JSON string containing step settings
-
-Options:
-  -h, --help  Show this help message and exit
-
-Examples:
-  # Create a step for task with ID 1
-  task-sync step create --task 1 --title "Build" --settings '{"command":"npm build"}'
-
-  # Create a step for task by name
-  task-sync step create --task "My Task" --title "Test" --settings '{"command":"npm test"}'
-
-  # Show this help message
-  task-sync step create --help`
-	fmt.Println(helpText)
-}
-
-func printTasksListHelp() {
-	helpText := `List all tasks in the system.
-
-Usage:
-  task-sync tasks list
-  task-sync task list
-
-Options:
-  -h, --help  Show this help message and exit
-
-Examples:
-  # List all tasks
-  task-sync tasks list
-
-  # Alternative syntax
-  task-sync task list
-
-  # Show this help message
-  task-sync tasks list --help`
-	fmt.Println(helpText)
-}
-
-func printServeHelp() {
-	helpText := `Start the task-sync API server.
-
-Usage:
-  task-sync serve [--remote]
-
-Options:
-  --remote    Listen on all network interfaces (default: localhost only)
-  -h, --help  Show this help message and exit
-
-Examples:
-  # Start the server on localhost (default)
-  task-sync serve
-
-  # Start the server accessible from other machines
-  task-sync serve --remote
-
-  # Show this help message
-  task-sync serve --help`
-	fmt.Println(helpText)
-}
-
-func printMigrateHelp() {
-	helpText := `Manage database migrations.
-
-Usage:
-  task-sync migrate COMMAND [options]
-
-Commands:
-  up        Apply all pending migrations
-  down      Roll back the most recent migration
-  status    Show current migration status
-  reset     Reset the database by dropping all tables and re-running all migrations
-
-Options:
-  -h, --help    Show this help message and exit
-
-Examples:
-  # Apply all pending migrations
-  task-sync migrate up
-
-  # Roll back the most recent migration
-  task-sync migrate down
-
-  # Show current migration status
-  task-sync migrate status
-
-  # Reset the database (drop all tables and re-run migrations)
-  task-sync migrate reset`
-	fmt.Println(helpText)
-}
-
 func main() {
+	// Check for --help or -h as the first argument
+	if len(os.Args) > 1 && (os.Args[1] == "--help" || os.Args[1] == "-h") {
+		helpPkg.PrintMainHelp()
+		os.Exit(0)
+	}
+
 	if len(os.Args) < 2 {
 		// Default to running the API server in remote mode if no arguments are provided
-		if err := internal.RunAPIServer("0.0.0.0:8064"); err != nil {
+		if err := internal.RunAPIServer("0.0.0.1:8064"); err != nil {
 			fmt.Printf("API server error: %v\n", err)
 			os.Exit(1)
 		}
@@ -218,7 +41,7 @@ func main() {
 		}
 
 		if help {
-			printServeHelp()
+			helpPkg.PrintServeHelp()
 			os.Exit(0)
 		}
 
@@ -237,7 +60,7 @@ func main() {
 	case "tasks":
 		// Check for help flag or invalid subcommand
 		if len(os.Args) < 3 || (os.Args[2] != "list" && os.Args[2] != "--help" && os.Args[2] != "-h") {
-			printTasksListHelp()
+			helpPkg.PrintTasksListHelp()
 			os.Exit(1)
 		}
 
@@ -251,7 +74,7 @@ func main() {
 		}
 
 		if help {
-			printTasksListHelp()
+			helpPkg.PrintTasksListHelp()
 			os.Exit(0)
 		}
 
@@ -262,7 +85,7 @@ func main() {
 		return
 	case "steps":
 		if len(os.Args) < 3 || os.Args[2] != "list" {
-			printStepsListHelp()
+			helpPkg.PrintStepsListHelp()
 			os.Exit(1)
 		}
 		full := false
@@ -276,7 +99,7 @@ func main() {
 			}
 		}
 		if help {
-			printStepsListHelp()
+			helpPkg.PrintStepsListHelp()
 			os.Exit(0)
 		}
 		if err := internal.ListSteps(full); err != nil {
@@ -308,9 +131,9 @@ func main() {
 		if showHelp {
 			switch subcommand {
 			case "create":
-				printStepCreateHelp()
+				helpPkg.PrintStepCreateHelp()
 			case "copy":
-				printStepCopyHelp()
+				helpPkg.PrintStepCopyHelp()
 			default:
 				fmt.Printf("Unknown subcommand: %s\n", subcommand)
 			}
@@ -326,7 +149,7 @@ func main() {
 				case "--task":
 					if i+1 >= len(os.Args) {
 						fmt.Println("Error: --task requires a value")
-						printStepCreateHelp()
+						helpPkg.PrintStepCreateHelp()
 						os.Exit(1)
 					}
 					taskRef = os.Args[i+1]
@@ -334,7 +157,7 @@ func main() {
 				case "--title":
 					if i+1 >= len(os.Args) {
 						fmt.Println("Error: --title requires a value")
-						printStepCreateHelp()
+						helpPkg.PrintStepCreateHelp()
 						os.Exit(1)
 					}
 					title = os.Args[i+1]
@@ -342,7 +165,7 @@ func main() {
 				case "--settings":
 					if i+1 >= len(os.Args) {
 						fmt.Println("Error: --settings requires a value")
-						printStepCreateHelp()
+						helpPkg.PrintStepCreateHelp()
 						os.Exit(1)
 					}
 					settings = os.Args[i+1]
@@ -352,8 +175,8 @@ func main() {
 
 			// Validate required arguments
 			if taskRef == "" || title == "" || settings == "" {
-				fmt.Println("Error: --task, --title, and --settings are required\n")
-				printStepCreateHelp()
+				fmt.Println("Error: --task, --title, and --settings are required")
+				helpPkg.PrintStepCreateHelp()
 				os.Exit(1)
 			}
 
@@ -377,26 +200,26 @@ func main() {
 				case "--id":
 					if i+1 >= len(os.Args) {
 						fmt.Println("Error: --id requires a value")
-						printStepCopyHelp()
+						helpPkg.PrintStepCopyHelp()
 						os.Exit(1)
 					}
 					stepID, err = strconv.Atoi(os.Args[i+1])
 					if err != nil {
 						fmt.Printf("Error: invalid step ID '%s'\n", os.Args[i+1])
-						printStepCopyHelp()
+						helpPkg.PrintStepCopyHelp()
 						os.Exit(1)
 					}
 					i++
 				case "--to-task-id":
 					if i+1 >= len(os.Args) {
 						fmt.Println("Error: --to-task-id requires a value")
-						printStepCopyHelp()
+						helpPkg.PrintStepCopyHelp()
 						os.Exit(1)
 					}
 					toTaskID, err = strconv.Atoi(os.Args[i+1])
 					if err != nil {
 						fmt.Printf("Error: invalid task ID '%s'\n", os.Args[i+1])
-						printStepCopyHelp()
+						helpPkg.PrintStepCopyHelp()
 						os.Exit(1)
 					}
 					i++
@@ -405,8 +228,8 @@ func main() {
 
 			// Validate required arguments
 			if stepID <= 0 || toTaskID <= 0 {
-				fmt.Println("Error: --id and --to-task-id are required and must be positive integers\n")
-				printStepCopyHelp()
+				fmt.Println("Error: --id and --to-task-id are required and must be positive integers")
+				helpPkg.PrintStepCopyHelp()
 				os.Exit(1)
 			}
 
@@ -440,14 +263,14 @@ func main() {
 				case "--id":
 					if i+1 >= len(os.Args) {
 						fmt.Println("Error: --id requires a value")
-						printTaskDeleteHelp()
+						helpPkg.PrintTaskDeleteHelp()
 						os.Exit(1)
 					}
 					var err error
 					taskID, err = strconv.Atoi(os.Args[i+1])
 					if err != nil {
 						fmt.Printf("Error: invalid task ID '%s'\n", os.Args[i+1])
-						printTaskDeleteHelp()
+						helpPkg.PrintTaskDeleteHelp()
 						os.Exit(1)
 					}
 					i++
@@ -458,14 +281,14 @@ func main() {
 
 			// Show help if requested
 			if help {
-				printTaskDeleteHelp()
+				helpPkg.PrintTaskDeleteHelp()
 				os.Exit(0)
 			}
 
 			// Validate required arguments
 			if taskID <= 0 {
-				fmt.Println("Error: --id is required and must be a positive integer\n")
-				printTaskDeleteHelp()
+				fmt.Println("Error: --id is required and must be a positive integer")
+				helpPkg.PrintTaskDeleteHelp()
 				os.Exit(1)
 			}
 
@@ -507,21 +330,21 @@ func main() {
 
 			// Show help if requested
 			if help {
-				printTaskCreateHelp()
+				helpPkg.PrintTaskCreateHelp()
 				os.Exit(0)
 			}
 
 			// Validate required arguments
 			if name == "" || status == "" {
-				fmt.Println("Error: --name and --status are required\n")
-				printTaskCreateHelp()
+				fmt.Println("Error: --name and --status are required")
+				helpPkg.PrintTaskCreateHelp()
 				os.Exit(1)
 			}
 
 			// Create the task with the local path
 			if err := internal.CreateTask(name, status, localPath); err != nil {
-				fmt.Printf("Error creating task: %v\n\n", err)
-				printTaskCreateHelp()
+				fmt.Printf("Error creating task: %v\n", err)
+				helpPkg.PrintTaskCreateHelp()
 				os.Exit(1)
 			}
 
@@ -545,7 +368,7 @@ func main() {
 			}
 
 			if help {
-				printTasksListHelp()
+				helpPkg.PrintTasksListHelp()
 				os.Exit(0)
 			}
 
@@ -567,12 +390,12 @@ func main() {
 	case "migrate":
 		// Check for help flag
 		if len(os.Args) >= 3 && (os.Args[2] == "--help" || os.Args[2] == "-h") {
-			printMigrateHelp()
+			helpPkg.PrintMigrateHelp()
 			os.Exit(0)
 		}
 
 		if len(os.Args) < 3 {
-			printMigrateHelp()
+			helpPkg.PrintMigrateHelp()
 			os.Exit(1)
 		}
 		if os.Args[2] == "status" {

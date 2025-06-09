@@ -1,5 +1,7 @@
 TASK_DATA.md
 
+tmp/
+
 # Binaries
 *.exe
 *.exe~

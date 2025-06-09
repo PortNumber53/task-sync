@@ -109,11 +109,15 @@ func main() {
 		return
 
 	case "step":
+		// Check for help flag
+		if len(os.Args) >= 3 && (os.Args[2] == "--help" || os.Args[2] == "-h") {
+			helpPkg.PrintStepHelp()
+			os.Exit(0)
+		}
+
 		// Check if we have a subcommand
 		if len(os.Args) < 3 {
-			fmt.Println("Available subcommands:")
-			fmt.Println("  create - Create a new step")
-			fmt.Println("  copy   - Copy a step to another task")
+			helpPkg.PrintStepHelp()
 			os.Exit(1)
 		}
 

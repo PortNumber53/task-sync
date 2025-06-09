@@ -1,12 +1,18 @@
 package internal
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // CreateStep inserts a new step for a task. taskRef can be the task id or name. Settings must be a valid JSON string.
@@ -91,6 +97,121 @@ func ListSteps(full bool) error {
 	return nil
 }
 
+// DockerBuildConfig represents the configuration for a docker build step
+type DockerBuildConfig struct {
+	DockerBuild struct {
+		DependsOn []struct {
+			ID int `json:"id"`
+		} `json:"depends_on"`
+		Files   []string          `json:"files"`
+		Hashes  map[string]string `json:"hashes"`
+		Shell   []string          `json:"shell"`
+		ImageID  string            `json:"image_id"`
+		ImageTag string            `json:"image_tag"`
+	} `json:"docker_build"`
+}
+
+// calculateFileHash calculates the SHA256 hash of a file
+func calculateFileHash(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// checkDependencies verifies if all dependent steps have completed successfully
+func checkDependencies(db *sql.DB, stepID int, dependsOn []struct{ ID int `json:"id"` }) (bool, error) {
+	if len(dependsOn) == 0 {
+		return true, nil
+	}
+
+	placeholders := make([]string, len(dependsOn))
+	args := make([]interface{}, len(dependsOn)+1)
+	args[0] = stepID
+
+	for i, dep := range dependsOn {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args[i+1] = dep.ID
+	}
+
+	query := fmt.Sprintf(`
+		SELECT NOT EXISTS (
+			SELECT 1 FROM steps 
+			WHERE id IN (%s) 
+			AND id != $1 
+			AND (status != 'success' OR results->>'result' != 'success')
+		)`,
+		strings.Join(placeholders, ","))
+
+	var allDepsCompleted bool
+	err := db.QueryRow(query, args...).Scan(&allDepsCompleted)
+	return allDepsCompleted, err
+}
+
+// executeDockerBuild executes the docker build command and captures the image ID
+func executeDockerBuild(workDir string, config DockerBuildConfig, stepID int, db *sql.DB) error {
+	// Replace image tag placeholder in shell command
+	cmdParts := make([]string, len(config.DockerBuild.Shell))
+	for i, part := range config.DockerBuild.Shell {
+		cmdParts[i] = strings.ReplaceAll(part, "%%IMAGE_TAG%%", config.DockerBuild.ImageTag)
+	}
+
+	// Execute the command
+	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+	cmd.Dir = workDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	stepLogger.Printf("Step %d: Executing docker build: %v\n", stepID, strings.Join(cmdParts, " "))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker build failed: %w", err)
+	}
+
+	// Get the image ID
+	imageID, err := getDockerImageID(config.DockerBuild.ImageTag)
+	if err != nil {
+		return fmt.Errorf("failed to get image ID: %w", err)
+	}
+
+	// Update the config with the new image ID
+	config.DockerBuild.ImageID = imageID
+
+	// Update the step settings with the new config
+	updatedSettings, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated settings: %w", err)
+	}
+
+	// Update the step in the database
+	_, err = db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(updatedSettings), stepID)
+	if err != nil {
+		return fmt.Errorf("failed to update step settings: %w", err)
+	}
+
+	return nil
+}
+
+// getDockerImageID retrieves the image ID for a given tag
+func getDockerImageID(tag string) (string, error) {
+	cmd := exec.Command("docker", "inspect", "-f", "{{.Id}}", tag)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(out.String()), nil
+}
+
 // Step execution logic (from migrate.go)
 type stepExec struct {
 	StepID    int
@@ -112,41 +233,136 @@ func executePendingSteps() {
 	}
 	defer db.Close()
 
-	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'new' AND t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> ''`
+	// First, process file_exists steps
+	processFileExistsSteps(db)
+
+	// Then process docker_build steps
+	processDockerBuildSteps(db)
+}
+
+func processFileExistsSteps(db *sql.DB) {
+	query := `SELECT s.id, s.task_id, s.settings, t.local_path 
+		FROM steps s 
+		JOIN tasks t ON s.task_id = t.id 
+		WHERE s.status = 'active' 
+		AND t.status = 'active' 
+		AND t.local_path IS NOT NULL 
+		AND t.local_path <> '' 
+		AND s.settings::text LIKE '%file_exists%'`
+
 	rows, err := db.Query(query)
 	if err != nil {
-		stepLogger.Println("Query error:", err)
+		stepLogger.Println("File exists query error:", err)
 		return
 	}
 	defer rows.Close()
 
-	var steps []stepExec
 	for rows.Next() {
-		var s stepExec
-		if err := rows.Scan(&s.StepID, &s.TaskID, &s.Settings, &s.LocalPath); err != nil {
+		var step stepExec
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
 			stepLogger.Println("Row scan error:", err)
 			continue
 		}
-		steps = append(steps, s)
-	}
-	for _, step := range steps {
+
 		var settings map[string]interface{}
 		if err := json.Unmarshal([]byte(step.Settings), &settings); err != nil {
-			storeStepResult(db, step.StepID, map[string]interface{}{"result":"failure","message":"invalid settings json"})
+			storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid settings json"})
 			stepLogger.Printf("Step %d: invalid settings json\n", step.StepID)
 			continue
 		}
+
 		filePath, ok := settings["file_exists"].(string)
-		if ok {
-			absPath := filepath.Join(step.LocalPath, filePath)
-			if _, err := os.Stat(absPath); err == nil {
-				storeStepResult(db, step.StepID, map[string]interface{}{"result":"success"})
-				stepLogger.Printf("Step %d: file_exists '%s' SUCCESS\n", step.StepID, absPath)
-			} else {
-				storeStepResult(db, step.StepID, map[string]interface{}{"result":"failure","message":err.Error()})
-				stepLogger.Printf("Step %d: file_exists '%s' FAILURE: %s\n", step.StepID, absPath, err.Error())
+		if !ok {
+			continue
+		}
+
+		absPath := filepath.Join(step.LocalPath, filePath)
+		if _, err := os.Stat(absPath); err == nil {
+			storeStepResult(db, step.StepID, map[string]interface{}{"result": "success"})
+			stepLogger.Printf("Step %d: file_exists '%s' SUCCESS\n", step.StepID, absPath)
+		} else {
+			storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": err.Error()})
+			stepLogger.Printf("Step %d: file_exists '%s' FAILURE: %s\n", step.StepID, absPath, err.Error())
+		}
+	}
+}
+
+func processDockerBuildSteps(db *sql.DB) {
+	query := `SELECT s.id, s.task_id, s.settings, t.local_path 
+		FROM steps s 
+		JOIN tasks t ON s.task_id = t.id 
+		WHERE s.status = 'active' 
+		AND t.status = 'active' 
+		AND t.local_path IS NOT NULL 
+		AND t.local_path <> '' 
+		AND s.settings::text LIKE '%docker_build%'`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		stepLogger.Println("Docker build query error:", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var step stepExec
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
+			stepLogger.Println("Row scan error:", err)
+			continue
+		}
+
+		// Parse the docker build config
+		var config DockerBuildConfig
+		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
+			storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker build config"})
+			stepLogger.Printf("Step %d: invalid docker build config: %v\n", step.StepID, err)
+			continue
+		}
+
+		// Check if dependencies are met
+		ok, err := checkDependencies(db, step.StepID, config.DockerBuild.DependsOn)
+		if err != nil {
+			stepLogger.Printf("Step %d: error checking dependencies: %v\n", step.StepID, err)
+			continue
+		}
+		if !ok {
+			stepLogger.Printf("Step %d: waiting for dependencies to complete\n", step.StepID)
+			continue
+		}
+
+		// Check if files have changed
+		shouldBuild := false
+		for _, file := range config.DockerBuild.Files {
+			filePath := filepath.Join(step.LocalPath, file)
+			currentHash, err := calculateFileHash(filePath)
+			if err != nil {
+				stepLogger.Printf("Step %d: error calculating hash for %s: %v\n", step.StepID, file, err)
+				continue
+			}
+
+			storedHash, exists := config.DockerBuild.Hashes[file]
+			if !exists || storedHash != currentHash {
+				shouldBuild = true
+				config.DockerBuild.Hashes[file] = currentHash
 			}
 		}
+
+		// If no changes and we already have an image ID, skip the build
+		if !shouldBuild && config.DockerBuild.ImageID != "" {
+			stepLogger.Printf("Step %d: no changes detected, skipping build\n", step.StepID)
+			continue
+		}
+
+		// Execute the docker build
+		if err := executeDockerBuild(step.LocalPath, config, step.StepID, db); err != nil {
+			storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": err.Error()})
+			stepLogger.Printf("Step %d: docker build failed: %v\n", step.StepID, err)
+			continue
+		}
+
+		// Mark step as successful
+		storeStepResult(db, step.StepID, map[string]interface{}{"result": "success"})
+		stepLogger.Printf("Step %d: docker build completed successfully\n", step.StepID)
 	}
 }
 

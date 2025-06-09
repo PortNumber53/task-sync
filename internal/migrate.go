@@ -1,10 +1,14 @@
 package internal
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,27 +38,53 @@ func RunAPIServer(listenAddr string) error {
 			stepLogger = log.New(os.Stdout, "[StepExecutor] ", log.LstdFlags)
 		} else {
 			stepLogger = log.New(f, "[StepExecutor] ", log.LstdFlags)
-			fmt.Println("[Config] Logging step execution to:", cfg.LogFile)
 		}
 	} else {
 		stepLogger = log.New(os.Stdout, "[StepExecutor] ", log.LstdFlags)
 	}
 
-	// Start background step executor
+	// Create channels for graceful shutdown
+	stopChan := make(chan struct{})
+	doneChan := make(chan struct{})
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	// Start step executor in a goroutine
 	go func() {
+		ticker := time.NewTicker(StepExecutorInterval)
+		defer ticker.Stop()
+		defer close(doneChan)
+
+		// Initial execution
+		executePendingSteps()
+
 		for {
-			executePendingSteps()
-			time.Sleep(StepExecutorInterval)
+			select {
+			case <-ticker.C:
+				executePendingSteps()
+			case <-stopChan:
+				stepLogger.Println("Step executor shutting down...")
+				return
+			}
 		}
 	}()
 
-	mode := "LOCAL"
-	if listenAddr == "0.0.0.0:8080" {
-		mode = "REMOTE"
+	// Print environment info
+	fmt.Println("Starting task-sync API server...")
+	fmt.Println("Environment:")
+	fmt.Printf("  - Listen address: %s\n", listenAddr)
+	fmt.Printf("  - Step check interval: %v\n", StepExecutorInterval)
+	fmt.Println("  - Database: PostgreSQL")
+	if cfg != nil && cfg.LogFile != "" {
+		fmt.Printf("  - Log file: %s\n", cfg.LogFile)
 	}
 	fmt.Println("==============================")
 	fmt.Println("Task Sync API Server Starting...")
 	fmt.Printf("Listening on:   http://%s\n", listenAddr)
+	mode := "LOCAL"
+	if listenAddr == "0.0.0.0:8080" {
+		mode = "REMOTE"
+	}
 	fmt.Printf("Mode:           %s\n", mode)
 	fmt.Println("\nSupported API endpoints:")
 	fmt.Println("  GET    /status       - API status/health check")
@@ -88,7 +118,40 @@ func RunAPIServer(listenAddr string) error {
 		c.JSON(501, gin.H{"message": "Not implemented"})
 	})
 
-	return r.Run(listenAddr)
+	// Create HTTP server with timeouts
+	srv := &http.Server{
+		Addr:    listenAddr,
+		Handler: r,
+	}
+
+	// Start server in a goroutine
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shut down the server
+	<-quit
+	log.Println("Shutting down server...")
+
+	// Notify step executor to stop
+	close(stopChan)
+
+	// Wait for step executor to finish
+	<-doneChan
+
+	// Create a deadline to wait for
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Doesn't block if no connections, but will otherwise wait until the timeout deadline
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
+	}
+
+	log.Println("Server exiting")
+	return nil
 }
 
 // (Step execution logic moved to steps.go)

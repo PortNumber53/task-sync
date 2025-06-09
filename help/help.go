@@ -120,6 +120,23 @@ Examples:
 	fmt.Println(helpText)
 }
 
+// PrintStepHelp prints help for the root step command
+func PrintStepHelp() {
+	helpText := `Manage steps in the task system.
+
+Usage:
+  task-sync step <command> [flags]
+
+Available Commands:
+  create    Create a new step
+  copy      Copy a step to another task
+  list      List all steps
+  
+Use "task-sync step <command> --help" for more information about a command.
+`
+	fmt.Println(helpText)
+}
+
 // PrintStepsListHelp prints help for the steps list command
 func PrintStepsListHelp() {
 	helpText := `List all steps in the task system.

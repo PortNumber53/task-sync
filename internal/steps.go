@@ -150,6 +150,69 @@ func executePendingSteps() {
 	}
 }
 
+// CopyStep copies a step to a new task with the given ID
+func CopyStep(stepID, toTaskID int) error {
+	pgURL, err := getPgURLFromEnv()
+	if err != nil {
+		return err
+	}
+	db, err := sql.Open("postgres", pgURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Start a transaction
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("error starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 1. Verify the target task exists
+	var targetTaskExists bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = $1)", toTaskID).Scan(&targetTaskExists)
+	if err != nil {
+		return fmt.Errorf("error checking target task: %w", err)
+	}
+	if !targetTaskExists {
+		return fmt.Errorf("target task with ID %d does not exist", toTaskID)
+	}
+
+	// 2. Get the source step data
+	var title, status, settings string
+	err = tx.QueryRow(
+		"SELECT title, status, settings FROM steps WHERE id = $1",
+		stepID,
+	).Scan(&title, &status, &settings)
+
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("source step with ID %d does not exist", stepID)
+	}
+	if err != nil {
+		return fmt.Errorf("error fetching source step: %w", err)
+	}
+
+	// 3. Create the new step in the target task with the same status as source
+	_, err = tx.Exec(
+		`INSERT INTO steps (task_id, title, settings, status, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, now(), now())`,
+		toTaskID, title, settings, status,
+	)
+
+	if err != nil {
+		return fmt.Errorf("error creating new step: %w", err)
+	}
+
+	// 4. Commit the transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error committing transaction: %w", err)
+	}
+
+	return nil
+}
+
+// storeStepResult stores the execution result of a step
 func storeStepResult(db *sql.DB, stepID int, result map[string]interface{}) {
 	resJson, _ := json.Marshal(result)
 	_, err := db.Exec(`UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2`, string(resJson), stepID)

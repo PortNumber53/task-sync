@@ -74,6 +74,28 @@ Examples:
 	fmt.Println(helpText)
 }
 
+func printStepCopyHelp() {
+	helpText := `Copy a step to a different task.
+
+Usage:
+  task-sync step copy --id STEP_ID --to-task-id TASK_ID
+
+Required Flags:
+  --id int         ID of the step to copy
+  --to-task-id int ID of the target task
+
+Options:
+  -h, --help    Show this help message and exit
+
+Examples:
+  # Copy step with ID 5 to task with ID 3
+  task-sync step copy --id 5 --to-task-id 3
+
+  # Show this help message
+  task-sync step copy --help`
+	fmt.Println(helpText)
+}
+
 func printStepCreateHelp() {
 	helpText := `Create a new step for a task.
 
@@ -264,70 +286,139 @@ func main() {
 		return
 
 	case "step":
-		if len(os.Args) < 3 || (os.Args[2] != "create" && os.Args[2] != "--help" && os.Args[2] != "-h") {
-			printStepCreateHelp()
+		// Check if we have a subcommand
+		if len(os.Args) < 3 {
+			fmt.Println("Available subcommands:")
+			fmt.Println("  create - Create a new step")
+			fmt.Println("  copy   - Copy a step to another task")
 			os.Exit(1)
 		}
 
-		// Check for help flag
-		help := false
-		for i := 2; i < len(os.Args); i++ {
+		subcommand := os.Args[2]
+
+		// Handle help flag for subcommands
+		showHelp := false
+		for i := 3; i < len(os.Args); i++ {
 			if os.Args[i] == "--help" || os.Args[i] == "-h" {
-				help = true
+				showHelp = true
 				break
 			}
 		}
 
-		if help {
-			printStepCreateHelp()
+		if showHelp {
+			switch subcommand {
+			case "create":
+				printStepCreateHelp()
+			case "copy":
+				printStepCopyHelp()
+			default:
+				fmt.Printf("Unknown subcommand: %s\n", subcommand)
+			}
 			os.Exit(0)
 		}
 
-		var taskRef, title, settings string
-		for i := 3; i < len(os.Args); i++ {
-			switch os.Args[i] {
-			case "--task":
-				if i+1 >= len(os.Args) {
-					fmt.Println("Error: --task requires a value")
-					printStepCreateHelp()
-					os.Exit(1)
+		switch os.Args[2] {
+		case "create":
+			// Handle step create command
+			var taskRef, title, settings string
+			for i := 3; i < len(os.Args); i++ {
+				switch os.Args[i] {
+				case "--task":
+					if i+1 >= len(os.Args) {
+						fmt.Println("Error: --task requires a value")
+						printStepCreateHelp()
+						os.Exit(1)
+					}
+					taskRef = os.Args[i+1]
+					i++
+				case "--title":
+					if i+1 >= len(os.Args) {
+						fmt.Println("Error: --title requires a value")
+						printStepCreateHelp()
+						os.Exit(1)
+					}
+					title = os.Args[i+1]
+					i++
+				case "--settings":
+					if i+1 >= len(os.Args) {
+						fmt.Println("Error: --settings requires a value")
+						printStepCreateHelp()
+						os.Exit(1)
+					}
+					settings = os.Args[i+1]
+					i++
 				}
-				taskRef = os.Args[i+1]
-				i++
-			case "--title":
-				if i+1 >= len(os.Args) {
-					fmt.Println("Error: --title requires a value")
-					printStepCreateHelp()
-					os.Exit(1)
-				}
-				title = os.Args[i+1]
-				i++
-			case "--settings":
-				if i+1 >= len(os.Args) {
-					fmt.Println("Error: --settings requires a value")
-					printStepCreateHelp()
-					os.Exit(1)
-				}
-				settings = os.Args[i+1]
-				i++
 			}
-		}
 
-		// Validate required arguments
-		if taskRef == "" || title == "" || settings == "" {
-			fmt.Println("Error: --task, --title, and --settings are required\n")
-			printStepCreateHelp()
-			os.Exit(1)
-		}
+			// Validate required arguments
+			if taskRef == "" || title == "" || settings == "" {
+				fmt.Println("Error: --task, --title, and --settings are required\n")
+				printStepCreateHelp()
+				os.Exit(1)
+			}
 
-		// Create the step
-		if err := internal.CreateStep(taskRef, title, settings); err != nil {
-			fmt.Printf("Error creating step: %v\n", err)
-			os.Exit(1)
-		}
+			// Create the step
+			if err := internal.CreateStep(taskRef, title, settings); err != nil {
+				fmt.Printf("Error creating step: %v\n", err)
+				os.Exit(1)
+			}
 
-		fmt.Println("Step created successfully.")
-		return
+			fmt.Println("Step created successfully.")
+			return
+
+		case "copy":
+			// Handle step copy command
+			var stepID, toTaskID int
+			var err error
+
+			// Parse command line arguments
+			for i := 3; i < len(os.Args); i++ {
+				switch os.Args[i] {
+				case "--id":
+					if i+1 >= len(os.Args) {
+						fmt.Println("Error: --id requires a value")
+						printStepCopyHelp()
+						os.Exit(1)
+					}
+					stepID, err = strconv.Atoi(os.Args[i+1])
+					if err != nil {
+						fmt.Printf("Error: invalid step ID '%s'\n", os.Args[i+1])
+						printStepCopyHelp()
+						os.Exit(1)
+					}
+					i++
+				case "--to-task-id":
+					if i+1 >= len(os.Args) {
+						fmt.Println("Error: --to-task-id requires a value")
+						printStepCopyHelp()
+						os.Exit(1)
+					}
+					toTaskID, err = strconv.Atoi(os.Args[i+1])
+					if err != nil {
+						fmt.Printf("Error: invalid task ID '%s'\n", os.Args[i+1])
+						printStepCopyHelp()
+						os.Exit(1)
+					}
+					i++
+				}
+			}
+
+			// Validate required arguments
+			if stepID <= 0 || toTaskID <= 0 {
+				fmt.Println("Error: --id and --to-task-id are required and must be positive integers\n")
+				printStepCopyHelp()
+				os.Exit(1)
+			}
+
+			// Copy the step
+			if err := internal.CopyStep(stepID, toTaskID); err != nil {
+				fmt.Printf("Error copying step: %v\n", err)
+				os.Exit(1)
+			}
+
+			fmt.Printf("Step with ID %d has been copied to task %d\n", stepID, toTaskID)
+			return
+		}
 
 	case "task":
 		if len(os.Args) < 3 {

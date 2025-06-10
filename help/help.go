@@ -137,12 +137,12 @@ Use "task-sync step <command> --help" for more information about a command.
 	fmt.Println(helpText)
 }
 
-// PrintStepsListHelp prints help for the steps list command
+// PrintStepsListHelp prints help for the step list command
 func PrintStepsListHelp() {
 	helpText := `List all steps in the task system.
 
 Usage:
-  task-sync steps list [flags]
+  task-sync step list [flags]
 
 Flags:
   --full    Show additional details including step settings
@@ -150,10 +150,10 @@ Flags:
 
 Examples:
   # List all steps
-  task-sync steps list
+  task-sync step list
 
   # Show all steps with full details
-  task-sync steps list --full`
+  task-sync step list --full`
 	fmt.Println(helpText)
 }
 
@@ -177,12 +177,11 @@ Examples:
 	fmt.Println(helpText)
 }
 
-// PrintTasksListHelp prints help for the tasks list command
+// PrintTasksListHelp prints help for the task list command
 func PrintTasksListHelp() {
 	helpText := `List all tasks in the system.
 
 Usage:
-  task-sync tasks list
   task-sync task list
 
 Options:
@@ -190,13 +189,10 @@ Options:
 
 Examples:
   # List all tasks
-  task-sync tasks list
-
-  # Alternative syntax
   task-sync task list
 
   # Show this help message
-  task-sync tasks list --help`
+  task-sync task list --help`
 	fmt.Println(helpText)
 }
 

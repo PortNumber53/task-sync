@@ -57,57 +57,6 @@ func main() {
 			os.Exit(1)
 		}
 		return
-	case "tasks":
-		// Check for help flag or invalid subcommand
-		if len(os.Args) < 3 || (os.Args[2] != "list" && os.Args[2] != "--help" && os.Args[2] != "-h") {
-			helpPkg.PrintTasksListHelp()
-			os.Exit(1)
-		}
-
-		// Check for help flag
-		help := false
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--help" || os.Args[i] == "-h" {
-				help = true
-				break
-			}
-		}
-
-		if help {
-			helpPkg.PrintTasksListHelp()
-			os.Exit(0)
-		}
-
-		if err := internal.ListTasks(); err != nil {
-			fmt.Printf("Error listing tasks: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	case "steps":
-		if len(os.Args) < 3 || os.Args[2] != "list" {
-			helpPkg.PrintStepsListHelp()
-			os.Exit(1)
-		}
-		full := false
-		help := false
-		for i := 3; i < len(os.Args); i++ {
-			switch os.Args[i] {
-			case "--full":
-				full = true
-			case "--help", "-h":
-				help = true
-			}
-		}
-		if help {
-			helpPkg.PrintStepsListHelp()
-			os.Exit(0)
-		}
-		if err := internal.ListSteps(full); err != nil {
-			fmt.Printf("List steps error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-
 	case "step":
 		// Check for help flag
 		if len(os.Args) >= 3 && (os.Args[2] == "--help" || os.Args[2] == "-h") {
@@ -138,6 +87,8 @@ func main() {
 				helpPkg.PrintStepCreateHelp()
 			case "copy":
 				helpPkg.PrintStepCopyHelp()
+			case "list":
+				helpPkg.PrintStepsListHelp()
 			default:
 				fmt.Printf("Unknown subcommand: %s\n", subcommand)
 			}
@@ -145,6 +96,27 @@ func main() {
 		}
 
 		switch os.Args[2] {
+		case "list":
+			full := false
+			help := false
+			for i := 3; i < len(os.Args); i++ {
+				switch os.Args[i] {
+				case "--full":
+					full = true
+				case "--help", "-h":
+					help = true
+				}
+			}
+			if help {
+				helpPkg.PrintStepsListHelp()
+				os.Exit(0)
+			}
+			if err := internal.ListSteps(full); err != nil {
+				fmt.Printf("List steps error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+
 		case "create":
 			// Handle step create command
 			var taskRef, title, settings string
@@ -419,15 +391,15 @@ func main() {
 			}
 		}
 	default:
-		valid := map[string]bool{"migrate": true, "task": true, "tasks": true, "step": true, "steps": true, "serve": true}
+		valid := map[string]bool{"migrate": true, "task": true, "step": true, "serve": true}
 		if !valid[os.Args[1]] {
 			fmt.Println("Unknown command:", os.Args[1])
 			fmt.Println("Commands:")
 			fmt.Println("  task-sync migrate [up|down|status|reset]")
 			fmt.Println("  task-sync task create --name <name> --status <status>")
-			fmt.Println("  task-sync tasks list")
+			fmt.Println("  task-sync task list")
 			fmt.Println("  task-sync step create --task <id|name> --title <title> --settings <json>")
-			fmt.Println("  task-sync steps list [--full]")
+			fmt.Println("  task-sync step list [--full]")
 			fmt.Println("  task-sync serve [--remote]")
 			fmt.Println()
 			fmt.Println("  --remote: Listen on all interfaces (not just localhost) for API server")

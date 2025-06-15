@@ -19,7 +19,7 @@ func CreateTask(name, status, localPath string) error {
 	if !isValidTaskStatus(status) {
 		return fmt.Errorf("invalid status: %s (must be one of active|inactive|disabled|running)", status)
 	}
-	pgURL, err := getPgURLFromEnv()
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		return err
 	}
@@ -53,7 +53,7 @@ func CreateTask(name, status, localPath string) error {
 // ListTasks prints all tasks in the DB
 // DeleteTask deletes a task and all its associated steps by task ID
 func DeleteTask(taskID int) error {
-	pgURL, err := getPgURLFromEnv()
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		return fmt.Errorf("database configuration error: %w", err)
 	}
@@ -98,7 +98,7 @@ func DeleteTask(taskID int) error {
 }
 
 func ListTasks() error {
-	pgURL, err := getPgURLFromEnv()
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		return err
 	}

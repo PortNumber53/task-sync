@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/lib/pq"
 
@@ -72,6 +76,26 @@ func main() {
 
 		subcommand := os.Args[2]
 
+		// step activate <id>
+		if subcommand == "activate" {
+			if len(os.Args) < 4 || os.Args[3] == "--help" || os.Args[3] == "-h" {
+				helpPkg.PrintStepActivateHelp()
+				os.Exit(0)
+			}
+			stepID, err := strconv.Atoi(os.Args[3])
+			if err != nil {
+				fmt.Printf("Invalid step ID: %v\n", os.Args[3])
+				os.Exit(1)
+			}
+			err = internal.ActivateStep(stepID)
+			if err != nil {
+				fmt.Printf("Failed to activate step: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Step %d activated.\n", stepID)
+			os.Exit(0)
+		}
+
 		// Handle help flag for subcommands
 		showHelp := false
 		for i := 3; i < len(os.Args); i++ {
@@ -89,6 +113,8 @@ func main() {
 				helpPkg.PrintStepCopyHelp()
 			case "list":
 				helpPkg.PrintStepsListHelp()
+			case "edit":
+				helpPkg.PrintStepEditHelp()
 			default:
 				fmt.Printf("Unknown subcommand: %s\n", subcommand)
 			}
@@ -163,6 +189,162 @@ func main() {
 			}
 
 			fmt.Println("Step created successfully.")
+			return
+
+		case "edit":
+			// Handle step edit command
+			if len(os.Args) < 4 {
+				helpPkg.PrintStepEditHelp()
+				os.Exit(1)
+			}
+
+			// Parse the step ID
+			stepID, err := strconv.Atoi(os.Args[3])
+			if err != nil {
+				fmt.Printf("Error: invalid step ID '%s'\n", os.Args[3])
+				helpPkg.PrintStepEditHelp()
+				os.Exit(1)
+			}
+
+			// Parse --set flags
+			sets := make(map[string]string)
+			for i := 4; i < len(os.Args); i++ {
+				if os.Args[i] == "--set" {
+					if i+1 >= len(os.Args) {
+						fmt.Println("Error: --set requires a key=value argument")
+						helpPkg.PrintStepEditHelp()
+						os.Exit(1)
+					}
+					kv := strings.SplitN(os.Args[i+1], "=", 2)
+					if len(kv) != 2 {
+						fmt.Printf("Error: invalid format for --set, expected key=value, got '%s'\n", os.Args[i+1])
+						helpPkg.PrintStepEditHelp()
+						os.Exit(1)
+					}
+					sets[kv[0]] = kv[1]
+					i++
+				}
+			}
+
+			if len(sets) == 0 {
+				fmt.Println("Error: no --set flags provided")
+				helpPkg.PrintStepEditHelp()
+				os.Exit(1)
+			}
+
+			// Connect to the database
+			pgURL, err := internal.GetPgURLFromEnv()
+			if err != nil {
+				fmt.Printf("Database configuration error: %v\n", err)
+				os.Exit(1)
+			}
+			db, err := sql.Open("postgres", pgURL)
+			if err != nil {
+				fmt.Printf("Database connection error: %v\n", err)
+				os.Exit(1)
+			}
+			defer db.Close()
+
+			// Apply each set operation
+			for path, value := range sets {
+				// Special handling for 'results' field
+				if path == "results" {
+					if value == "null" {
+						if err := internal.ClearStepResults(db, stepID); err != nil {
+							fmt.Printf("Error clearing results for step %d: %v\n", stepID, err)
+							os.Exit(1)
+						}
+						fmt.Printf("Cleared results for step %d\n", stepID)
+						continue
+					}
+
+					// Try to parse as JSON if it's not "null"
+					var val interface{}
+					if err := json.Unmarshal([]byte(value), &val); err != nil {
+						// If it's not valid JSON, use it as a string
+						val = value
+					}
+
+					if err := internal.EditStepSettings(db, stepID, path, val); err != nil {
+						fmt.Printf("Error updating results for step %d: %v\n", stepID, err)
+						os.Exit(1)
+					}
+					fmt.Printf("Updated results for step %d\n", stepID)
+					continue
+				}
+
+				// Handle regular settings updates
+				var val interface{}
+				if err := json.Unmarshal([]byte(value), &val); err != nil {
+					// If it's not valid JSON, use it as a string
+					val = value
+				}
+
+				if err := internal.EditStepSettings(db, stepID, path, val); err != nil {
+					fmt.Printf("Error updating step %d: %v\n", stepID, err)
+					os.Exit(1)
+				}
+				fmt.Printf("Updated %s = %s\n", path, value)
+			}
+
+			fmt.Printf("Step %d updated successfully\n", stepID)
+			return
+
+		case "info":
+			// Handle step info command
+			if len(os.Args) < 4 {
+				helpPkg.PrintStepInfoHelp()
+				os.Exit(1)
+			}
+
+			// Parse the step ID
+			stepID, err := strconv.Atoi(os.Args[3])
+			if err != nil {
+				fmt.Printf("Error: invalid step ID '%s'\n", os.Args[3])
+				helpPkg.PrintStepInfoHelp()
+				os.Exit(1)
+			}
+
+			// Get step info
+			info, err := internal.GetStepInfo(stepID)
+			if err != nil {
+				fmt.Printf("Error getting step info: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Format and print the step info
+			fmt.Printf("Step #%d: %s\n", info.ID, info.Title)
+			fmt.Printf("Task ID: %d\n", info.TaskID)
+			fmt.Printf("Status: %s\n", info.Status)
+			fmt.Printf("Created: %s\n", info.CreatedAt.Format(time.RFC3339))
+			fmt.Printf("Updated: %s\n", info.UpdatedAt.Format(time.RFC3339))
+
+			// Print settings
+			fmt.Println("\nSettings:")
+			var settingsBuf bytes.Buffer
+			encoder := json.NewEncoder(&settingsBuf)
+			encoder.SetEscapeHTML(false)
+			encoder.SetIndent("  ", "  ")
+			if err := encoder.Encode(info.Settings); err != nil {
+				fmt.Printf("Error formatting settings: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(settingsBuf.String())
+
+			// Print results if available
+			if len(info.Results) > 0 {
+				fmt.Println("\nResults:")
+				var resultsBuf bytes.Buffer
+				encoder := json.NewEncoder(&resultsBuf)
+				encoder.SetEscapeHTML(false)
+				encoder.SetIndent("  ", "  ")
+				if err := encoder.Encode(info.Results); err != nil {
+					fmt.Printf("Error formatting results: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println(resultsBuf.String())
+			}
+
 			return
 
 		case "copy":

@@ -157,27 +157,31 @@ func RunAPIServer(listenAddr string) error {
 // (Step execution logic moved to steps.go)
 
 
-// RunMigrate runs DB migrations up or down
-func getPgURLFromEnv() (string, error) {
-	_ = godotenv.Load()
-	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
-	user := os.Getenv("DB_USER")
-	password := os.Getenv("DB_PASSWORD")
-	dbname := os.Getenv("DB_NAME")
-	ssl := os.Getenv("DB_SSL")
-	if host == "" || port == "" || user == "" || password == "" || dbname == "" {
-		return "", fmt.Errorf("missing one or more required DB environment variables")
+// GetPgURLFromEnv loads the database connection URL from environment variables
+// It checks for DATABASE_URL first, then falls back to individual DB_* variables
+func GetPgURLFromEnv() (string, error) {
+	err := godotenv.Load()
+	if err != nil {
+		return "", fmt.Errorf("error loading .env file: %w", err)
 	}
-	sslmode := "disable"
-	if ssl == "true" || ssl == "1" {
-		sslmode = "require"
+
+	pgURL := os.Getenv("DATABASE_URL")
+	if pgURL == "" {
+		// Construct from individual components if DATABASE_URL not set
+		pgURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+			os.Getenv("DB_USER"),
+			os.Getenv("DB_PASSWORD"),
+			os.Getenv("DB_HOST"),
+			os.Getenv("DB_PORT"),
+			os.Getenv("DB_NAME"),
+		)
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, password, host, port, dbname, sslmode), nil
+	return pgURL, nil
 }
 
 func RunMigrate(direction string) error {
-	pgURL, err := getPgURLFromEnv()
+	// Get database URL from environment
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		return err
 	}
@@ -206,7 +210,8 @@ func RunMigrate(direction string) error {
 }
 
 func RunMigrateReset() error {
-	pgURL, err := getPgURLFromEnv()
+	// Get database URL from environment
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		return err
 	}
@@ -237,7 +242,8 @@ func RunMigrateReset() error {
 
 // RunMigrateStatus prints the status of migrations using golang-migrate's schema_migrations table
 func RunMigrateStatus() error {
-	pgURL, err := getPgURLFromEnv()
+	// Get database URL from environment
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		return err
 	}

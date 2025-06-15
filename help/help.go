@@ -97,6 +97,25 @@ Examples:
 	fmt.Println(helpText)
 }
 
+// PrintStepInfoHelp prints help for the step info command
+func PrintStepInfoHelp() {
+	helpText := `Show detailed information about a specific step.
+
+Usage:
+  task-sync step info STEP_ID
+
+Arguments:
+  STEP_ID    ID of the step to show information about
+
+Examples:
+  # Show information about step with ID 5
+  task-sync step info 5
+
+  # Show this help message
+  task-sync step info --help`
+	fmt.Println(helpText)
+}
+
 // PrintStepCopyHelp prints help for the step copy command
 func PrintStepCopyHelp() {
 	helpText := `Copy a step to a different task.
@@ -120,6 +139,37 @@ Examples:
 	fmt.Println(helpText)
 }
 
+// PrintStepEditHelp prints help for the step edit command
+func PrintStepEditHelp() {
+	helpText := `Edit a step's settings using dot notation.
+
+Usage:
+  task-sync step edit STEP_ID --set KEY=VALUE [--set KEY2=VALUE2 ...]
+
+Arguments:
+  STEP_ID    ID of the step to edit
+
+Required Flags:
+  --set KEY=VALUE  Set a value in the step's settings using dot notation
+
+Examples:
+  # Update the image tag for a docker_run step
+  task-sync step edit 9 --set docker_run.image_tag='ansible-inventory'
+
+  # Set multiple values at once
+  task-sync step edit 9 --set docker_run.image_tag='new-image' --set docker_run.container_name='my-container'
+
+  # Set a nested value
+  task-sync step edit 9 --set 'docker_run.environment.DEBUG=true'
+
+  # Set a JSON value (use single quotes around the value)
+  task-sync step edit 9 --set docker_run.ports='["8080:80"]'
+
+  # Show this help message
+  task-sync step edit --help`
+	fmt.Println(helpText)
+}
+
 // PrintStepHelp prints help for the root step command
 func PrintStepHelp() {
 	helpText := `Manage steps in the task system.
@@ -128,12 +178,34 @@ Usage:
   task-sync step <command> [flags]
 
 Available Commands:
-  create    Create a new step
-  copy      Copy a step to another task
-  list      List all steps
+  create     Create a new step
+  copy       Copy a step to another task
+  edit       Edit a step's settings
+  info       Show detailed information about a step
+  list       List all steps
+  activate   Set a step's status to active
   
 Use "task-sync step <command> --help" for more information about a command.
 `
+	fmt.Println(helpText)
+}
+
+// PrintStepActivateHelp prints help for the step activate command
+func PrintStepActivateHelp() {
+	helpText := `Set a step's status to active.
+
+Usage:
+  task-sync step activate STEP_ID
+
+Arguments:
+  STEP_ID    ID of the step to activate
+
+Examples:
+  # Activate step with ID 5
+  task-sync step activate 5
+
+  # Show this help message
+  task-sync step activate --help`
 	fmt.Println(helpText)
 }
 

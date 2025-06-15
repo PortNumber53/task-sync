@@ -13,11 +13,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // CreateStep inserts a new step for a task. taskRef can be the task id or name. Settings must be a valid JSON string.
 func CreateStep(taskRef, title, settings string) error {
-	pgURL, err := getPgURLFromEnv()
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		return err
 	}
@@ -51,9 +52,35 @@ func CreateStep(taskRef, title, settings string) error {
 	return err
 }
 
+// ActivateStep sets the status of a step to 'active'
+func ActivateStep(stepID int) error {
+	pgURL, err := GetPgURLFromEnv()
+	if err != nil {
+		return err
+	}
+	db, err := sql.Open("postgres", pgURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	result, err := db.Exec(`UPDATE steps SET status = 'active', updated_at = NOW() WHERE id = $1`, stepID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("no step found with ID %d", stepID)
+	}
+	return nil
+}
+
 // ListSteps prints all steps in the DB. If full is true, prints settings column too.
 func ListSteps(full bool) error {
-	pgURL, err := getPgURLFromEnv()
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		return err
 	}
@@ -207,15 +234,38 @@ func executeDockerBuild(workDir string, config DockerBuildConfig, stepID int, db
 		cmdParts[i] = strings.ReplaceAll(part, "%%IMAGE_TAG%%", config.DockerBuild.ImageTag)
 	}
 
+	// Create buffers to capture output
+	var stdoutBuf, stderrBuf bytes.Buffer
+
 	// Execute the command
 	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
 	cmd.Dir = workDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	
+	// Create a multi-writer that writes to both the buffer and stdout/stderr
+	stdoutWriters := []io.Writer{&stdoutBuf, os.Stdout}
+	stderrWriters := []io.Writer{&stderrBuf, os.Stderr}
+	
+	cmd.Stdout = io.MultiWriter(stdoutWriters...)
+	cmd.Stderr = io.MultiWriter(stderrWriters...)
 
 	stepLogger.Printf("Step %d: Executing docker build: %v\n", stepID, strings.Join(cmdParts, " "))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker build failed: %w", err)
+	err := cmd.Run()
+	
+	// Always log the full output for debugging
+	stdoutOutput := stdoutBuf.String()
+	stderrOutput := stderrBuf.String()
+	
+	if len(stdoutOutput) > 0 {
+		stepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
+	}
+	if len(stderrOutput) > 0 {
+		stepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
+	}
+
+	if err != nil {
+		// Include both stdout and stderr in the error message
+		return fmt.Errorf("docker build failed: %v\nStdout:\n%s\nStderr:\n%s", 
+			err, stdoutOutput, stderrOutput)
 	}
 
 	// Get the image ID
@@ -258,31 +308,42 @@ func getDockerImageID(tag string) (string, error) {
 type stepExec struct {
 	StepID    int
 	TaskID    int
+	Title     string
 	Settings  string
 	LocalPath string
 }
 
-func executePendingSteps() {
-	pgURL, err := getPgURLFromEnv()
+type StepInfo struct {
+	ID         int                    `json:"id"`
+	TaskID     int                    `json:"task_id"`
+	Title      string                 `json:"title"`
+	Status     string                 `json:"status"`
+	Settings   map[string]interface{} `json:"settings"`
+	Results    map[string]interface{} `json:"results,omitempty"`
+	CreatedAt  time.Time              `json:"created_at"`
+	UpdatedAt  time.Time              `json:"updated_at"`
+	RawResults *string                `json:"-"` // Raw JSON string from the database
+}
+
+func executePendingSteps() error {
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		stepLogger.Println("DB config error:", err)
-		return
+		return err
 	}
 	db, err := sql.Open("postgres", pgURL)
 	if err != nil {
 		stepLogger.Println("DB open error:", err)
-		return
+		return err
 	}
 	defer db.Close()
 
-	// First, process file_exists steps
-	processFileExistsSteps(db)
-
-	// Then process docker_build steps
-	processDockerBuildSteps(db)
-
-	// Then process docker_rubrics steps
-	processDockerRubricsSteps(db)
+	// Process steps in order of dependencies
+	processFileExistsSteps(db)     // First, check file existence
+	processDockerBuildSteps(db)    // Then build Docker images
+	processDockerRunSteps(db)      // Then run Docker containers
+	processDockerRubricsSteps(db)  // Finally, run Docker rubrics
+	return nil
 }
 
 func processFileExistsSteps(db *sql.DB) {
@@ -585,8 +646,76 @@ func processDockerBuildSteps(db *sql.DB) {
 }
 
 // CopyStep copies a step to a new task with the given ID
+// GetStepInfo retrieves detailed information about a specific step by ID
+func GetStepInfo(stepID int) (*StepInfo, error) {
+	pgURL, err := GetPgURLFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("postgres", pgURL)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	var info StepInfo
+	var settingsStr, resultsStr sql.NullString
+	var createdAt, updatedAt time.Time
+
+	err = db.QueryRow(`
+		SELECT 
+			s.id, s.task_id, s.title, s.status, 
+			s.settings::text, s.results::text,
+			s.created_at, s.updated_at
+		FROM steps s
+		WHERE s.id = $1
+	`, stepID).Scan(
+		&info.ID, &info.TaskID, &info.Title, &info.Status,
+		&settingsStr, &resultsStr,
+		&createdAt, &updatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("no step found with ID %d", stepID)
+		}
+		return nil, fmt.Errorf("error fetching step: %w", err)
+	}
+
+	// Store raw results
+	if resultsStr.Valid {
+		info.RawResults = &resultsStr.String
+	}
+
+	// Parse settings JSON if exists
+	if settingsStr.Valid && settingsStr.String != "" {
+		decoder := json.NewDecoder(strings.NewReader(settingsStr.String))
+		decoder.UseNumber()
+		if err := decoder.Decode(&info.Settings); err != nil {
+			return nil, fmt.Errorf("error parsing settings: %w", err)
+		}
+	} else {
+		info.Settings = make(map[string]interface{})
+	}
+
+	// Only parse results if they exist and are not null
+	if resultsStr.Valid && resultsStr.String != "" && resultsStr.String != "null" {
+		info.Results = make(map[string]interface{})
+		decoder := json.NewDecoder(strings.NewReader(resultsStr.String))
+		decoder.UseNumber()
+		if err := decoder.Decode(&info.Results); err != nil {
+			return nil, fmt.Errorf("error parsing results: %w", err)
+		}
+	}
+
+	info.CreatedAt = createdAt
+	info.UpdatedAt = updatedAt
+
+	return &info, nil
+}
+
 func CopyStep(stepID, toTaskID int) error {
-	pgURL, err := getPgURLFromEnv()
+	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		return err
 	}
@@ -641,6 +770,95 @@ func CopyStep(stepID, toTaskID int) error {
 	// 4. Commit the transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("error committing transaction: %w", err)
+	}
+
+	return nil
+}
+
+// ClearStepResults clears the results for a step
+func ClearStepResults(db *sql.DB, stepID int) error {
+	_, err := db.Exec(
+		"UPDATE steps SET results = NULL, updated_at = NOW() WHERE id = $1",
+		stepID,
+	)
+	if err != nil {
+		return fmt.Errorf("error clearing step results: %w", err)
+	}
+	return nil
+}
+
+// EditStepSettings updates a specific field in the step's settings using dot notation
+// For example: EditStepSettings(db, 1, "docker_run.image_tag", "new-image:latest")
+// Special case: if path is "results", it will update the results column directly
+func EditStepSettings(db *sql.DB, stepID int, path string, value interface{}) error {
+	// Special case for updating results directly
+	if path == "results" {
+		if value == nil {
+			return ClearStepResults(db, stepID)
+		}
+		// Convert value to JSON string if it's not already
+		resultsJSON, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("error marshaling results: %w", err)
+		}
+		_, err = db.Exec(
+			"UPDATE steps SET results = $1::jsonb, updated_at = NOW() WHERE id = $2",
+			string(resultsJSON),
+			stepID,
+		)
+		return err
+	}
+	// Get current settings
+	var settingsJSON []byte
+	err := db.QueryRow("SELECT settings FROM steps WHERE id = $1", stepID).Scan(&settingsJSON)
+	if err != nil {
+		return fmt.Errorf("error getting step settings: %w", err)
+	}
+
+	// Parse settings into a map
+	var settings map[string]interface{}
+	decoder := json.NewDecoder(bytes.NewReader(settingsJSON))
+	decoder.UseNumber() // Preserve number types
+	if err := decoder.Decode(&settings); err != nil {
+		return fmt.Errorf("error parsing settings: %w", err)
+	}
+
+	// Split the path by dots to traverse the JSON structure
+	parts := strings.Split(path, ".")
+	current := settings
+
+	// Navigate to the parent of the target field
+	for i := 0; i < len(parts)-1; i++ {
+		part := parts[i]
+		if next, ok := current[part].(map[string]interface{}); ok {
+			current = next
+		} else {
+			// Create nested maps for non-existent paths
+			current[part] = make(map[string]interface{})
+			current = current[part].(map[string]interface{})
+		}
+	}
+
+	// Set the value at the final path component
+	current[parts[len(parts)-1]] = value
+
+	// Convert back to JSON without HTML escaping
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "") // No indentation to match existing format
+	if err := encoder.Encode(settings); err != nil {
+		return fmt.Errorf("error marshaling updated settings: %w", err)
+	}
+
+	// Update the database
+	_, err = db.Exec(
+		"UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2",
+		strings.TrimSpace(buf.String()),
+		stepID,
+	)
+	if err != nil {
+		return fmt.Errorf("error updating step: %w", err)
 	}
 
 	return nil

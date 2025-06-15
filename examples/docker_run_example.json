@@ -1,0 +1,19 @@
+{
+  "docker_run": {
+    "depends_on": [
+      {
+        "id": 1
+      }
+    ],
+    "image_tag": "nginx:latest",
+    "container": "my-nginx-container",
+    "ports": {
+      "8080": "80"
+    },
+    "auto_remove": true,
+    "env": {
+      "NGINX_HOST": "localhost",
+      "NGINX_PORT": "80"
+    }
+  }
+}

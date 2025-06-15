@@ -240,21 +240,21 @@ func executeDockerBuild(workDir string, config DockerBuildConfig, stepID int, db
 	// Execute the command
 	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
 	cmd.Dir = workDir
-	
+
 	// Create a multi-writer that writes to both the buffer and stdout/stderr
 	stdoutWriters := []io.Writer{&stdoutBuf, os.Stdout}
 	stderrWriters := []io.Writer{&stderrBuf, os.Stderr}
-	
+
 	cmd.Stdout = io.MultiWriter(stdoutWriters...)
 	cmd.Stderr = io.MultiWriter(stderrWriters...)
 
 	stepLogger.Printf("Step %d: Executing docker build: %v\n", stepID, strings.Join(cmdParts, " "))
 	err := cmd.Run()
-	
+
 	// Always log the full output for debugging
 	stdoutOutput := stdoutBuf.String()
 	stderrOutput := stderrBuf.String()
-	
+
 	if len(stdoutOutput) > 0 {
 		stepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
 	}
@@ -264,7 +264,7 @@ func executeDockerBuild(workDir string, config DockerBuildConfig, stepID int, db
 
 	if err != nil {
 		// Include both stdout and stderr in the error message
-		return fmt.Errorf("docker build failed: %v\nStdout:\n%s\nStderr:\n%s", 
+		return fmt.Errorf("docker build failed: %v\nStdout:\n%s\nStderr:\n%s",
 			err, stdoutOutput, stderrOutput)
 	}
 
@@ -339,10 +339,10 @@ func executePendingSteps() error {
 	defer db.Close()
 
 	// Process steps in order of dependencies
-	processFileExistsSteps(db)     // First, check file existence
-	processDockerBuildSteps(db)    // Then build Docker images
-	processDockerRunSteps(db)      // Then run Docker containers
-	processDockerRubricsSteps(db)  // Finally, run Docker rubrics
+	processFileExistsSteps(db)    // First, check file existence
+	processDockerBuildSteps(db)   // Then build Docker images
+	processDockerRunSteps(db)     // Then run Docker containers
+	processDockerRubricsSteps(db) // Finally, run Docker rubrics
 	return nil
 }
 
@@ -663,8 +663,8 @@ func GetStepInfo(stepID int) (*StepInfo, error) {
 	var createdAt, updatedAt time.Time
 
 	err = db.QueryRow(`
-		SELECT 
-			s.id, s.task_id, s.title, s.status, 
+		SELECT
+			s.id, s.task_id, s.title, s.status,
 			s.settings::text, s.results::text,
 			s.created_at, s.updated_at
 		FROM steps s

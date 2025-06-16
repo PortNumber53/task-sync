@@ -76,6 +76,19 @@ func main() {
 
 		subcommand := os.Args[2]
 
+		// Open DB connection for all step subcommands that need it
+		pgURL, err := internal.GetPgURLFromEnv()
+		if err != nil {
+			fmt.Printf("Database configuration error: %v\n", err)
+			os.Exit(1)
+		}
+		db, err := sql.Open("postgres", pgURL)
+		if err != nil {
+			fmt.Printf("Database connection error: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+
 		// step activate <id>
 		if subcommand == "activate" {
 			if len(os.Args) < 4 || os.Args[3] == "--help" || os.Args[3] == "-h" {
@@ -87,7 +100,7 @@ func main() {
 				fmt.Printf("Invalid step ID: %v\n", os.Args[3])
 				os.Exit(1)
 			}
-			err = internal.ActivateStep(stepID)
+			err = internal.ActivateStep(db, stepID)
 			if err != nil {
 				fmt.Printf("Failed to activate step: %v\n", err)
 				os.Exit(1)
@@ -137,7 +150,7 @@ func main() {
 				helpPkg.PrintStepsListHelp()
 				os.Exit(0)
 			}
-			if err := internal.ListSteps(full); err != nil {
+			if err := internal.ListSteps(db, full); err != nil {
 				fmt.Printf("List steps error: %v\n", err)
 				os.Exit(1)
 			}
@@ -183,7 +196,7 @@ func main() {
 			}
 
 			// Create the step
-			if err := internal.CreateStep(taskRef, title, settings); err != nil {
+			if err := internal.CreateStep(db, taskRef, title, settings); err != nil {
 				fmt.Printf("Error creating step: %v\n", err)
 				os.Exit(1)
 			}
@@ -306,7 +319,7 @@ func main() {
 			}
 
 			// Get step info
-			info, err := internal.GetStepInfo(stepID)
+			info, err := internal.GetStepInfo(db, stepID)
 			if err != nil {
 				fmt.Printf("Error getting step info: %v\n", err)
 				os.Exit(1)
@@ -458,6 +471,58 @@ func main() {
 
 			fmt.Printf("Task with ID %d and all its steps have been deleted.\n", taskID)
 			return
+
+			case "info":
+				var taskID int
+				help := false
+
+				// Parse command line arguments
+				for i := 3; i < len(os.Args); i++ {
+					switch os.Args[i] {
+					case "--id":
+						if i+1 >= len(os.Args) {
+							fmt.Println("Error: --id requires a value")
+							os.Exit(1)
+						}
+						var err error
+						taskID, err = strconv.Atoi(os.Args[i+1])
+						if err != nil {
+							fmt.Printf("Error: invalid task ID '%s'\n", os.Args[i+1])
+							os.Exit(1)
+						}
+						i++
+					case "--help", "-h":
+						help = true
+					}
+				}
+
+				if help {
+					fmt.Println("Usage: task info --id <id>")
+					os.Exit(0)
+				}
+
+				if taskID <= 0 {
+					fmt.Println("Error: --id is required and must be a positive integer")
+					os.Exit(1)
+				}
+
+				task, err := internal.GetTaskInfo(taskID)
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println("Task Information:")
+				fmt.Printf("  ID:        %d\n", task.ID)
+				fmt.Printf("  Name:      %s\n", task.Name)
+				fmt.Printf("  Status:    %s\n", task.Status)
+				if task.LocalPath != nil {
+					fmt.Printf("  LocalPath: %s\n", *task.LocalPath)
+				} else {
+					fmt.Printf("  LocalPath: <none>\n")
+				}
+				fmt.Printf("  Created:   %s\n", task.CreatedAt)
+				fmt.Printf("  Updated:   %s\n", task.UpdatedAt)
+				return
 
 		case "create":
 			var name, status, localPath string

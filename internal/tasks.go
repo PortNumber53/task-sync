@@ -50,6 +50,50 @@ func CreateTask(name, status, localPath string) error {
 	return err
 }
 
+// Task represents a task in the system
+// LocalPath is optional and may be empty
+// CreatedAt and UpdatedAt are ISO8601 strings
+//
+type Task struct {
+	ID        int
+	Name      string
+	Status    string
+	LocalPath *string
+	CreatedAt string
+	UpdatedAt string
+}
+
+// GetTaskInfo fetches a task by ID. Returns (*Task, error). If not found, error is returned.
+func GetTaskInfo(taskID int) (*Task, error) {
+	pgURL, err := GetPgURLFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("postgres", pgURL)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	var t Task
+	var localPath sql.NullString
+	err = db.QueryRow(`SELECT id, name, status, local_path, created_at, updated_at FROM tasks WHERE id = $1`, taskID).Scan(
+		&t.ID, &t.Name, &t.Status, &localPath, &t.CreatedAt, &t.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("no task found with ID %d", taskID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if localPath.Valid {
+		t.LocalPath = &localPath.String
+	} else {
+		t.LocalPath = nil
+	}
+	return &t, nil
+}
+
 // ListTasks prints all tasks in the DB
 // DeleteTask deletes a task and all its associated steps by task ID
 func DeleteTask(taskID int) error {

@@ -37,10 +37,10 @@ Available Commands:
 Examples:
   # Apply all pending migrations
   task-sync migrate up
-  
+
   # Show migration status
   task-sync migrate status
-  
+
   # Reset the database
   task-sync migrate reset`
 	fmt.Println(helpText)
@@ -64,7 +64,7 @@ Options:
 Examples:
   # Create a new task with default status
   task-sync task create --name "My Task"
-  
+
   # Create a task with a specific status and local path
   task-sync task create --name "Build Project" --status active --local-path "/path/to/project"`
 	fmt.Println(helpText)
@@ -184,7 +184,7 @@ Available Commands:
   info       Show detailed information about a step
   list       List all steps
   activate   Set a step's status to active
-  
+
 Use "task-sync step <command> --help" for more information about a command.
 `
 	fmt.Println(helpText)
@@ -282,7 +282,7 @@ Options:
 Examples:
   # Start server on localhost only (default)
   task-sync serve
-  
+
   # Start server on all network interfaces
   task-sync serve --remote`
 	fmt.Println(helpText)

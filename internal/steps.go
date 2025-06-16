@@ -17,17 +17,7 @@ import (
 )
 
 // CreateStep inserts a new step for a task. taskRef can be the task id or name. Settings must be a valid JSON string.
-func CreateStep(taskRef, title, settings string) error {
-	pgURL, err := GetPgURLFromEnv()
-	if err != nil {
-		return err
-	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
+func CreateStep(db *sql.DB, taskRef, title, settings string) error {
 	// Try to parse settings as JSON
 	var js interface{}
 	if err := json.Unmarshal([]byte(settings), &js); err != nil {
@@ -48,22 +38,12 @@ func CreateStep(taskRef, title, settings string) error {
 		}
 	}
 
-	_, err = db.Exec(`INSERT INTO steps (task_id, title, status, settings, created_at, updated_at) VALUES ($1, $2, 'new', $3::jsonb, now(), now())`, taskID, title, settings)
+	_, err := db.Exec(`INSERT INTO steps (task_id, title, status, settings, created_at, updated_at) VALUES ($1, $2, 'new', $3::jsonb, now(), now())`, taskID, title, settings)
 	return err
 }
 
 // ActivateStep sets the status of a step to 'active'
-func ActivateStep(stepID int) error {
-	pgURL, err := GetPgURLFromEnv()
-	if err != nil {
-		return err
-	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
+func ActivateStep(db *sql.DB, stepID int) error {
 	result, err := db.Exec(`UPDATE steps SET status = 'active', updated_at = NOW() WHERE id = $1`, stepID)
 	if err != nil {
 		return err
@@ -79,17 +59,9 @@ func ActivateStep(stepID int) error {
 }
 
 // ListSteps prints all steps in the DB. If full is true, prints settings column too.
-func ListSteps(full bool) error {
-	pgURL, err := GetPgURLFromEnv()
-	if err != nil {
-		return err
-	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
+func ListSteps(db *sql.DB, full bool) error {
 	var rows *sql.Rows
+	var err error
 	if full {
 		rows, err = db.Query(`SELECT id, task_id, title, status, settings, created_at, updated_at FROM steps ORDER BY id`)
 		if err != nil {
@@ -341,7 +313,6 @@ func executePendingSteps() error {
 	// Process steps in order of dependencies
 	processFileExistsSteps(db)    // First, check file existence
 	processDockerBuildSteps(db)   // Then build Docker images
-	processDockerRunSteps(db)     // Then run Docker containers
 	processDockerRubricsSteps(db) // Finally, run Docker rubrics
 	return nil
 }
@@ -372,7 +343,9 @@ func processFileExistsSteps(db *sql.DB) {
 
 		var settings map[string]interface{}
 		if err := json.Unmarshal([]byte(step.Settings), &settings); err != nil {
-			storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid settings json"})
+			if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid settings json"}); err != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+			}
 			stepLogger.Printf("Step %d: invalid settings json\n", step.StepID)
 			continue
 		}
@@ -384,10 +357,14 @@ func processFileExistsSteps(db *sql.DB) {
 
 		absPath := filepath.Join(step.LocalPath, filePath)
 		if _, err := os.Stat(absPath); err == nil {
-			storeStepResult(db, step.StepID, map[string]interface{}{"result": "success"})
+			if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success"}); err != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+			}
 			stepLogger.Printf("Step %d: file_exists '%s' SUCCESS\n", step.StepID, absPath)
 		} else {
-			storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": err.Error()})
+			if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": err.Error()}); err != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+			}
 			stepLogger.Printf("Step %d: file_exists '%s' FAILURE: %s\n", step.StepID, absPath, err.Error())
 		}
 	}
@@ -420,7 +397,9 @@ func processDockerRubricsSteps(db *sql.DB) {
 		// Parse the docker rubrics config
 		var config DockerRubricsConfig
 		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
-			storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker rubrics config"})
+			if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker rubrics config"}); err != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+			}
 			stepLogger.Printf("Step %d: invalid docker rubrics config: %v\n", step.StepID, err)
 			continue
 		}
@@ -469,7 +448,9 @@ func processDockerRubricsSteps(db *sql.DB) {
 				stepLogger.Printf("Step %d: file not found: %s\n", step.StepID, filePath)
 				// If it's TASK_DATA.md, we should still try to proceed as it might be created later
 				if !strings.HasSuffix(file, "TASK_DATA.md") {
-					storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("required file not found: %s", file)})
+					if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("required file not found: %s", file)}); err != nil {
+						stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+					}
 					continue
 				}
 				shouldRun = true // Mark to run if TASK_DATA.md is missing (it will be created)
@@ -548,7 +529,9 @@ func processDockerRubricsSteps(db *sql.DB) {
 					if err != nil {
 						stepLogger.Printf("Step %d: command '%s' failed: %v\nOutput: %s\n", step.StepID, command, err, string(output))
 						if required {
-							storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("required command failed: %s", command), "output": string(output)})
+							if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("required command failed: %s", command), "output": string(output)}); err != nil {
+								stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+							}
 							continue
 						}
 					} else {
@@ -562,7 +545,9 @@ func processDockerRubricsSteps(db *sql.DB) {
 		config.DockerRubrics.ImageID = currentImageID
 		updatedSettings, _ := json.Marshal(config)
 		db.Exec(`UPDATE steps SET settings = $1, updated_at = now() WHERE id = $2`, string(updatedSettings), step.StepID)
-		storeStepResult(db, step.StepID, map[string]interface{}{"result": "success"})
+		if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success"}); err != nil {
+			stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+		}
 	}
 }
 
@@ -593,7 +578,9 @@ func processDockerBuildSteps(db *sql.DB) {
 		// Parse the docker build config
 		var config DockerBuildConfig
 		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
-			storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker build config"})
+			if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker build config"}); err != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+			}
 			stepLogger.Printf("Step %d: invalid docker build config: %v\n", step.StepID, err)
 			continue
 		}
@@ -634,35 +621,29 @@ func processDockerBuildSteps(db *sql.DB) {
 
 		// Execute the docker build
 		if err := executeDockerBuild(step.LocalPath, config, step.StepID, db); err != nil {
-			storeStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": err.Error()})
+			if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": err.Error()}); err != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+			}
 			stepLogger.Printf("Step %d: docker build failed: %v\n", step.StepID, err)
 			continue
 		}
 
 		// Mark step as successful
-		storeStepResult(db, step.StepID, map[string]interface{}{"result": "success"})
+		if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success"}); err != nil {
+			stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+		}
 		stepLogger.Printf("Step %d: docker build completed successfully\n", step.StepID)
 	}
 }
 
 // CopyStep copies a step to a new task with the given ID
 // GetStepInfo retrieves detailed information about a specific step by ID
-func GetStepInfo(stepID int) (*StepInfo, error) {
-	pgURL, err := GetPgURLFromEnv()
-	if err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
+func GetStepInfo(db *sql.DB, stepID int) (*StepInfo, error) {
 	var info StepInfo
 	var settingsStr, resultsStr sql.NullString
 	var createdAt, updatedAt time.Time
 
-	err = db.QueryRow(`
+	err := db.QueryRow(`
 		SELECT
 			s.id, s.task_id, s.title, s.status,
 			s.settings::text, s.results::text,
@@ -674,28 +655,26 @@ func GetStepInfo(stepID int) (*StepInfo, error) {
 		&settingsStr, &resultsStr,
 		&createdAt, &updatedAt,
 	)
-
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("no step found with ID %d", stepID)
+	}
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("no step found with ID %d", stepID)
-		}
-		return nil, fmt.Errorf("error fetching step: %w", err)
+		return nil, err
 	}
 
-	// Store raw results
-	if resultsStr.Valid {
-		info.RawResults = &resultsStr.String
-	}
-
-	// Parse settings JSON if exists
-	if settingsStr.Valid && settingsStr.String != "" {
+	// Only parse settings if they exist and are not null
+	if settingsStr.Valid && settingsStr.String != "" && settingsStr.String != "null" {
+		info.Settings = make(map[string]interface{})
 		decoder := json.NewDecoder(strings.NewReader(settingsStr.String))
 		decoder.UseNumber()
 		if err := decoder.Decode(&info.Settings); err != nil {
 			return nil, fmt.Errorf("error parsing settings: %w", err)
 		}
-	} else {
-		info.Settings = make(map[string]interface{})
+	}
+
+	// Store raw results
+	if resultsStr.Valid {
+		info.RawResults = &resultsStr.String
 	}
 
 	// Only parse results if they exist and are not null
@@ -777,12 +756,19 @@ func CopyStep(stepID, toTaskID int) error {
 
 // ClearStepResults clears the results for a step
 func ClearStepResults(db *sql.DB, stepID int) error {
-	_, err := db.Exec(
+	result, err := db.Exec(
 		"UPDATE steps SET results = NULL, updated_at = NOW() WHERE id = $1",
 		stepID,
 	)
 	if err != nil {
 		return fmt.Errorf("error clearing step results: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error checking affected rows: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("no step found with ID %d", stepID)
 	}
 	return nil
 }
@@ -864,11 +850,19 @@ func EditStepSettings(db *sql.DB, stepID int, path string, value interface{}) er
 	return nil
 }
 
-// storeStepResult stores the execution result of a step
-func storeStepResult(db *sql.DB, stepID int, result map[string]interface{}) {
+// StoreStepResult stores the execution result of a step
+func StoreStepResult(db *sql.DB, stepID int, result map[string]interface{}) error {
 	resJson, _ := json.Marshal(result)
-	_, err := db.Exec(`UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2`, string(resJson), stepID)
+	resultExec, err := db.Exec(`UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2`, string(resJson), stepID)
 	if err != nil {
-		stepLogger.Println("Failed to update results for step", stepID, ":", err)
+		return fmt.Errorf("failed to update results for step %d: %w", stepID, err)
 	}
+	rowsAffected, err := resultExec.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error checking affected rows: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("no step found with ID %d", stepID)
+	}
+	return nil
 }

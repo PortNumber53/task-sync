@@ -23,6 +23,9 @@ const StepExecutorInterval = 5 * time.Second
 
 var stepLogger *log.Logger
 
+// godotenvLoad allows mocking of godotenv.Load in tests.
+var godotenvLoad = godotenv.Load
+
 // RunAPIServer starts the Gin server and prints environment/setup info
 // (Task and step logic is now in tasks.go and steps.go)
 func RunAPIServer(listenAddr string) error {
@@ -43,6 +46,16 @@ func RunAPIServer(listenAddr string) error {
 		stepLogger = log.New(os.Stdout, "[StepExecutor] ", log.LstdFlags)
 	}
 
+	pgURL, err := GetPgURLFromEnv()
+	if err != nil {
+		stepLogger.Fatalf("DB config error: %v", err)
+	}
+	db, err := sql.Open("postgres", pgURL)
+	if err != nil {
+		stepLogger.Fatalf("DB open error: %v", err)
+	}
+	defer db.Close()
+
 	// Create channels for graceful shutdown
 	stopChan := make(chan struct{})
 	doneChan := make(chan struct{})
@@ -50,24 +63,28 @@ func RunAPIServer(listenAddr string) error {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 
 	// Start step executor in a goroutine
-	go func() {
+	go func(db *sql.DB) {
 		ticker := time.NewTicker(StepExecutorInterval)
 		defer ticker.Stop()
 		defer close(doneChan)
 
 		// Initial execution
-		executePendingSteps()
+		if err := executePendingSteps(db); err != nil {
+			stepLogger.Printf("Error during initial step execution: %v", err)
+		}
 
 		for {
 			select {
 			case <-ticker.C:
-				executePendingSteps()
+				if err := executePendingSteps(db); err != nil {
+					stepLogger.Printf("Error during periodic step execution: %v", err)
+				}
 			case <-stopChan:
 				stepLogger.Println("Step executor shutting down...")
 				return
 			}
 		}
-	}()
+	}(db)
 
 	// Print environment info
 	fmt.Println("Starting task-sync API server...")
@@ -160,7 +177,7 @@ func RunAPIServer(listenAddr string) error {
 // GetPgURLFromEnv loads the database connection URL from environment variables
 // It checks for DATABASE_URL first, then falls back to individual DB_* variables
 func GetPgURLFromEnv() (string, error) {
-	err := godotenv.Load()
+	err := godotenvLoad()
 	if err != nil {
 		return "", fmt.Errorf("error loading .env file: %w", err)
 	}

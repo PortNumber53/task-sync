@@ -404,8 +404,20 @@ func main() {
 				os.Exit(1)
 			}
 
+			pgURL, err := internal.GetPgURLFromEnv()
+			if err != nil {
+				fmt.Printf("Error getting DB config: %v\n", err)
+				os.Exit(1)
+			}
+			db, err := sql.Open("postgres", pgURL)
+			if err != nil {
+				fmt.Printf("Error opening DB: %v\n", err)
+				os.Exit(1)
+			}
+			defer db.Close()
+
 			// Copy the step
-			if err := internal.CopyStep(stepID, toTaskID); err != nil {
+			if err := internal.CopyStep(db, stepID, toTaskID); err != nil {
 				fmt.Printf("Error copying step: %v\n", err)
 				os.Exit(1)
 			}

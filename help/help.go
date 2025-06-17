@@ -249,6 +249,42 @@ Examples:
 	fmt.Println(helpText)
 }
 
+// PrintTaskEditHelp prints help for the task edit command
+func PrintTaskEditHelp() {
+	helpText := `Edit an existing task's details.
+
+Usage:
+  task-sync task edit --id TASK_ID --set KEY="VALUE" [--set KEY2="VALUE2" ...]
+
+Required Flags:
+  --id int               ID of the task to edit
+  --set KEY="VALUE"    Set a task field. KEY can be "name", "status", or "localpath".
+                         Values with spaces should be quoted.
+
+Options:
+  -h, --help             Show this help message and exit
+
+Examples:
+  # Change the name of task with ID 1
+  task-sync task edit --id 1 --set name="New Task Name"
+
+  # Change the status of task with ID 2 to inactive
+  task-sync task edit --id 2 --set status="inactive"
+
+  # Update the local path for task with ID 3
+  task-sync task edit --id 3 --set localpath="/new/path/to/project"
+
+  # Set localpath to empty (NULL in DB)
+  task-sync task edit --id 3 --set localpath=""
+
+  # Update multiple fields at once for task with ID 4
+  task-sync task edit --id 4 --set name="Updated Name" --set status="active"
+
+  # Show this help message
+  task-sync task edit --help`
+	fmt.Println(helpText)
+}
+
 // PrintTasksListHelp prints help for the task list command
 func PrintTasksListHelp() {
 	helpText := `List all tasks in the system.

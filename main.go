@@ -219,6 +219,18 @@ func main() {
 				os.Exit(1)
 			}
 
+			// Check if step exists before attempting to edit
+			_, getStepErr := internal.GetStepInfo(db, stepID) // db is from the outer scope for step subcommands
+			if getStepErr != nil {
+				if strings.Contains(getStepErr.Error(), fmt.Sprintf("no step found with ID %d", stepID)) {
+					fmt.Printf("Error: no step found with ID %d\n", stepID)
+				} else {
+					// For other errors from GetStepInfo, print a generic message
+					fmt.Printf("Error preparing to edit step %d: %v\n", stepID, getStepErr)
+				}
+				os.Exit(1)
+			}
+
 			// Parse --set flags
 			sets := make(map[string]string)
 			for i := 4; i < len(os.Args); i++ {
@@ -431,8 +443,19 @@ func main() {
 			fmt.Println("Available subcommands:")
 			fmt.Println("  create - Create a new task")
 			fmt.Println("  delete - Delete a task and its steps")
+			fmt.Println("  edit   - Edit an existing task's details")
 			fmt.Println("  list   - List all tasks")
 			os.Exit(1)
+		}
+
+		// Check for help flag for task subcommands that don't have their own specific flag parsing yet
+		if len(os.Args) == 4 && (os.Args[3] == "--help" || os.Args[3] == "-h") {
+			switch os.Args[2] {
+			case "edit":
+				helpPkg.PrintTaskEditHelp()
+				os.Exit(0)
+			// Add other task subcommands here if they need generic help flag handling
+			}
 		}
 
 		switch os.Args[2] {
@@ -611,6 +634,89 @@ func main() {
 				fmt.Printf("Error listing tasks: %v\n", err)
 				os.Exit(1)
 			}
+			return
+		case "edit":
+			var taskID int
+			updates := make(map[string]string)
+			help := false
+
+			// Parse command line arguments
+			for i := 3; i < len(os.Args); i++ {
+				switch os.Args[i] {
+				case "--id":
+					if i+1 < len(os.Args) {
+						var err error
+						taskID, err = strconv.Atoi(os.Args[i+1])
+						if err != nil {
+							fmt.Printf("Error: invalid task ID '%s'\n", os.Args[i+1])
+							helpPkg.PrintTaskEditHelp()
+							os.Exit(1)
+						}
+						i++
+					} else {
+						fmt.Println("Error: --id requires a value")
+						helpPkg.PrintTaskEditHelp()
+						os.Exit(1)
+					}
+				case "--set":
+					if i+1 < len(os.Args) {
+						parts := strings.SplitN(os.Args[i+1], "=", 2)
+						if len(parts) != 2 {
+							fmt.Printf("Error: invalid format for --set '%s'. Expected KEY=\"value\"\n", os.Args[i+1])
+							helpPkg.PrintTaskEditHelp()
+							os.Exit(1)
+						}
+						key := strings.ToLower(strings.TrimSpace(parts[0]))
+						value := strings.TrimSpace(parts[1])
+						// Remove surrounding quotes from value if present
+						if (strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"")) || (strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'")) {
+							value = value[1 : len(value)-1]
+						}
+						updates[key] = value
+						i++
+					} else {
+						fmt.Println("Error: --set requires a value in KEY=\"value\" format")
+						helpPkg.PrintTaskEditHelp()
+						os.Exit(1)
+					}
+				case "--help", "-h":
+					help = true
+				}
+			}
+
+			if help {
+				helpPkg.PrintTaskEditHelp()
+				os.Exit(0)
+			}
+
+			if taskID <= 0 {
+				fmt.Println("Error: --id is required and must be a positive integer")
+				helpPkg.PrintTaskEditHelp()
+				os.Exit(1)
+			}
+			if len(updates) == 0 {
+				fmt.Println("Error: at least one --set KEY=\"value\" is required")
+				helpPkg.PrintTaskEditHelp()
+				os.Exit(1)
+			}
+
+			pgURL, err := internal.GetPgURLFromEnv()
+			if err != nil {
+				fmt.Printf("Database configuration error: %v\n", err)
+				os.Exit(1)
+			}
+			db, err := sql.Open("postgres", pgURL)
+			if err != nil {
+				fmt.Printf("Database connection error: %v\n", err)
+				os.Exit(1)
+			}
+			defer db.Close()
+
+			if err := internal.EditTask(db, taskID, updates); err != nil {
+				fmt.Printf("Error editing task: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Task %d updated successfully.\n", taskID)
 			return
 
 		default:

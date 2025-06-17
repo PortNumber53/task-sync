@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 )
 
 // CreateTask inserts a new task with name and status. Only allows status: active, inactive, disabled, running.
@@ -135,6 +136,97 @@ func DeleteTask(taskID int) error {
 
 	// Commit the transaction
 	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// EditTask updates specified fields of an existing task.
+// Allowed fields to update are "name", "status", and "localpath".
+func EditTask(db *sql.DB, taskID int, updates map[string]string) error {
+
+	if len(updates) == 0 {
+		return fmt.Errorf("no updates provided")
+	}
+
+	var setClauses []string
+	var args []interface{}
+	argCounter := 1
+
+	allowedFields := map[string]bool{
+		"name":      true,
+		"status":    true,
+		"localpath": true,
+	}
+
+	for key, value := range updates {
+		if !allowedFields[key] {
+			return fmt.Errorf("invalid field to update: %s", key)
+		}
+
+		switch key {
+		case "name":
+			setClauses = append(setClauses, fmt.Sprintf("name = $%d", argCounter))
+			args = append(args, value)
+			argCounter++
+		case "status":
+			if !isValidTaskStatus(value) {
+				return fmt.Errorf("invalid status: %s (must be one of active|inactive|disabled|running)", value)
+			}
+			setClauses = append(setClauses, fmt.Sprintf("status = $%d", argCounter))
+			args = append(args, value)
+			argCounter++
+		case "localpath":
+			if value == "" {
+				setClauses = append(setClauses, fmt.Sprintf("local_path = $%d", argCounter))
+				args = append(args, nil) // Use sql.NullString or pass nil directly for NULL
+			} else {
+				absPath, err := filepath.Abs(value)
+				if err != nil {
+					return fmt.Errorf("invalid local path '%s': %v", value, err)
+				}
+				setClauses = append(setClauses, fmt.Sprintf("local_path = $%d", argCounter))
+				args = append(args, absPath)
+			}
+			argCounter++
+		}
+	}
+
+	if len(setClauses) == 0 {
+		// Should not happen if initial len(updates) > 0 and keys are valid, but as a safeguard.
+		return fmt.Errorf("no valid fields to update provided")
+	}
+
+	// Add updated_at to the SET clauses
+	setClauses = append(setClauses, "updated_at = now()")
+
+	query := fmt.Sprintf("UPDATE tasks SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argCounter)
+	args = append(args, taskID)
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	result, err := tx.Exec(query, args...)
+	if err != nil {
+		tx.Rollback() // Rollback on exec error
+		return fmt.Errorf("failed to update task: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		tx.Rollback() // Rollback on error getting rows affected
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		tx.Rollback() // Rollback if no rows affected
+		return fmt.Errorf("task with ID %d not found or no changes made", taskID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		// If commit fails, the transaction is effectively rolled back by the DB.
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 

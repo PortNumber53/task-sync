@@ -2,12 +2,12 @@ package internal
 
 import (
 	"database/sql"
-	"os"
-	"path/filepath"
-	"strings"
 	"encoding/json"
-	"strconv"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // processDockerRubricsSteps processes docker rubrics steps for active tasks
@@ -35,17 +35,13 @@ func processDockerRubricsSteps(db *sql.DB) {
 			continue
 		}
 
-		// Parse the docker rubrics config
 		var config DockerRubricsConfig
 		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
-			if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker rubrics config"}); err != nil {
-				stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
-			}
+			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker rubrics config"})
 			stepLogger.Printf("Step %d: invalid docker rubrics config: %v\n", step.StepID, err)
 			continue
 		}
 
-		// Check if dependencies are met
 		ok, err := checkDependencies(db, step.StepID, config.DockerRubrics.DependsOn)
 		if err != nil {
 			stepLogger.Printf("Step %d: error checking dependencies: %v\n", step.StepID, err)
@@ -56,45 +52,70 @@ func processDockerRubricsSteps(db *sql.DB) {
 			continue
 		}
 
-		// Get current image ID for the tag
-		currentImageID, err := getDockerImageID(config.DockerRubrics.ImageTag)
-		if err != nil {
-			stepLogger.Printf("Step %d: error getting current image ID: %v\n", step.StepID, err)
-			continue
+		// --- Start of new Image ID logic ---
+		var imageIDToUse string
+		var buildStepImageID string
+
+		// 1. Try to get image_id from a docker_build dependency
+		for _, dep := range config.DockerRubrics.DependsOn {
+			depInfo, err := GetStepInfo(db, dep.ID)
+			if err != nil {
+				stepLogger.Printf("Step %d: Error getting info for dependency step %d: %v\n", step.StepID, dep.ID, err)
+				continue
+			}
+			if depSettings, ok := depInfo.Settings["docker_build"].(map[string]interface{}); ok {
+				if id, ok := depSettings["image_id"].(string); ok && id != "" && id != "sha256:" {
+					buildStepImageID = id
+					stepLogger.Printf("Step %d: Found image_id '%s' from build dependency step %d\n", step.StepID, buildStepImageID, dep.ID)
+					break
+				}
+			}
 		}
 
-		// If image ID is empty, we can't proceed
-		if currentImageID == "" {
-			stepLogger.Printf("Step %d: no image found with tag %s\n", step.StepID, config.DockerRubrics.ImageTag)
-			continue
+		// 2. Decide which image ID to use
+		if buildStepImageID != "" {
+			imageIDToUse = buildStepImageID
+			stepLogger.Printf("Step %d: Prioritizing image_id '%s' from build dependency.\n", step.StepID, imageIDToUse)
+		} else {
+			stepLogger.Printf("Step %d: No build dependency with a valid image_id found. Falling back to inspecting tag '%s'.\n", step.StepID, config.DockerRubrics.ImageTag)
+			currentImageID, err := getDockerImageID(config.DockerRubrics.ImageTag)
+			if err != nil {
+				stepLogger.Printf("Step %d: error getting current image ID by tag: %v\n", step.StepID, err)
+				continue
+			}
+			if currentImageID == "" {
+				stepLogger.Printf("Step %d: no image found with tag %s\n", step.StepID, config.DockerRubrics.ImageTag)
+				continue
+			}
+			imageIDToUse = currentImageID
 		}
 
-		// If image ID is different from stored one, update and skip this run
-		if config.DockerRubrics.ImageID != "" && config.DockerRubrics.ImageID != currentImageID {
-			stepLogger.Printf("Step %d: image ID changed, updating and skipping this run\n", step.StepID)
-			config.DockerRubrics.ImageID = currentImageID
-			// Update the step with new image ID
+		// 3. Check if the determined image ID is different from the one in settings. If so, update and skip.
+		if config.DockerRubrics.ImageID != imageIDToUse {
+			stepLogger.Printf("Step %d: Stored image_id ('%s') is outdated. Updating to '%s' and skipping this run.\n", step.StepID, config.DockerRubrics.ImageID, imageIDToUse)
+			config.DockerRubrics.ImageID = imageIDToUse
 			updatedSettings, _ := json.Marshal(config)
-			db.Exec(`UPDATE steps SET settings = $1, updated_at = now() WHERE id = $2`, string(updatedSettings), step.StepID)
-			continue
+			_, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = now() WHERE id = $2`, string(updatedSettings), step.StepID)
+			if err != nil {
+				stepLogger.Printf("Step %d: Failed to update settings with new image_id: %v\n", step.StepID, err)
+			}
+			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "pending", "message": "Image ID updated from dependency, will run next cycle."})
+			continue // Skip to next step, will run correctly on next execution cycle
 		}
+		// --- End of new Image ID logic ---
 
 		// Check if files have changed
 		shouldRun := false
 		for _, file := range config.DockerRubrics.Files {
 			filePath := filepath.Join(step.LocalPath, file)
 
-			// Check if file exists first
 			if _, err := os.Stat(filePath); os.IsNotExist(err) {
 				stepLogger.Printf("Step %d: file not found: %s\n", step.StepID, filePath)
-				// If it's TASK_DATA.md, we should still try to proceed as it might be created later
 				if !strings.HasSuffix(file, "TASK_DATA.md") {
-					if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "required file not found: " + file}); err != nil {
-						stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
-					}
+					StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "required file not found: " + file})
 					continue
 				}
-				shouldRun = true // Mark to run if TASK_DATA.md is missing (it will be created)
+				shouldRun = true
 				continue
 			}
 
@@ -106,7 +127,6 @@ func processDockerRubricsSteps(db *sql.DB) {
 
 			storedHash, hasHash := config.DockerRubrics.Hashes[file]
 			if !hasHash || storedHash != currentHash {
-				// Update the hash
 				if config.DockerRubrics.Hashes == nil {
 					config.DockerRubrics.Hashes = make(map[string]string)
 				}
@@ -115,13 +135,19 @@ func processDockerRubricsSteps(db *sql.DB) {
 			}
 		}
 
-		// If no changes and we already have an image ID, skip
-		if !shouldRun && config.DockerRubrics.ImageID != "" {
-			stepLogger.Printf("Step %d: no changes detected, skipping\n", step.StepID)
+		if !shouldRun {
+			stepLogger.Printf("Step %d: no file changes detected, skipping rubrics evaluation.\n", step.StepID)
+			// We can't just succeed here, because the container might not be running.
+			// The logic to check for a running container with the correct image hash should be here.
+			// For now, we assume if no files changed and ID is set, it's fine.
 			continue
 		}
 
-		// Process the TASK_DATA.md file
+		// Process the TASK_DATA.md file and determine step outcome
+		var requiredCommandFailed bool
+		var finalMessage, finalOutput string
+
+	CommandProcessingLoop:
 		for _, file := range config.DockerRubrics.Files {
 			if strings.HasSuffix(file, "TASK_DATA.md") {
 				filePath := filepath.Join(step.LocalPath, file)
@@ -131,7 +157,6 @@ func processDockerRubricsSteps(db *sql.DB) {
 					continue
 				}
 
-				// Parse the TASK_DATA.md content
 				lines := strings.Split(string(content), "\n")
 				for i := 0; i < len(lines); i++ {
 					line := strings.TrimSpace(lines[i])
@@ -139,24 +164,16 @@ func processDockerRubricsSteps(db *sql.DB) {
 						continue
 					}
 
-					// Parse the score and required flag
 					parts := strings.Fields(line)
 					if len(parts) < 2 {
 						continue
 					}
 
-					_, err = strconv.Atoi(parts[0])
-					if err != nil {
+					if _, err := strconv.Atoi(parts[0]); err != nil {
 						continue
 					}
 
-					// Check if the command is required
-					required := false
-					if len(parts) > 1 && parts[1] == "[x]" {
-						required = true
-					}
-
-					// Get the command (rest of the line after score and [x])
+					required := len(parts) > 1 && parts[1] == "[x]"
 					command := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
 					if required {
 						command = strings.TrimSpace(strings.TrimPrefix(command, "[x]"))
@@ -164,16 +181,16 @@ func processDockerRubricsSteps(db *sql.DB) {
 						command = strings.TrimSpace(strings.TrimPrefix(command, "[ ]"))
 					}
 
-					// Execute the command in the container
-					cmd := exec.Command("docker", "run", "--rm", config.DockerRubrics.ImageTag, "sh", "-c", command)
+					cmd := exec.Command("docker", "run", "--rm", imageIDToUse, "sh", "-c", command)
 					output, err := cmd.CombinedOutput()
+
 					if err != nil {
 						stepLogger.Printf("Step %d: command '%s' failed: %v\nOutput: %s\n", step.StepID, command, err, string(output))
 						if required {
-							if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "required command failed: " + command, "output": string(output)}); err != nil {
-								stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
-							}
-							continue
+							requiredCommandFailed = true
+							finalMessage = "required command failed: " + command
+							finalOutput = string(output)
+							break CommandProcessingLoop
 						}
 					} else {
 						stepLogger.Printf("Step %d: command '%s' succeeded\nOutput: %s\n", step.StepID, command, string(output))
@@ -182,12 +199,23 @@ func processDockerRubricsSteps(db *sql.DB) {
 			}
 		}
 
-		// Update the step with new hashes and image ID
-		config.DockerRubrics.ImageID = currentImageID
-		updatedSettings, _ := json.Marshal(config)
-		db.Exec(`UPDATE steps SET settings = $1, updated_at = now() WHERE id = $2`, string(updatedSettings), step.StepID)
-		if err := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success"}); err != nil {
-			stepLogger.Println("Failed to update results for step", step.StepID, ":", err)
+		if requiredCommandFailed {
+			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": finalMessage, "output": finalOutput})
+		} else {
+			updatedSettings, err := json.Marshal(config)
+			if err != nil {
+				StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "failed to marshal settings on success"})
+				stepLogger.Printf("Step %d: Failed to marshal settings on success: %v\n", step.StepID, err)
+				continue
+			}
+			_, err = db.Exec(`UPDATE steps SET settings = $1, updated_at = now() WHERE id = $2`, string(updatedSettings), step.StepID)
+			if err != nil {
+				StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "failed to update settings on success"})
+				stepLogger.Printf("Step %d: Failed to update settings on success: %v\n", step.StepID, err)
+			} else {
+				StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "message": "All rubrics passed."})
+			}
 		}
+
 	}
 }

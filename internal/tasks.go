@@ -54,7 +54,6 @@ func CreateTask(name, status, localPath string) error {
 // Task represents a task in the system
 // LocalPath is optional and may be empty
 // CreatedAt and UpdatedAt are ISO8601 strings
-//
 type Task struct {
 	ID        int
 	Name      string

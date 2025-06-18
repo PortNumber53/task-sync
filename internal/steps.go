@@ -120,6 +120,21 @@ type DockerRubricsConfig struct {
 	} `json:"docker_rubrics"`
 }
 
+// DockerRunConfig represents the configuration for a docker run step
+type DockerRunConfig struct {
+	DockerRun struct {
+		DependsOn           []struct {
+			ID int `json:"id"`
+		} `json:"depends_on"`
+		DockerRunParameters []string `json:"docker_run_parameters"`
+		ImageID             string   `json:"image_id"`
+		ImageTag            string   `json:"image_tag"`
+		ContainerID         string   `json:"container_id,omitempty"`
+		ContainerName       string   `json:"container_name,omitempty"`
+		ContainerHash       string   `json:"container_hash,omitempty"`
+	} `json:"docker_run"`
+}
+
 // calculateFileHash calculates the SHA256 hash of a file
 func calculateFileHash(filePath string) (string, error) {
 	file, err := os.Open(filePath)
@@ -220,6 +235,7 @@ type StepInfo struct {
 var (
 	processFileExistsStepsFunc    = processFileExistsSteps
 	processDockerBuildStepsFunc   = processDockerBuildSteps
+	processDockerRunStepsFunc     = processDockerRunSteps
 	processDockerRubricsStepsFunc = processDockerRubricsSteps
 )
 
@@ -227,6 +243,7 @@ func executePendingSteps(db *sql.DB) error {
 	// Process steps in order of dependencies
 	processFileExistsStepsFunc(db)    // First, check file existence
 	processDockerBuildStepsFunc(db)   // Then build Docker images
+	processDockerRunStepsFunc(db)     // Then run general Docker commands
 	processDockerRubricsStepsFunc(db) // Finally, run Docker rubrics
 	return nil
 }
@@ -340,6 +357,165 @@ func CopyStep(db *sql.DB, stepID, toTaskID int) error {
 
 	return nil
 }
+
+// RemoveStepSettingKey removes a top-level key from the step's settings JSON.
+func RemoveStepSettingKey(db *sql.DB, stepID int, keyToRemove string) error {
+	stepInfo, err := GetStepInfo(db, stepID)
+	if err != nil {
+		return fmt.Errorf("failed to get step info for step %d: %w", stepID, err)
+	}
+
+	if stepInfo.Settings == nil {
+		// Nothing to remove if settings are nil, or key effectively doesn't exist
+		// Depending on desired behavior, could return an error or just succeed silently.
+		// For now, succeed silently as the key is not present.
+		return nil
+	}
+
+	// Check if key exists before trying to delete
+	if _, ok := stepInfo.Settings[keyToRemove]; !ok {
+		// Key not found, consider this a success as the state is as if it were removed.
+		// Alternatively, return an error: fmt.Errorf("key '%s' not found in settings for step %d", keyToRemove, stepID)
+		return nil 
+	}
+
+	// Remove the key
+	delete(stepInfo.Settings, keyToRemove)
+
+	// Marshal the updated settings back to JSON
+	updatedSettingsBytes, err := json.Marshal(stepInfo.Settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated settings for step %d: %w", stepID, err)
+	}
+
+	// Update the database
+	result, err := db.Exec(
+		"UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2",
+		string(updatedSettingsBytes),
+		stepID,
+	)
+	if err != nil {
+		return fmt.Errorf("error updating step settings in database for step %d: %w", stepID, err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error checking affected rows for step %d: %w", stepID, err)
+	}
+	if rowsAffected == 0 {
+		// This case should ideally be caught by GetStepInfo, but as a safeguard:
+		return fmt.Errorf("no step found with ID %d during update", stepID)
+	}
+
+	return nil
+}
+
+
+// setNestedValue sets a value in a nested map based on a dot-separated path.
+// It creates intermediate maps if they don't exist.
+func setNestedValue(dataMap map[string]interface{}, path string, value interface{}) error {
+	parts := strings.Split(path, ".")
+	current := dataMap
+
+	for i, part := range parts {
+		if i == len(parts)-1 { // Last part, set the value
+			current[part] = value
+		} else { // Intermediate part, navigate or create map
+			if _, ok := current[part]; !ok {
+				// Part doesn't exist, create a new map
+				current[part] = make(map[string]interface{})
+			}
+			
+			nextMap, ok := current[part].(map[string]interface{})
+			if !ok {
+				// Part exists but is not a map, cannot traverse
+				return fmt.Errorf("cannot set value at path '%s': segment '%s' is not an object", path, part)
+			}
+			current = nextMap
+		}
+	}
+	return nil
+}
+
+// UpdateStepFieldOrSetting updates a direct field of a step or a key within its settings JSON.
+// For settings, dot notation (e.g., "docker_run.image_tag") is supported for nested keys.
+// It attempts to parse valueToSet as JSON; if it fails, valueToSet is treated as a string.
+func UpdateStepFieldOrSetting(db *sql.DB, stepID int, keyToSet string, valueToSet string) error {
+	// List of updatable direct columns in the 'steps' table
+	validDirectFields := map[string]bool{
+		"title":  true,
+		"status": true,
+	}
+
+	if _, isDirectField := validDirectFields[keyToSet]; isDirectField {
+		// Basic safety check, though keys are from a controlled map.
+		if keyToSet != "title" && keyToSet != "status" { // Ensure it's one of the explicitly handled direct fields
+			return fmt.Errorf("internal error: unhandled direct field for update: %s", keyToSet)
+		}
+
+		query := fmt.Sprintf("UPDATE steps SET %s = $1, updated_at = NOW() WHERE id = $2", keyToSet) // keyToSet is safe due to check above
+		result, err := db.Exec(query, valueToSet, stepID)
+		if err != nil {
+			return fmt.Errorf("error updating step field %s: %w", keyToSet, err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("error checking affected rows for step field %s update: %w", keyToSet, err)
+		}
+		if rowsAffected == 0 {
+			return fmt.Errorf("no step found with ID %d, or %s was already set to '%s'", stepID, keyToSet, valueToSet)
+		}
+		return nil
+	} else {
+		// Assume keyToSet is for the 'settings' JSON field
+		stepInfo, err := GetStepInfo(db, stepID)
+		if err != nil {
+			return fmt.Errorf("failed to get step info for step %d: %w", stepID, err)
+		}
+
+		if stepInfo.Settings == nil {
+			stepInfo.Settings = make(map[string]interface{})
+		}
+		
+		var jsonValue interface{}
+		// Attempt to unmarshal valueToSet to see if it's a JSON primitive (number, boolean, null) or a pre-formatted JSON object/array.
+		err = json.Unmarshal([]byte(valueToSet), &jsonValue)
+		if err == nil {
+			// It's a valid JSON value (e.g. "123", "true", "null", "{\"a\":1}")
+			if errSet := setNestedValue(stepInfo.Settings, keyToSet, jsonValue); errSet != nil {
+				return fmt.Errorf("failed to set nested key '%s' in settings for step %d: %w", keyToSet, stepID, errSet)
+			}
+		} else {
+			// Not a valid JSON value on its own, so treat it as a plain string.
+			if errSet := setNestedValue(stepInfo.Settings, keyToSet, valueToSet); errSet != nil {
+				return fmt.Errorf("failed to set nested key '%s' in settings for step %d: %w", keyToSet, stepID, errSet)
+			}
+		}
+
+		updatedSettingsBytes, err := json.Marshal(stepInfo.Settings)
+		if err != nil {
+			return fmt.Errorf("failed to marshal updated settings for step %d: %w", stepID, err)
+		}
+
+		result, err := db.Exec(
+			"UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2",
+			string(updatedSettingsBytes),
+			stepID,
+		)
+		if err != nil {
+			return fmt.Errorf("error updating step settings in database for step %d: %w", stepID, err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("error checking affected rows for step ID %d settings update: %w", stepID, err)
+		}
+		if rowsAffected == 0 {
+			return fmt.Errorf("no step found with ID %d during settings update", stepID)
+		}
+		return nil
+	}
+}
+
 
 // ClearStepResults clears the results for a step
 func ClearStepResults(db *sql.DB, stepID int) error {

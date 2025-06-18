@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
 	// "github.com/DATA-DOG/go-sqlmock" // Not strictly needed for this test, but good to keep for consistency if other tests are added
 )
 
@@ -17,39 +16,39 @@ func TestProcessFileExistsSteps(t *testing.T) { // Renaming to match the functio
 	}
 
 	tests := []struct {
-		name        string
-		localPath   string
-		settings    map[string]interface{}
+		name      string
+		localPath string
+		settings  map[string]interface{}
 		// filePresent bool // This field is not used in the original test logic, can be removed
-		wantResult  string
+		wantResult string
 	}{
 		{
-			name:        "file exists",
-			localPath:   tempDir,
-			settings:    map[string]interface{}{"file_exists": "Dockerfile"},
+			name:      "file exists",
+			localPath: tempDir,
+			settings:  map[string]interface{}{"file_exists": "Dockerfile"},
 			// filePresent: true,
-			wantResult:  "success",
+			wantResult: "success",
 		},
 		{
-			name:        "file missing",
-			localPath:   tempDir,
-			settings:    map[string]interface{}{"file_exists": "notfound.txt"},
+			name:      "file missing",
+			localPath: tempDir,
+			settings:  map[string]interface{}{"file_exists": "notfound.txt"},
 			// filePresent: false,
-			wantResult:  "failure",
+			wantResult: "failure",
 		},
 		{
-			name:        "invalid settings - no file_exists key",
-			localPath:   tempDir,
-			settings:    map[string]interface{}{"other_key": "some_value"}, // no file_exists key
+			name:      "invalid settings - no file_exists key",
+			localPath: tempDir,
+			settings:  map[string]interface{}{"other_key": "some_value"}, // no file_exists key
 			// filePresent: false,
-			wantResult:  "", // should not update result, or rather, the function should handle this gracefully (e.g. error or specific status)
+			wantResult: "", // should not update result, or rather, the function should handle this gracefully (e.g. error or specific status)
 		},
 		{
-			name:        "invalid settings - file_exists key is not a string",
-			localPath:   tempDir,
-			settings:    map[string]interface{}{"file_exists": 123},
+			name:      "invalid settings - file_exists key is not a string",
+			localPath: tempDir,
+			settings:  map[string]interface{}{"file_exists": 123},
 			// filePresent: false,
-			wantResult:  "", 
+			wantResult: "",
 		},
 	}
 

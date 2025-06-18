@@ -290,7 +290,9 @@ func TestCheckDependencies(t *testing.T) {
 	stepID := 100
 
 	t.Run("no dependencies", func(t *testing.T) {
-		ok, err := checkDependencies(db, stepID, []struct{ ID int `json:"id"` }{}) 
+		ok, err := checkDependencies(db, stepID, []struct {
+			ID int `json:"id"`
+		}{})
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -302,7 +304,9 @@ func TestCheckDependencies(t *testing.T) {
 		}
 	})
 
-	deps := []struct{ ID int `json:"id"` }{{ID: 1}, {ID: 2}, {ID: 3}} 
+	deps := []struct {
+		ID int `json:"id"`
+	}{{ID: 1}, {ID: 2}, {ID: 3}}
 
 	t.Run("all dependencies met", func(t *testing.T) {
 		// Mock individual status checks (for logging part)
@@ -427,7 +431,7 @@ func TestCheckDependencies(t *testing.T) {
 		dbErr := fmt.Errorf("db error on status check")
 		// Mock first individual status check to return an error
 		mock.ExpectQuery("SELECT status, results FROM steps WHERE id = $1").WithArgs(1).WillReturnError(dbErr)
-		// Other status checks might not be called if the first one errors and logging continues, 
+		// Other status checks might not be called if the first one errors and logging continues,
 		// but the main query will still run.
 		mock.ExpectQuery("SELECT status, results FROM steps WHERE id = $1").WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"status", "results"}).AddRow("success", sql.NullString{}))
 		mock.ExpectQuery("SELECT status, results FROM steps WHERE id = $1").WithArgs(3).WillReturnRows(sqlmock.NewRows([]string{"status", "results"}).AddRow("success", sql.NullString{}))
@@ -457,11 +461,12 @@ func TestCheckDependencies(t *testing.T) {
 }
 func TestExecutePendingSteps(t *testing.T) {
 	// Use a channel to record the order of function calls
-	callOrder := make(chan string, 3)
+	callOrder := make(chan string, 4)
 
 	// Replace the real functions with mocks for the duration of the test
 	originalFileExists := processFileExistsStepsFunc
 	originalDockerBuild := processDockerBuildStepsFunc
+	originalDockerRun := processDockerRunStepsFunc
 	originalDockerRubrics := processDockerRubricsStepsFunc
 
 	processFileExistsStepsFunc = func(db *sql.DB) {
@@ -469,6 +474,9 @@ func TestExecutePendingSteps(t *testing.T) {
 	}
 	processDockerBuildStepsFunc = func(db *sql.DB) {
 		callOrder <- "docker_build"
+	}
+	processDockerRunStepsFunc = func(db *sql.DB) {
+		callOrder <- "docker_run"
 	}
 	processDockerRubricsStepsFunc = func(db *sql.DB) {
 		callOrder <- "docker_rubrics"
@@ -478,6 +486,7 @@ func TestExecutePendingSteps(t *testing.T) {
 	defer func() {
 		processFileExistsStepsFunc = originalFileExists
 		processDockerBuildStepsFunc = originalDockerBuild
+		processDockerRunStepsFunc = originalDockerRun
 		processDockerRubricsStepsFunc = originalDockerRubrics
 	}()
 
@@ -490,7 +499,7 @@ func TestExecutePendingSteps(t *testing.T) {
 	close(callOrder)
 
 	// Verify the call order
-	expectedOrder := []string{"file_exists", "docker_build", "docker_rubrics"}
+	expectedOrder := []string{"file_exists", "docker_build", "docker_run", "docker_rubrics"}
 	actualOrder := []string{}
 	for call := range callOrder {
 		actualOrder = append(actualOrder, call)
@@ -639,7 +648,7 @@ func TestCopyStep(t *testing.T) {
 			WithArgs(2, "Source Step", "{\"key\":\"value\"}", "active").
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit().WillReturnError(fmt.Errorf("commit failed"))
-		// The deferred tx.Rollback() will be called in actual execution, 
+		// The deferred tx.Rollback() will be called in actual execution,
 		// but sqlmock might not track it after a Commit() error.
 
 		err := CopyStep(db, 1, 2)

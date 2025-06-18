@@ -32,16 +32,16 @@ func TestEditTask(t *testing.T) {
 	defer db.Close()
 
 	tests := []struct {
-		name          string
-		taskID        int
-		updates       map[string]string
-		mockSetup     func(mock sqlmock.Sqlmock)
-		expectErr     bool
-		expectErrStr  string
+		name         string
+		taskID       int
+		updates      map[string]string
+		mockSetup    func(mock sqlmock.Sqlmock)
+		expectErr    bool
+		expectErrStr string
 	}{
 		{
-			name:   "Success - Update name",
-			taskID: 1,
+			name:    "Success - Update name",
+			taskID:  1,
 			updates: map[string]string{"name": "New Name"},
 			mockSetup: func(mock sqlmock.Sqlmock) {
 				mock.ExpectBegin()
@@ -53,8 +53,8 @@ func TestEditTask(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			name:   "Success - Update status and localpath",
-			taskID: 2,
+			name:    "Success - Update status and localpath",
+			taskID:  2,
 			updates: map[string]string{"status": "active", "localpath": "/new/path"},
 			mockSetup: func(mock sqlmock.Sqlmock) {
 				mock.ExpectBegin()
@@ -65,9 +65,9 @@ func TestEditTask(t *testing.T) {
 			},
 			expectErr: false,
 		},
-        {
-			name:   "Success - Set localpath to empty (NULL)",
-			taskID: 3,
+		{
+			name:    "Success - Set localpath to empty (NULL)",
+			taskID:  3,
 			updates: map[string]string{"localpath": ""},
 			mockSetup: func(mock sqlmock.Sqlmock) {
 				mock.ExpectBegin()
@@ -79,32 +79,32 @@ func TestEditTask(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			name:      "Error - No updates provided",
-			taskID:    1,
-			updates:   map[string]string{},
-			mockSetup: func(mock sqlmock.Sqlmock) {},
-			expectErr: true,
+			name:         "Error - No updates provided",
+			taskID:       1,
+			updates:      map[string]string{},
+			mockSetup:    func(mock sqlmock.Sqlmock) {},
+			expectErr:    true,
 			expectErrStr: "no updates provided",
 		},
 		{
-			name:      "Error - Invalid field",
-			taskID:    1,
-			updates:   map[string]string{"invalid_field": "value"},
-			mockSetup: func(mock sqlmock.Sqlmock) {},
-			expectErr: true,
+			name:         "Error - Invalid field",
+			taskID:       1,
+			updates:      map[string]string{"invalid_field": "value"},
+			mockSetup:    func(mock sqlmock.Sqlmock) {},
+			expectErr:    true,
 			expectErrStr: "invalid field to update: invalid_field",
 		},
 		{
-			name:      "Error - Invalid status",
-			taskID:    1,
-			updates:   map[string]string{"status": "invalid_status"},
-			mockSetup: func(mock sqlmock.Sqlmock) {},
-			expectErr: true,
+			name:         "Error - Invalid status",
+			taskID:       1,
+			updates:      map[string]string{"status": "invalid_status"},
+			mockSetup:    func(mock sqlmock.Sqlmock) {},
+			expectErr:    true,
 			expectErrStr: "invalid status: invalid_status (must be one of active|inactive|disabled|running)",
 		},
 		{
-			name:   "Error - Task not found",
-			taskID: 99,
+			name:    "Error - Task not found",
+			taskID:  99,
 			updates: map[string]string{"name": "No Task"},
 			mockSetup: func(mock sqlmock.Sqlmock) {
 				mock.ExpectBegin()
@@ -113,12 +113,12 @@ func TestEditTask(t *testing.T) {
 					WillReturnResult(sqlmock.NewResult(0, 0)) // 0 rows affected
 				mock.ExpectRollback() // Expect rollback because no rows were affected
 			},
-			expectErr: true,
+			expectErr:    true,
 			expectErrStr: "task with ID 99 not found or no changes made",
 		},
 		{
-			name:   "Error - DB Commit fails",
-			taskID: 1,
+			name:    "Error - DB Commit fails",
+			taskID:  1,
 			updates: map[string]string{"name": "Commit Fail"},
 			mockSetup: func(mock sqlmock.Sqlmock) {
 				mock.ExpectBegin()
@@ -127,7 +127,7 @@ func TestEditTask(t *testing.T) {
 					WillReturnResult(sqlmock.NewResult(1, 1))
 				mock.ExpectCommit().WillReturnError(fmt.Errorf("commit error"))
 			},
-			expectErr: true,
+			expectErr:    true,
 			expectErrStr: "failed to commit transaction: commit error",
 		},
 	}

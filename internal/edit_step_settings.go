@@ -51,13 +51,21 @@ func EditStepSettings(db *sql.DB, stepID int, path string, value interface{}) er
 	// Navigate to the parent of the target field
 	for i := 0; i < len(parts)-1; i++ {
 		part := parts[i]
-		if next, ok := current[part].(map[string]interface{}); ok {
-			current = next
-		} else {
-			// Create nested maps for non-existent paths
-			current[part] = make(map[string]interface{})
-			current = current[part].(map[string]interface{})
+		val, ok := current[part]
+		if !ok {
+			// Path doesn't exist, create it.
+			newMap := make(map[string]interface{})
+			current[part] = newMap
+			current = newMap
+			continue
 		}
+
+		// Path exists, ensure it's a map.
+		nextMap, isMap := val.(map[string]interface{})
+		if !isMap {
+			return fmt.Errorf("cannot update path, '%s' is not a map", strings.Join(parts[:i+1], "."))
+		}
+		current = nextMap
 	}
 
 	// Set the value at the final path component

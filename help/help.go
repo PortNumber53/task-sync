@@ -141,16 +141,20 @@ Examples:
 
 // PrintStepEditHelp prints help for the step edit command
 func PrintStepEditHelp() {
-	helpText := `Edit a step's settings using dot notation.
+	helpText := `Edit a step's settings.
 
 Usage:
-  task-sync step edit STEP_ID --set KEY=VALUE [--set KEY2=VALUE2 ...]
+  task-sync step edit STEP_ID (--set KEY=VALUE [--set KEY2=VALUE2 ...] | --remove-key KEY)
 
 Arguments:
   STEP_ID    ID of the step to edit
 
-Required Flags:
-  --set KEY=VALUE  Set a value in the step's settings using dot notation
+Options:
+  --set KEY=VALUE         Set a value in the step's settings using dot notation.
+                          This can be used multiple times.
+  --remove-key KEY        Remove a top-level key from the step's settings.
+                          Cannot be used with --set.
+  -h, --help              Show this help message and exit
 
 Examples:
   # Update the image tag for a docker_run step
@@ -164,6 +168,9 @@ Examples:
 
   # Set a JSON value (use single quotes around the value)
   task-sync step edit 9 --set docker_run.ports='["8080:80"]'
+
+  # Remove the 'docker_build' key from step 9's settings
+  task-sync step edit 9 --remove-key docker_build
 
   # Show this help message
   task-sync step edit --help`

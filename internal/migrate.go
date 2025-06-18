@@ -173,7 +173,6 @@ func RunAPIServer(listenAddr string) error {
 
 // (Step execution logic moved to steps.go)
 
-
 // GetPgURLFromEnv loads the database connection URL from environment variables
 // It checks for DATABASE_URL first, then falls back to individual DB_* variables
 func GetPgURLFromEnv() (string, error) {

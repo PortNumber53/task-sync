@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // processFileExistsSteps checks for the existence of files specified in step settings.
-// It queries active steps that have a 'file_exists' key in their settings,
-// checks if the specified file exists at the task's local_path,
-// and stores the result ('success' or 'failure') back into the step's results.
+// It queries active steps that have a 'file_exists' key in their settings.
+// The value of 'file_exists' can be a single path (string) or multiple paths (array of strings).
+// The step succeeds only if all specified paths exist relative to the task's local_path.
+// It stores the result ('success' or 'failure' with messages) back into the step's results.
 func processFileExistsSteps(db *sql.DB) {
 	query := `SELECT s.id, s.task_id, s.settings, t.local_path
 		FROM steps s
@@ -20,7 +22,7 @@ func processFileExistsSteps(db *sql.DB) {
 		AND t.status = 'active'
 		AND t.local_path IS NOT NULL
 		AND t.local_path <> ''
-		AND s.settings::text LIKE '%"file_exists"%'` // Ensure we are matching the key "file_exists"
+		AND s.settings ? 'file_exists'`
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -30,7 +32,7 @@ func processFileExistsSteps(db *sql.DB) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var step stepExec // Assumes stepExec is defined in the package (e.g., types.go or common part of steps.go)
+		var step stepExec
 		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
 			stepLogger.Println("Row scan error:", err)
 			continue
@@ -38,38 +40,83 @@ func processFileExistsSteps(db *sql.DB) {
 
 		var settings map[string]interface{}
 		if err := json.Unmarshal([]byte(step.Settings), &settings); err != nil {
-			if errStore := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid settings json"}); errStore != nil {
-				stepLogger.Println("Failed to update results for step", step.StepID, ":", errStore)
-			}
-			stepLogger.Printf("Step %d: invalid settings json\n", step.StepID)
-			continue
-		}
-
-		filePathSetting, ok := settings["file_exists"].(string)
-		if !ok {
-			stepLogger.Printf("Step %d: 'file_exists' key missing or not a string in settings for step ID %d\n", step.StepID, step.StepID)
-			// Consider if this should be a failure or just a skip
-			// For now, skipping as the query might be too broad if "file_exists" can appear elsewhere in settings as non-string
-			continue
-		}
-
-		absPath := filepath.Join(step.LocalPath, filePathSetting)
-		if _, err := os.Stat(absPath); err == nil {
-			// File exists
-			if errStore := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success"}); errStore != nil {
-				stepLogger.Println("Failed to update results for step", step.StepID, ":", errStore)
-			}
-			stepLogger.Printf("Step %d: file_exists '%s' SUCCESS\n", step.StepID, absPath)
-		} else {
-			// File does not exist or other error with os.Stat
-			errMsg := fmt.Sprintf("file not found: %s", filePathSetting)
-			if !os.IsNotExist(err) { // If the error is something other than "not exist"
-				errMsg = fmt.Sprintf("error checking file '%s': %v", filePathSetting, err)
-			}
+			errMsg := "invalid settings json"
 			if errStore := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg}); errStore != nil {
 				stepLogger.Println("Failed to update results for step", step.StepID, ":", errStore)
 			}
-			stepLogger.Printf("Step %d: file_exists '%s' FAILURE: %s\n", step.StepID, absPath, errMsg)
+			stepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
+			continue
+		}
+
+		filePathsValue, ok := settings["file_exists"]
+		if !ok {
+			// This should not happen due to the `?` operator in the query, but check for safety.
+			stepLogger.Printf("Step %d: 'file_exists' key missing in settings\n", step.StepID)
+			continue
+		}
+
+		var pathsToCheck []string
+		validSettings := true
+		errMsg := ""
+
+		switch v := filePathsValue.(type) {
+		case string:
+			pathsToCheck = append(pathsToCheck, v)
+		case []interface{}:
+			for i, item := range v {
+				if pathStr, ok := item.(string); ok {
+					pathsToCheck = append(pathsToCheck, pathStr)
+				} else {
+					errMsg = fmt.Sprintf("invalid type for path at index %d; expected string", i)
+					validSettings = false
+					break
+				}
+			}
+		default:
+			errMsg = "invalid type for 'file_exists'; expected string or array of strings"
+			validSettings = false
+		}
+
+		if !validSettings {
+			if errStore := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg}); errStore != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", errStore)
+			}
+			stepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
+			continue
+		}
+
+		if len(pathsToCheck) == 0 {
+			errMsg = "'file_exists' key is present but contains no paths"
+			if errStore := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg}); errStore != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", errStore)
+			}
+			stepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
+			continue
+		}
+
+		var errorMessages []string
+		for _, path := range pathsToCheck {
+			absPath := filepath.Join(step.LocalPath, path)
+			if _, err := os.Stat(absPath); err != nil {
+				if os.IsNotExist(err) {
+					errorMessages = append(errorMessages, fmt.Sprintf("file not found: %s", path))
+				} else {
+					errorMessages = append(errorMessages, fmt.Sprintf("error checking file '%s': %v", path, err))
+				}
+			}
+		}
+
+		if len(errorMessages) == 0 {
+			if errStore := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success"}); errStore != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", errStore)
+			}
+			stepLogger.Printf("Step %d: file_exists check SUCCESS for all paths\n", step.StepID)
+		} else {
+			fullErrMsg := strings.Join(errorMessages, "; ")
+			if errStore := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fullErrMsg}); errStore != nil {
+				stepLogger.Println("Failed to update results for step", step.StepID, ":", errStore)
+			}
+			stepLogger.Printf("Step %d: file_exists check FAILURE: %s\n", step.StepID, fullErrMsg)
 		}
 	}
 }

@@ -135,6 +135,22 @@ type DockerRunConfig struct {
 	} `json:"docker_run"`
 }
 
+// DockerShellConfig represents the configuration for a docker shell step
+type DockerShellConfig struct {
+	DockerShell struct {
+		Command   []map[string]string `json:"command"`
+		DependsOn []struct {
+			ID int `json:"id"`
+		} `json:"depends_on"`
+		Docker struct {
+			ContainerID   string `json:"container_id"`
+			ContainerName string `json:"container_name"`
+			ImageID       string `json:"image_id"`
+			ImageTag      string `json:"image_tag"`
+		} `json:"docker"`
+	} `json:"docker_shell"`
+}
+
 // calculateFileHash calculates the SHA256 hash of a file
 func calculateFileHash(filePath string) (string, error) {
 	file, err := os.Open(filePath)
@@ -237,6 +253,7 @@ var (
 	processDockerBuildStepsFunc   = processDockerBuildSteps
 	processDockerRunStepsFunc     = processDockerRunSteps
 	processDockerRubricsStepsFunc = processDockerRubricsSteps
+	processDockerShellStepsFunc   = processDockerShellSteps
 )
 
 func executePendingSteps(db *sql.DB) error {
@@ -244,7 +261,8 @@ func executePendingSteps(db *sql.DB) error {
 	processFileExistsStepsFunc(db)    // First, check file existence
 	processDockerBuildStepsFunc(db)   // Then build Docker images
 	processDockerRunStepsFunc(db)     // Then run general Docker commands
-	processDockerRubricsStepsFunc(db) // Finally, run Docker rubrics
+	processDockerRubricsStepsFunc(db) // Then run Docker rubrics
+	processDockerShellStepsFunc(db)   // Finally, run Docker shell
 	return nil
 }
 

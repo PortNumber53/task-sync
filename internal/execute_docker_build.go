@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -21,7 +22,7 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 	var stdoutBuf, stderrBuf bytes.Buffer
 
 	// Execute the command
-	cmd := execCommand(cmdParts[0], cmdParts[1:]...)
+	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
 	cmd.Dir = workDir
 
 	// Create a multi-writer that writes to both the buffer and stdout/stderr

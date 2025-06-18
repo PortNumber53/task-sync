@@ -12,12 +12,6 @@ func TestExecuteDockerBuild(t *testing.T) {
 	// Initialize the logger to avoid nil pointer dereference in the function under test.
 	stepLogger = log.New(io.Discard, "", 0)
 
-	// Monkey patch execCommand for the duration of the test
-	// This relies on the fakeExecCommand defined in get_docker_image_id_test.go
-	originalExecCommand := execCommand
-	execCommand = fakeExecCommand
-	defer func() { execCommand = originalExecCommand }()
-
 	// Create a dummy config
 	config := &DockerBuildConfig{}
 	config.DockerBuild.ImageTag = "test-image:latest"

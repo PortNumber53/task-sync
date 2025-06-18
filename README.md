@@ -226,3 +226,36 @@ This step appears to be a specialized version of `docker_build`, likely for auto
   }
 }'
 ```
+
+### 6. `docker_pull`
+
+Pulls a Docker image from a registry.
+
+**Settings:**
+
+```json
+{
+  "docker_pull": {
+    "image_tag": "nginx:latest",
+    "image_id": "sha256:abcdef123456...", // Optional: For verification after pull
+    "prevent_run_before": "2024-01-01T00:00:00Z", // Optional: RFC3339 timestamp
+    "depends_on": [ // Optional
+      { "id": 104 }
+    ]
+  }
+}
+```
+- `image_tag`: The full tag of the Docker image to pull (e.g., `ubuntu:22.04`, `my-private-repo/my-image:v1.2.3`). This is required.
+- `image_id` (optional): If provided, the system will verify that the pulled image's ID matches this value. If not provided, the system will fetch and store the pulled image's ID in the step results and settings.
+- `prevent_run_before` (optional): An RFC3339 formatted timestamp (e.g., `2023-12-31T23:59:59Z`). If this timestamp is in the future, the step will be skipped until the specified time. After a successful pull, this field is automatically updated to 6 hours in the future to prevent rapid successive pulls.
+- `depends_on` (optional): A list of other step IDs that must be completed successfully before this step can run.
+
+**Example CLI Command:**
+
+```bash
+./task-sync step create --task-id 1 --title "Pull Nginx Image" --settings '{
+  "docker_pull": {
+    "image_tag": "nginx:latest"
+  }
+}'
+```

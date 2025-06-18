@@ -6,11 +6,9 @@ import (
 	"strings"
 )
 
-// getDockerImageID retrieves the image ID for a given tag
-var execCommand = exec.Command
-
+// getDockerImageID retrieves the full image ID (SHA256 digest) for a given Docker image tag.
 func getDockerImageID(tag string) (string, error) {
-	cmd := execCommand("docker", "inspect", "-f", "{{.Id}}", tag)
+	cmd := exec.Command("docker", "inspect", "-f", "{{.Id}}", tag)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 

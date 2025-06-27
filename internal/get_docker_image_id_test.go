@@ -12,7 +12,7 @@ func TestGetDockerImageID(t *testing.T) {
 	execCommand = mockExecCommand
 	defer func() { execCommand = originalExecCommand }()
 
-		t.Run("success", func(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
 		imageID, err := getDockerImageID("my-image:latest")
 		if err != nil {
 			t.Errorf("expected no error, but got: %v", err)
@@ -24,7 +24,7 @@ func TestGetDockerImageID(t *testing.T) {
 		}
 	})
 
-		t.Run("failure", func(t *testing.T) {
+	t.Run("failure", func(t *testing.T) {
 		// To trigger failure, we use a special tag that our mockExecCommand recognizes
 		_, err := getDockerImageID("fail-image:latest")
 		if err == nil {

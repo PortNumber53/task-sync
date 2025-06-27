@@ -8,7 +8,6 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-
 func TestProcessDockerPullSteps(t *testing.T) {
 	// Initialize logger to avoid nil pointer issues
 	stepLogger = log.New(testWriter{}, "", 0)

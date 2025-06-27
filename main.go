@@ -456,7 +456,7 @@ func main() {
 			case "edit":
 				helpPkg.PrintTaskEditHelp()
 				os.Exit(0)
-			// Add other task subcommands here if they need generic help flag handling
+				// Add other task subcommands here if they need generic help flag handling
 			}
 		}
 
@@ -509,57 +509,57 @@ func main() {
 			fmt.Printf("Task with ID %d and all its steps have been deleted.\n", taskID)
 			return
 
-			case "info":
-				var taskID int
-				help := false
+		case "info":
+			var taskID int
+			help := false
 
-				// Parse command line arguments
-				for i := 3; i < len(os.Args); i++ {
-					switch os.Args[i] {
-					case "--id":
-						if i+1 >= len(os.Args) {
-							fmt.Println("Error: --id requires a value")
-							os.Exit(1)
-						}
-						var err error
-						taskID, err = strconv.Atoi(os.Args[i+1])
-						if err != nil {
-							fmt.Printf("Error: invalid task ID '%s'\n", os.Args[i+1])
-							os.Exit(1)
-						}
-						i++
-					case "--help", "-h":
-						help = true
+			// Parse command line arguments
+			for i := 3; i < len(os.Args); i++ {
+				switch os.Args[i] {
+				case "--id":
+					if i+1 >= len(os.Args) {
+						fmt.Println("Error: --id requires a value")
+						os.Exit(1)
 					}
+					var err error
+					taskID, err = strconv.Atoi(os.Args[i+1])
+					if err != nil {
+						fmt.Printf("Error: invalid task ID '%s'\n", os.Args[i+1])
+						os.Exit(1)
+					}
+					i++
+				case "--help", "-h":
+					help = true
 				}
+			}
 
-				if help {
-					fmt.Println("Usage: task info --id <id>")
-					os.Exit(0)
-				}
+			if help {
+				fmt.Println("Usage: task info --id <id>")
+				os.Exit(0)
+			}
 
-				if taskID <= 0 {
-					fmt.Println("Error: --id is required and must be a positive integer")
-					os.Exit(1)
-				}
+			if taskID <= 0 {
+				fmt.Println("Error: --id is required and must be a positive integer")
+				os.Exit(1)
+			}
 
-				task, err := internal.GetTaskInfo(taskID)
-				if err != nil {
-					fmt.Printf("Error: %v\n", err)
-					os.Exit(1)
-				}
-				fmt.Println("Task Information:")
-				fmt.Printf("  ID:        %d\n", task.ID)
-				fmt.Printf("  Name:      %s\n", task.Name)
-				fmt.Printf("  Status:    %s\n", task.Status)
-				if task.LocalPath != nil {
-					fmt.Printf("  LocalPath: %s\n", *task.LocalPath)
-				} else {
-					fmt.Printf("  LocalPath: <none>\n")
-				}
-				fmt.Printf("  Created:   %s\n", task.CreatedAt)
-				fmt.Printf("  Updated:   %s\n", task.UpdatedAt)
-				return
+			task, err := internal.GetTaskInfo(taskID)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Task Information:")
+			fmt.Printf("  ID:        %d\n", task.ID)
+			fmt.Printf("  Name:      %s\n", task.Name)
+			fmt.Printf("  Status:    %s\n", task.Status)
+			if task.LocalPath != nil {
+				fmt.Printf("  LocalPath: %s\n", *task.LocalPath)
+			} else {
+				fmt.Printf("  LocalPath: <none>\n")
+			}
+			fmt.Printf("  Created:   %s\n", task.CreatedAt)
+			fmt.Printf("  Updated:   %s\n", task.UpdatedAt)
+			return
 
 		case "create":
 			var name, status, localPath string

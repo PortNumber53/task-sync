@@ -15,7 +15,7 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 	var buildParams []string
 	for _, p := range config.DockerBuild.Params {
 		// Replace placeholder
-		processedParam := strings.ReplaceAll(p, "<<IMAGETAG>>", config.DockerBuild.ImageTag)
+		processedParam := strings.ReplaceAll(p, "%%IMAGETAG%%", config.DockerBuild.ImageTag)
 		// Split params like "--platform linux/amd64" into two parts
 		buildParams = append(buildParams, strings.Fields(processedParam)...)
 	}
@@ -40,7 +40,7 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 	cmd.Stdout = io.MultiWriter(stdoutWriters...)
 	cmd.Stderr = io.MultiWriter(stderrWriters...)
 
-		if err := cmd.Run(); err != nil {
+	if err := cmd.Run(); err != nil {
 		// Always log the full output for debugging
 		stdoutOutput := stdoutBuf.String()
 		stderrOutput := stderrBuf.String()
@@ -63,8 +63,6 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 	if len(stderrOutput) > 0 {
 		stepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
 	}
-
-	
 
 	// Get the image ID
 	imageID, err := getDockerImageID(config.DockerBuild.ImageTag)

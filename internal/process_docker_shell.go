@@ -4,18 +4,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
 // processDockerShellSteps processes docker shell steps for active tasks.
 func processDockerShellSteps(db *sql.DB) {
-	query := `SELECT s.id, s.task_id, s.settings
-		FROM steps s
-		JOIN tasks t ON s.task_id = t.id
-		WHERE s.status = 'active'
-		AND t.status = 'active'
-		AND s.settings::text LIKE '%docker_shell%'`
+	query := `SELECT s.id, s.task_id, s.settings FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'active' AND t.status = 'active' AND s.settings::text LIKE '%docker_shell%'`
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -39,19 +33,21 @@ func processDockerShellSteps(db *sql.DB) {
 			continue
 		}
 
-		ok, err := checkDependencies(db, stepID, config.DockerShell.DependsOn)
-		if err != nil {
-			stepLogger.Printf("Step %d: error checking dependencies: %v\n", stepID, err)
-			continue
-		}
-		if !ok {
-			stepLogger.Printf("Step %d: waiting for dependencies to complete\n", stepID)
-			continue
+		if len(config.DockerShell.DependsOn) > 0 {
+			ok, err := checkDependencies(db, stepID, config.DockerShell.DependsOn)
+			if err != nil {
+				stepLogger.Printf("Step %d: error checking dependencies: %v\n", stepID, err)
+				continue
+			}
+			if !ok {
+				stepLogger.Printf("Step %d: waiting for dependencies to complete\n", stepID)
+				continue
+			}
 		}
 
 		// Check if the container is running
 		containerID := config.DockerShell.Docker.ContainerID
-		inspectCmd := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", containerID)
+		inspectCmd := execCommand("docker", "inspect", "-f", "{{.State.Running}}", containerID)
 		output, err := inspectCmd.CombinedOutput()
 		if err != nil {
 			msg := fmt.Sprintf("failed to inspect container %s: %v. Output: %s", containerID, err, string(output))
@@ -70,14 +66,14 @@ func processDockerShellSteps(db *sql.DB) {
 		}
 
 		// Container is running, execute commands
-		var results []map[string]string
+		var results []map[string]interface{}
 		var commandErrors []string
 
 		for _, cmdMap := range config.DockerShell.Command {
 			for label, command := range cmdMap {
 				stepLogger.Printf("Step %d: executing command for label '%s': %s\n", stepID, label, command)
 				// Note: Using `sh -c` to handle more complex commands properly
-				execCmd := exec.Command("docker", "exec", containerID, "sh", "-c", command)
+				execCmd := execCommand("docker", "exec", containerID, "sh", "-c", command)
 				cmdOutput, err := execCmd.CombinedOutput()
 
 				if err != nil {
@@ -85,7 +81,7 @@ func processDockerShellSteps(db *sql.DB) {
 					stepLogger.Printf("Step %d: %s\n", stepID, errorMsg)
 					commandErrors = append(commandErrors, errorMsg)
 					// Store partial failure if needed, or just collect errors
-					results = append(results, map[string]string{
+					results = append(results, map[string]interface{}{
 						"label":  label,
 						"output": "",
 						"error":  errorMsg,
@@ -93,7 +89,7 @@ func processDockerShellSteps(db *sql.DB) {
 				} else {
 					outputStr := strings.TrimSpace(string(cmdOutput))
 					stepLogger.Printf("Step %d: command for label '%s' succeeded. Output: %s\n", stepID, label, outputStr)
-					results = append(results, map[string]string{
+					results = append(results, map[string]interface{}{
 						"label":  label,
 						"output": outputStr,
 						"error":  "",

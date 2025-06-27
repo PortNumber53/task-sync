@@ -490,8 +490,15 @@ func TestExecutePendingSteps(t *testing.T) {
 		processDockerRubricsStepsFunc = originalDockerRubrics
 	}()
 
-	// Call the function to be tested (db can be nil as our mocks don't use it)
-	err := executePendingSteps(nil)
+	// Setup a mock DB. Even though the downstream funcs are mocked, the top-level func might use it.
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("an error '%s' was not expected when opening a stub database connection", err)
+	}
+	defer db.Close()
+
+	// Call the function to be tested
+	err = executePendingSteps(db)
 	if err != nil {
 		t.Fatalf("executePendingSteps returned an unexpected error: %v", err)
 	}

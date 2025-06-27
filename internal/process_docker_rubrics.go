@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -181,7 +180,7 @@ func processDockerRubricsSteps(db *sql.DB) {
 						command = strings.TrimSpace(strings.TrimPrefix(command, "[ ]"))
 					}
 
-					cmd := exec.Command("docker", "run", "--rm", imageIDToUse, "sh", "-c", command)
+					cmd := execCommand("docker", "run", "--rm", imageIDToUse, "sh", "-c", command)
 					output, err := cmd.CombinedOutput()
 
 					if err != nil {

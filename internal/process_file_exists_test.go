@@ -1,102 +1,70 @@
 package internal
 
 import (
+	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
-	// "github.com/DATA-DOG/go-sqlmock" // Not strictly needed for this test, but good to keep for consistency if other tests are added
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
-// TestStepFileExistsLogic was TestProcessFileExistsSteps
-func TestProcessFileExistsSteps(t *testing.T) { // Renaming to match the function it's testing
+func TestProcessFileExistsSteps(t *testing.T) {
+	// Initialize logger to avoid nil pointer issues
+	stepLogger = log.New(testWriter{}, "", 0)
 	tempDir := t.TempDir()
-	testFile := filepath.Join(tempDir, "Dockerfile")
-	if err := os.WriteFile(testFile, []byte("FROM busybox"), 0644); err != nil {
+	testFile := filepath.Join(tempDir, "testfile.txt")
+	if err := os.WriteFile(testFile, []byte("content"), 0644); err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
 
-	tests := []struct {
-		name      string
-		localPath string
-		settings  map[string]interface{}
-		// filePresent bool // This field is not used in the original test logic, can be removed
-		wantResult string
+	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'active' AND t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> '' AND s.settings ? 'file_exists'`
+
+	testCases := []struct {
+		name           string
+		stepID         int
+		settings       map[string]interface{}
+		expectedResult map[string]interface{}
 	}{
 		{
-			name:      "file exists",
-			localPath: tempDir,
-			settings:  map[string]interface{}{"file_exists": "Dockerfile"},
-			// filePresent: true,
-			wantResult: "success",
+			name:           "file exists",
+			stepID:         1,
+			settings:       map[string]interface{}{"file_exists": "testfile.txt"},
+			expectedResult: map[string]interface{}{"result": "success"},
 		},
 		{
-			name:      "file missing",
-			localPath: tempDir,
-			settings:  map[string]interface{}{"file_exists": "notfound.txt"},
-			// filePresent: false,
-			wantResult: "failure",
-		},
-		{
-			name:      "invalid settings - no file_exists key",
-			localPath: tempDir,
-			settings:  map[string]interface{}{"other_key": "some_value"}, // no file_exists key
-			// filePresent: false,
-			wantResult: "", // should not update result, or rather, the function should handle this gracefully (e.g. error or specific status)
-		},
-		{
-			name:      "invalid settings - file_exists key is not a string",
-			localPath: tempDir,
-			settings:  map[string]interface{}{"file_exists": 123},
-			// filePresent: false,
-			wantResult: "",
+			name:           "file does not exist",
+			stepID:         2,
+			settings:       map[string]interface{}{"file_exists": "nonexistent.txt"},
+			expectedResult: map[string]interface{}{"result": "failure", "message": "file not found: nonexistent.txt"},
 		},
 	}
 
-	// This test needs to be adapted to call processFileExistsSteps directly
-	// and mock the database interactions (StoreStepResult).
-	// For now, it simulates the core logic as it was in steps_test.go.
-
-	for _, tc := range tests {
+	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Simulate parts of the processFileExistsSteps function's logic
-			// This is not a full integration test of processFileExistsSteps yet.
-			// A full test would involve mocking db and calling processFileExistsSteps.
-
-			// processFileExistsSteps unmarshals settings into map[string]interface{}
-			// and then extracts "file_exists" key.
-			// We simulate that here using the tc.settings directly.
-			filePathSetting, ok := tc.settings["file_exists"].(string)
-
-			if !ok {
-				// This covers cases where 'file_exists' is missing or not a string.
-				if tc.name == "invalid settings - no file_exists key" || tc.name == "invalid settings - file_exists key is not a string" {
-					if tc.wantResult != "" { // If we expected a specific result despite invalid settings
-						t.Errorf("Test '%s': 'file_exists' key missing or not a string, but expected result '%s'", tc.name, tc.wantResult)
-					}
-					// If wantResult is "", this is the expected behavior for these invalid settings cases, so we return.
-					return
-				} else {
-					// This case should ideally not be hit if test cases are well-defined.
-					// It means 'file_exists' was not found/valid, but the test case wasn't one of the specific invalid settings tests.
-					t.Errorf("Test '%s': 'file_exists' key missing or not a string in settings: %v", tc.name, tc.settings)
-					return
-				}
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("an error '%s' was not expected when opening a stub database connection", err)
 			}
+			defer db.Close()
 
-			absPath := filepath.Join(tc.localPath, filePathSetting)
-			_, err := os.Stat(absPath)
+			settingsBytes, _ := json.Marshal(tc.settings)
+			rows := sqlmock.NewRows([]string{"id", "task_id", "settings", "local_path"}).
+				AddRow(tc.stepID, 1, string(settingsBytes), tempDir)
 
-			actualResult := ""
-			if err == nil {
-				actualResult = "success"
-			} else if os.IsNotExist(err) {
-				actualResult = "failure"
-			} else {
-				t.Fatalf("Test '%s': os.Stat returned an unexpected error: %v", tc.name, err)
-			}
+			mock.ExpectQuery(regexp.QuoteMeta(query)).WillReturnRows(rows)
 
-			if actualResult != tc.wantResult {
-				t.Errorf("Test '%s': got result '%s', want '%s' (file: %s)", tc.name, actualResult, tc.wantResult, absPath)
+			resultBytes, _ := json.Marshal(tc.expectedResult)
+			mock.ExpectExec(regexp.QuoteMeta(`UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2`)).
+				WithArgs(string(resultBytes), tc.stepID).
+				WillReturnResult(sqlmock.NewResult(1, 1))
+
+			processFileExistsSteps(db)
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("there were unfulfilled expectations: %s", err)
 			}
 		})
 	}

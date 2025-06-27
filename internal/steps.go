@@ -93,18 +93,21 @@ func ListSteps(db *sql.DB, full bool) error {
 	return nil
 }
 
+// DockerBuild defines the structure for docker build specific settings.
+type DockerBuild struct {
+	DependsOn []struct {
+		ID int `json:"id"`
+	} `json:"depends_on"`
+	Files    []string          `json:"files"`
+	Hashes   map[string]string `json:"hashes"`
+	Params   []string          `json:"params"`
+	ImageID  string            `json:"image_id"`
+	ImageTag string            `json:"image_tag"`
+}
+
 // DockerBuildConfig represents the configuration for a docker build step
 type DockerBuildConfig struct {
-	DockerBuild struct {
-		DependsOn []struct {
-			ID int `json:"id"`
-		} `json:"depends_on"`
-		Files    []string          `json:"files"`
-		Hashes   map[string]string `json:"hashes"`
-		Shell    []string          `json:"shell"`
-		ImageID  string            `json:"image_id"`
-		ImageTag string            `json:"image_tag"`
-	} `json:"docker_build"`
+	DockerBuild DockerBuild `json:"docker_build"`
 }
 
 // DockerRubricsConfig represents the configuration for a docker rubrics step
@@ -123,15 +126,15 @@ type DockerRubricsConfig struct {
 // DockerRunConfig represents the configuration for a docker run step
 type DockerRunConfig struct {
 	DockerRun struct {
-		DependsOn           []struct {
+		DependsOn []struct {
 			ID int `json:"id"`
 		} `json:"depends_on"`
-		DockerRunParameters []string `json:"docker_run_parameters"`
-		ImageID             string   `json:"image_id"`
-		ImageTag            string   `json:"image_tag"`
-		ContainerID         string   `json:"container_id,omitempty"`
-		ContainerName       string   `json:"container_name,omitempty"`
-		ContainerHash       string   `json:"container_hash,omitempty"`
+		Parameters    []string `json:"parameters"`
+		ImageID       string   `json:"image_id"`
+		ImageTag      string   `json:"image_tag"`
+		ContainerID   string   `json:"container_id,omitempty"`
+		ContainerName string   `json:"container_name,omitempty"`
+		ContainerHash string   `json:"container_hash,omitempty"`
 	} `json:"docker_run"`
 }
 
@@ -158,7 +161,7 @@ type DockerPullConfig struct {
 			ID int `json:"id"`
 		} `json:"depends_on,omitempty"`
 		ImageTag         string `json:"image_tag"`
-		ImageID          string `json:"image_id,omitempty"`          // Optional: for verification after pull
+		ImageID          string `json:"image_id,omitempty"`           // Optional: for verification after pull
 		PreventRunBefore string `json:"prevent_run_before,omitempty"` // RFC3339 timestamp
 	} `json:"docker_pull"`
 }
@@ -238,8 +241,6 @@ func checkDependencies(db *sql.DB, stepID int, dependsOn []struct {
 	return allDepsCompleted, err
 }
 
-
-
 type stepExec struct {
 	StepID    int
 	TaskID    int
@@ -283,7 +284,6 @@ func executePendingSteps(db *sql.DB) error {
 	// For now, assuming steps complete or timeout reasonably quickly
 	return nil
 }
-
 
 // CopyStep copies a step to a new task with the given ID
 // GetStepInfo retrieves detailed information about a specific step by ID
@@ -412,7 +412,7 @@ func RemoveStepSettingKey(db *sql.DB, stepID int, keyToRemove string) error {
 	if _, ok := stepInfo.Settings[keyToRemove]; !ok {
 		// Key not found, consider this a success as the state is as if it were removed.
 		// Alternatively, return an error: fmt.Errorf("key '%s' not found in settings for step %d", keyToRemove, stepID)
-		return nil 
+		return nil
 	}
 
 	// Remove the key
@@ -446,7 +446,6 @@ func RemoveStepSettingKey(db *sql.DB, stepID int, keyToRemove string) error {
 	return nil
 }
 
-
 // setNestedValue sets a value in a nested map based on a dot-separated path.
 // It creates intermediate maps if they don't exist.
 func setNestedValue(dataMap map[string]interface{}, path string, value interface{}) error {
@@ -461,7 +460,7 @@ func setNestedValue(dataMap map[string]interface{}, path string, value interface
 				// Part doesn't exist, create a new map
 				current[part] = make(map[string]interface{})
 			}
-			
+
 			nextMap, ok := current[part].(map[string]interface{})
 			if !ok {
 				// Part exists but is not a map, cannot traverse
@@ -512,7 +511,7 @@ func UpdateStepFieldOrSetting(db *sql.DB, stepID int, keyToSet string, valueToSe
 		if stepInfo.Settings == nil {
 			stepInfo.Settings = make(map[string]interface{})
 		}
-		
+
 		var jsonValue interface{}
 		// Attempt to unmarshal valueToSet to see if it's a JSON primitive (number, boolean, null) or a pre-formatted JSON object/array.
 		err = json.Unmarshal([]byte(valueToSet), &jsonValue)
@@ -552,7 +551,6 @@ func UpdateStepFieldOrSetting(db *sql.DB, stepID int, keyToSet string, valueToSe
 	}
 }
 
-
 // ClearStepResults clears the results for a step
 func ClearStepResults(db *sql.DB, stepID int) error {
 	result, err := db.Exec(
@@ -571,5 +569,3 @@ func ClearStepResults(db *sql.DB, stepID int) error {
 	}
 	return nil
 }
-
-

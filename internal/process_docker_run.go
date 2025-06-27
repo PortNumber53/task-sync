@@ -144,7 +144,6 @@ func processDockerRunSteps(db *sql.DB) {
 							_, dbErr := db.Exec("UPDATE steps SET settings = $1, status = 'complete', updated_at = NOW() WHERE id = $2", string(updatedSettingsJSON), step.StepID)
 							if dbErr != nil {
 								stepLogger.Printf("Step %d: Failed to update step settings/status to complete for already running container: %v\n", step.StepID, dbErr)
-								// Result already stored, but this is an inconsistency.
 							}
 						}
 						continue
@@ -152,40 +151,44 @@ func processDockerRunSteps(db *sql.DB) {
 						stepLogger.Printf("Step %d: Container %s (%s) found but not running. Will attempt to start a new one.\n", step.StepID, config.DockerRun.ContainerName, config.DockerRun.ContainerID)
 					} else if inspectResult[0].Config.Image != imageIDToUse {
 						stepLogger.Printf("Step %d: Container %s (%s) running with wrong image (%s vs %s). Will attempt to start a new one.\n", step.StepID, config.DockerRun.ContainerName, config.DockerRun.ContainerID, inspectResult[0].Config.Image, imageIDToUse)
-						// Consider stopping/removing the old one if desired
 					}
 				}
 			} else {
 				stepLogger.Printf("Step %d: Failed to inspect container %s. It might have been removed. Will attempt to start a new one. Error: %v\n", step.StepID, config.DockerRun.ContainerID, err)
 			}
-			// If container not running correctly or inspect failed, clear old ID/Name to launch a new one
 			config.DockerRun.ContainerID = ""
 			config.DockerRun.ContainerName = ""
 		}
 
-		dockerRunParams := config.DockerRun.DockerRunParameters
-
+		dockerRunParams := config.DockerRun.Parameters
 		if len(dockerRunParams) == 0 {
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "docker_run_parameters are not specified or invalid"})
-			stepLogger.Printf("Step %d: docker_run_parameters are not specified or invalid in command object\n", step.StepID)
+			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "docker_run parameters are not specified or invalid"})
+			stepLogger.Printf("Step %d: docker_run parameters are not specified or invalid in command object\n", step.StepID)
 			continue
 		}
 
-		foundImageTagPlaceholder := false
-		for i, part := range dockerRunParams {
-			if part == "<<IMAGETAG>>" {
-				dockerRunParams[i] = imageIDToUse
-				foundImageTagPlaceholder = true
+		imageTagFound := false
+		for _, param := range dockerRunParams {
+			if strings.Contains(param, "%%IMAGETAG%%") {
+				imageTagFound = true
+				break
 			}
 		}
 
-		if !foundImageTagPlaceholder {
-			stepLogger.Printf("Step %d: <<IMAGETAG>> placeholder not found in docker_run_parameters. The image '%s' may not be used correctly.", step.StepID, imageIDToUse)
+		if !imageTagFound {
+			stepLogger.Printf("Step %d: '%%IMAGETAG%%' placeholder not found in docker_run parameters. Skipping.", step.StepID)
+			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "'%%IMAGETAG%%' placeholder not found in docker_run parameters"})
+			_, err := db.Exec(`UPDATE steps SET status = 'error', updated_at = now() WHERE id = $1`, step.StepID)
+			if err != nil {
+				stepLogger.Printf("Step %d: Failed to update step status to error: %v\n", step.StepID, err)
+			}
+			continue
 		}
 
 		processedDockerRunParams := []string{}
 		for _, param := range dockerRunParams {
-			processedDockerRunParams = append(processedDockerRunParams, strings.Fields(param)...)
+			replacedParam := strings.Replace(param, "%%IMAGETAG%%", imageIDToUse, -1)
+			processedDockerRunParams = append(processedDockerRunParams, strings.Fields(replacedParam)...)
 		}
 
 		hasKeepAliveCmd := false
@@ -227,43 +230,37 @@ func processDockerRunSteps(db *sql.DB) {
 			if updateErr != nil {
 				stepLogger.Printf("Step %d: Failed to update step status to error after docker run failure: %v\n", step.StepID, updateErr)
 			}
+		} else {
+			stepLogger.Printf("Step %d: command 'docker run %v' succeeded. Container ID: %s, Name: %s\n", step.StepID, detachedParams, newContainerID, containerName)
+			config.DockerRun.ContainerID = newContainerID
+			config.DockerRun.ContainerName = containerName
+			config.DockerRun.ImageID = imageIDToUse // Ensure the used ImageID is saved
+
+			newSettingsJSON, marshalErr := json.Marshal(config)
+			if marshalErr != nil {
+				stepLogger.Printf("Step %d: Failed to marshal updated settings after successful run: %v\n", step.StepID, marshalErr)
+				StoreStepResult(db, step.StepID, map[string]interface{}{
+					"result":         "success", // Container ran
+					"message":        fmt.Sprintf("Container %s (%s) started, but failed to marshal updated settings: %v", containerName, newContainerID, marshalErr),
+					"container_id":   newContainerID,
+					"container_name": containerName,
+				})
+				_, updateErr := db.Exec("UPDATE steps SET status = 'error', updated_at = NOW() WHERE id = $1", step.StepID)
+				if updateErr != nil {
+					stepLogger.Printf("Step %d: Failed to update step status to error after marshal failure: %v\n", step.StepID, updateErr)
+				}
 			} else {
-				stepLogger.Printf("Step %d: command 'docker run %v' succeeded. Container ID: %s, Name: %s\n", step.StepID, detachedParams, newContainerID, containerName)
-				config.DockerRun.ContainerID = newContainerID
-				config.DockerRun.ContainerName = containerName
-				config.DockerRun.ImageID = imageIDToUse // Ensure the used ImageID is saved
-				
-				newSettingsJSON, marshalErr := json.Marshal(config)
-				if marshalErr != nil {
-					stepLogger.Printf("Step %d: Failed to marshal updated settings after successful run: %v\n", step.StepID, marshalErr)
-					// Even if marshal fails, the container ran. Store success for run, but error for step state.
-					StoreStepResult(db, step.StepID, map[string]interface{}{
-						"result":         "success", // Container ran
-						"message":        fmt.Sprintf("Container %s (%s) started, but failed to marshal updated settings: %v", containerName, newContainerID, marshalErr),
-						"container_id":   newContainerID,
-						"container_name": containerName,
-					})
-					// Mark step as error because its settings are inconsistent
-					_, updateErr := db.Exec("UPDATE steps SET status = 'error', updated_at = NOW() WHERE id = $1", step.StepID)
-					if updateErr != nil {
-						stepLogger.Printf("Step %d: Failed to update step status to error after marshal failure: %v\n", step.StepID, updateErr)
-					}
-				} else {
-					// Store success result
-					StoreStepResult(db, step.StepID, map[string]interface{}{
-						"result":         "success",
-						"message":        "container started in detached mode and step updated",
-						"container_id":   newContainerID,
-						"container_name": containerName,
-					})
-					// Update step settings and status to 'success'
-					_, updateErr := db.Exec("UPDATE steps SET settings = $1, status = 'success', updated_at = NOW() WHERE id = $2", string(newSettingsJSON), step.StepID)
-					if updateErr != nil {
-						stepLogger.Printf("Step %d: Failed to update step settings/status to success: %v\n", step.StepID, updateErr)
-						// If DB update fails, the step is in an inconsistent state.
-						// The result was already stored, but we should log this problem.
-					}
+				StoreStepResult(db, step.StepID, map[string]interface{}{
+					"result":         "success",
+					"message":        "container started in detached mode and step updated",
+					"container_id":   newContainerID,
+					"container_name": containerName,
+				})
+				_, updateErr := db.Exec("UPDATE steps SET settings = $1, status = 'success', updated_at = NOW() WHERE id = $2", string(newSettingsJSON), step.StepID)
+				if updateErr != nil {
+					stepLogger.Printf("Step %d: Failed to update step settings/status to success: %v\n", step.StepID, updateErr)
 				}
 			}
 		}
 	}
+}

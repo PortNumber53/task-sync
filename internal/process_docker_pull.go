@@ -7,17 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"time"
 )
 
 func processDockerPullSteps(db *sql.DB) {
-	query := `SELECT s.id, s.task_id, s.settings, t.local_path
-		FROM steps s
-		JOIN tasks t ON s.task_id = t.id
-		WHERE s.status = 'active'
-		AND t.status = 'active' -- Assuming tasks also need to be active
-		AND s.settings ? 'docker_pull'`
+	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'active' AND t.status = 'active' AND s.settings ? 'docker_pull'`
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -122,7 +116,7 @@ func executeDockerPull(config *DockerPullConfig, stepID int, db *sql.DB) error {
 	}
 
 	cmdArgs := []string{"pull", config.DockerPull.ImageTag}
-	cmd := exec.Command("docker", cmdArgs...)
+	cmd := execCommand("docker", cmdArgs...)
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf) // Write to both os.Stdout and buffer

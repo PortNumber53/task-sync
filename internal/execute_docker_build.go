@@ -6,36 +6,54 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 )
 
 // executeDockerBuild executes the docker build command and captures the image ID
 func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, db *sql.DB) error {
-	// Replace image tag placeholder in shell command
-	cmdParts := make([]string, len(config.DockerBuild.Shell))
-	for i, part := range config.DockerBuild.Shell {
-		cmdParts[i] = strings.ReplaceAll(part, "%%IMAGE_TAG%%", config.DockerBuild.ImageTag)
+	// Process docker build parameters, replacing the image tag placeholder
+	var buildParams []string
+	for _, p := range config.DockerBuild.Params {
+		// Replace placeholder
+		processedParam := strings.ReplaceAll(p, "<<IMAGETAG>>", config.DockerBuild.ImageTag)
+		// Split params like "--platform linux/amd64" into two parts
+		buildParams = append(buildParams, strings.Fields(processedParam)...)
 	}
 
-	// Create buffers to capture output
-	var stdoutBuf, stderrBuf bytes.Buffer
+	// Defensive check for empty params
+	if len(buildParams) == 0 {
+		return fmt.Errorf("step %d: docker build params are empty", stepID)
+	}
 
-	// Execute the command
-	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+	// Construct the full command
+	cmdArgs := append([]string{"build"}, buildParams...)
+	cmdArgs = append(cmdArgs, workDir) // Append the build context path
+	stepLogger.Printf("Step %d: constructing docker build command: docker %s", stepID, strings.Join(cmdArgs, " "))
+
+	cmd := execCommand("docker", cmdArgs...)
 	cmd.Dir = workDir
 
-	// Create a multi-writer that writes to both the buffer and stdout/stderr
+	// Create buffers and multi-writers to capture output
+	var stdoutBuf, stderrBuf bytes.Buffer
 	stdoutWriters := []io.Writer{&stdoutBuf, os.Stdout}
 	stderrWriters := []io.Writer{&stderrBuf, os.Stderr}
-
 	cmd.Stdout = io.MultiWriter(stdoutWriters...)
 	cmd.Stderr = io.MultiWriter(stderrWriters...)
 
-	stepLogger.Printf("Step %d: Executing docker build: %v\n", stepID, strings.Join(cmdParts, " "))
-	err := cmd.Run()
+		if err := cmd.Run(); err != nil {
+		// Always log the full output for debugging
+		stdoutOutput := stdoutBuf.String()
+		stderrOutput := stderrBuf.String()
+		if len(stdoutOutput) > 0 {
+			stepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
+		}
+		if len(stderrOutput) > 0 {
+			stepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
+		}
+		return fmt.Errorf("docker build failed: %v", err)
+	}
 
-	// Always log the full output for debugging
+	// Log the full output for debugging on success as well
 	stdoutOutput := stdoutBuf.String()
 	stderrOutput := stderrBuf.String()
 
@@ -46,11 +64,7 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 		stepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
 	}
 
-	if err != nil {
-		// Include both stdout and stderr in the error message
-		return fmt.Errorf("docker build failed: %v\nStdout:\n%s\nStderr:\n%s",
-			err, stdoutOutput, stderrOutput)
-	}
+	
 
 	// Get the image ID
 	imageID, err := getDockerImageID(config.DockerBuild.ImageTag)

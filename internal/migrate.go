@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -26,6 +27,11 @@ var stepLogger *log.Logger
 // godotenvLoad allows mocking of godotenv.Load in tests.
 var godotenvLoad = godotenv.Load
 
+// InitStepLogger initializes the package-level step logger.
+func InitStepLogger(writer io.Writer) {
+	stepLogger = log.New(writer, "[StepExecutor] ", log.LstdFlags)
+}
+
 // RunAPIServer starts the Gin server and prints environment/setup info
 // (Task and step logic is now in tasks.go and steps.go)
 func RunAPIServer(listenAddr string) error {
@@ -34,17 +40,17 @@ func RunAPIServer(listenAddr string) error {
 	if err != nil {
 		fmt.Println("[Config] Error loading config:", err)
 	}
+
+	var logWriter io.Writer = os.Stdout
 	if cfg != nil && cfg.LogFile != "" {
 		f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
 			fmt.Println("[Config] Failed to open log file:", err)
-			stepLogger = log.New(os.Stdout, "[StepExecutor] ", log.LstdFlags)
 		} else {
-			stepLogger = log.New(f, "[StepExecutor] ", log.LstdFlags)
+			logWriter = f
 		}
-	} else {
-		stepLogger = log.New(os.Stdout, "[StepExecutor] ", log.LstdFlags)
 	}
+	InitStepLogger(logWriter)
 
 	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
@@ -69,14 +75,14 @@ func RunAPIServer(listenAddr string) error {
 		defer close(doneChan)
 
 		// Initial execution
-		if err := executePendingSteps(db); err != nil {
+		if err := ProcessSteps(db); err != nil {
 			stepLogger.Printf("Error during initial step execution: %v", err)
 		}
 
 		for {
 			select {
 			case <-ticker.C:
-				if err := executePendingSteps(db); err != nil {
+				if err := ProcessSteps(db); err != nil {
 					stepLogger.Printf("Error during periodic step execution: %v", err)
 				}
 			case <-stopChan:

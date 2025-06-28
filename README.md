@@ -78,20 +78,20 @@ The value for `file_exists` can be a single string for one file, or an array of 
 
 ### 2. `docker_build`
 
-Builds a Docker image from a Dockerfile.
+Builds a Docker image from a Dockerfile. This step can track file changes to avoid rebuilding if no source files have been modified.
 
 **Settings:**
 
 ```json
 {
   "docker_build": {
-    "image_tag": "my-custom-app:latest",
-    "files": [
-      "Dockerfile",
-      "main.go",
-      "go.mod",
-      "go.sum"
-    ],
+    "image_tag": "my-app:latest",
+    "files": ["main.go", "go.mod"],
+    "hashes": {
+      "main.go": "<hash_of_main.go>",
+      "go.mod": "<hash_of_go.mod>"
+    },
+    "params": ["--build-arg", "VERSION=1.0"],
     "shell": [
       "echo 'Starting the build...'"
     ],
@@ -101,8 +101,11 @@ Builds a Docker image from a Dockerfile.
   }
 }
 ```
-- `image_tag`: The tag to apply to the built image.
-- `files`: A list of files to monitor. The step will re-run if their hashes change.
+
+- `image_tag`: The tag for the new Docker image.
+- `files`: A list of file paths to monitor for changes.
+- `hashes`: A map of file paths to their SHA256 hashes. This is used to detect changes and is updated automatically.
+- `params`: A list of extra parameters to pass to the `docker build` command (e.g., build arguments).
 - `shell` (optional): A list of shell commands to execute before the build.
 - `depends_on` (optional): A list of other step IDs that must be completed successfully before this step can run.
 
@@ -227,7 +230,76 @@ This step appears to be a specialized version of `docker_build`, likely for auto
 }'
 ```
 
-### 6. `docker_pull`
+### 6. `dynamic_lab`
+
+Monitors specified files for changes by comparing their content hashes. This step is useful for triggering other steps when a file is modified.
+
+**Settings:**
+
+```json
+{
+  "dynamic_lab": {
+    "files": {
+      "path/to/your/file1.txt": "<hash_of_file1>",
+      "path/to/another/file2.go": "<hash_of_file2>"
+    }
+  }
+}
+```
+
+- `files`: A map where keys are file paths and values are their expected SHA256 hashes. The step will update the hashes and its status if any file has changed.
+
+**Example CLI Command:**
+
+```bash
+./task-sync step create --task-id 1 --title "Monitor Source Code" --settings '{
+  "dynamic_lab": {
+    "files": {
+      "main.go": "",
+      "go.mod": ""
+    }
+  }
+}'
+```
+
+### 7. `dynamic_rubric`
+
+Parses a rubric file (in Markdown format) and generates child steps based on its content. This is highly useful for automated grading and dynamic task generation.
+
+**Settings:**
+
+```json
+{
+  "dynamic_rubric": {
+    "file": "rubric.md",
+    "environment": {
+      "docker": true,
+      "image_tag": "your-image:latest",
+      "image_id": "sha256:abcdef..."
+    }
+  }
+}
+```
+
+- `file`: The path to the Markdown file containing the rubric criteria.
+- `environment`: If `docker` is `true`, this step will first create a `docker_run` step with the specified `image_tag` and `image_id`, and then generate `docker_shell` steps for each rubric criterion that depend on it.
+
+**Example CLI Command:**
+
+```bash
+./task-sync step create --task-id 1 --title "Grade Project" --settings '{
+  "dynamic_rubric": {
+    "file": "rubric.md",
+    "environment": {
+      "docker": true,
+      "image_tag": "grader:v1",
+      "image_id": "sha256:123..."
+    }
+  }
+}'
+```
+
+### 8. `docker_pull`
 
 Pulls a Docker image from a registry.
 

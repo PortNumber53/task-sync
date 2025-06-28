@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -31,13 +30,13 @@ func TestCreateStep(t *testing.T) {
 		mock.ExpectQuery("SELECT id FROM tasks WHERE id = \\$1").
 			WithArgs(42).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(42))
-		// Expect insert
-		mock.ExpectExec("INSERT INTO steps").
+		// Expect insert and return of new ID
+		mock.ExpectQuery("INSERT INTO steps").
 			WithArgs(42, "Test Step", `{"foo":"bar"}`).
-			WillReturnResult(sqlmock.NewResult(1, 1))
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
 
 		settings := `{"foo":"bar"}`
-		err := CreateStep(db, "42", "Test Step", settings)
+		_, err := CreateStep(db, "42", "Test Step", settings)
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -50,12 +49,13 @@ func TestCreateStep(t *testing.T) {
 		mock.ExpectQuery("SELECT id FROM tasks WHERE name = \\$1").
 			WithArgs("mytask").
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
-		mock.ExpectExec("INSERT INTO steps").
+		// Expect insert and return of new ID
+		mock.ExpectQuery("INSERT INTO steps").
 			WithArgs(7, "Step by Name", `{"foo":123}`).
-			WillReturnResult(sqlmock.NewResult(1, 1))
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
 
 		settings := `{"foo":123}`
-		err := CreateStep(db, "mytask", "Step by Name", settings)
+		_, err := CreateStep(db, "mytask", "Step by Name", settings)
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -65,7 +65,7 @@ func TestCreateStep(t *testing.T) {
 	})
 
 	t.Run("invalid settings JSON", func(t *testing.T) {
-		err := CreateStep(db, "42", "Bad JSON", "not-json")
+		_, err := CreateStep(db, "42", "Bad JSON", "not-json")
 		if err == nil || err.Error() == "" {
 			t.Error("expected error for invalid JSON, got nil")
 		}
@@ -77,7 +77,7 @@ func TestCreateStep(t *testing.T) {
 			WillReturnError(sql.ErrNoRows)
 
 		settings := `{"foo":1}`
-		err := CreateStep(db, "notask", "No Task", settings)
+		_, err := CreateStep(db, "notask", "No Task", settings)
 		if err == nil || err.Error() == "" {
 			t.Error("expected error for missing task, got nil")
 		}
@@ -460,45 +460,55 @@ func TestCheckDependencies(t *testing.T) {
 	})
 }
 func TestExecutePendingSteps(t *testing.T) {
-	// Use a channel to record the order of function calls
-	callOrder := make(chan string, 4)
-
-	// Replace the real functions with mocks for the duration of the test
-	originalFileExists := processFileExistsStepsFunc
-	originalDockerBuild := processDockerBuildStepsFunc
-	originalDockerRun := processDockerRunStepsFunc
-	originalDockerRubrics := processDockerRubricsStepsFunc
-
-	processFileExistsStepsFunc = func(db *sql.DB) {
-		callOrder <- "file_exists"
-	}
-	processDockerBuildStepsFunc = func(db *sql.DB) {
-		callOrder <- "docker_build"
-	}
-	processDockerRunStepsFunc = func(db *sql.DB) {
-		callOrder <- "docker_run"
-	}
-	processDockerRubricsStepsFunc = func(db *sql.DB) {
-		callOrder <- "docker_rubrics"
-	}
-
-	// Restore original functions after the test
-	defer func() {
-		processFileExistsStepsFunc = originalFileExists
-		processDockerBuildStepsFunc = originalDockerBuild
-		processDockerRunStepsFunc = originalDockerRun
-		processDockerRubricsStepsFunc = originalDockerRubrics
-	}()
-
-	// Setup a mock DB. Even though the downstream funcs are mocked, the top-level func might use it.
-	db, _, err := sqlmock.New()
+	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("an error '%s' was not expected when opening a stub database connection", err)
 	}
 	defer db.Close()
 
+	// Use a channel to record the order of function calls
+	callOrder := make(chan string, 10) // Increased buffer size
+
+	// Mock implementation for processDynamicRubricSteps
+	// This is called before the main loop, so we need to mock its DB interaction
+	mock.ExpectQuery(`SELECT s.id, s.task_id, s.title, s.status, s.settings, COALESCE\(t.local_path, ''\)`).
+		WithArgs("active", "dynamic_rubric").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "task_id", "title", "status", "settings", "local_path"}))
+
+	// Create a map of mock step processors
+	mockStepProcessors := map[string]func(*sql.DB) error{
+		"dynamic_lab": func(db *sql.DB) error {
+			callOrder <- "dynamic_lab"
+			return nil
+		},
+		"docker_pull": func(db *sql.DB) error {
+			callOrder <- "docker_pull"
+			return nil
+		},
+		"docker_build": func(db *sql.DB) error {
+			callOrder <- "docker_build"
+			return nil
+		},
+		"docker_run": func(db *sql.DB) error {
+			callOrder <- "docker_run"
+			return nil
+		},
+		"docker_shell": func(db *sql.DB) error {
+			callOrder <- "docker_shell"
+			return nil
+		},
+		"docker_rubrics": func(db *sql.DB) error {
+			callOrder <- "docker_rubrics"
+			return nil
+		},
+		"file_exists": func(db *sql.DB) error {
+			callOrder <- "file_exists"
+			return nil
+		},
+	}
+
 	// Call the function to be tested
-	err = executePendingSteps(db)
+	err = executePendingSteps(db, mockStepProcessors)
 	if err != nil {
 		t.Fatalf("executePendingSteps returned an unexpected error: %v", err)
 	}
@@ -506,14 +516,36 @@ func TestExecutePendingSteps(t *testing.T) {
 	close(callOrder)
 
 	// Verify the call order
-	expectedOrder := []string{"file_exists", "docker_build", "docker_run", "docker_rubrics"}
-	actualOrder := []string{}
-	for call := range callOrder {
-		actualOrder = append(actualOrder, call)
+	// The order is determined by the map iteration, which is not guaranteed in Go.
+	// So, we check if all expected functions were called, regardless of order.
+	expectedCalls := map[string]bool{
+		"dynamic_lab":    true,
+		"docker_pull":    true,
+		"docker_build":   true,
+		"docker_run":     true,
+		"docker_shell":   true,
+		"docker_rubrics": true,
+		"file_exists":    true,
 	}
 
-	if !reflect.DeepEqual(expectedOrder, actualOrder) {
-		t.Errorf("Expected call order %v, but got %v", expectedOrder, actualOrder)
+	actualCalls := make(map[string]bool)
+	for call := range callOrder {
+		actualCalls[call] = true
+	}
+
+	if len(actualCalls) != len(expectedCalls) {
+		t.Errorf("Expected %d function calls, but got %d", len(expectedCalls), len(actualCalls))
+	}
+
+	for expected := range expectedCalls {
+		if !actualCalls[expected] {
+			t.Errorf("Expected function '%s' to be called, but it was not", expected)
+		}
+	}
+
+	// Check if all expectations were met
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("there were unfulfilled expectations: %s", err)
 	}
 }
 func TestGetStepInfo(t *testing.T) {

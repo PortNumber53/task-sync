@@ -34,6 +34,30 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "run-steps":
+		// Initialize the logger for step execution
+		internal.InitStepLogger(os.Stdout)
+
+		pgURL, err := internal.GetPgURLFromEnv()
+		if err != nil {
+			fmt.Printf("Database configuration error: %v\n", err)
+			os.Exit(1)
+		}
+		db, err := sql.Open("postgres", pgURL)
+		if err != nil {
+			fmt.Printf("Database connection error: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+
+		fmt.Println("Starting step processing...")
+		if err := internal.ProcessSteps(db); err != nil {
+			fmt.Printf("Error processing steps: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Step processing finished.")
+		return
+
 	case "serve":
 		// Check for help flag
 		help := false
@@ -135,6 +159,12 @@ func main() {
 		}
 
 		switch os.Args[2] {
+		case "tree":
+			if err := internal.TreeSteps(db); err != nil {
+				fmt.Printf("Error displaying step tree: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case "list":
 			full := false
 			help := false
@@ -196,12 +226,12 @@ func main() {
 			}
 
 			// Create the step
-			if err := internal.CreateStep(db, taskRef, title, settings); err != nil {
-				fmt.Printf("Error creating step: %v\n", err)
+			newStepID, err := internal.CreateStep(db, taskRef, title, settings)
+			if err != nil {
+				fmt.Printf("Failed to create step: %v\n", err)
 				os.Exit(1)
 			}
-
-			fmt.Println("Step created successfully.")
+			fmt.Printf("Step created successfully with ID: %d\n", newStepID)
 			return
 
 		case "edit":

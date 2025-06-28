@@ -11,7 +11,7 @@ import (
 )
 
 func processDockerPullSteps(db *sql.DB) {
-	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'active' AND t.status = 'active' AND s.settings ? 'docker_pull'`
+	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND s.settings ? 'docker_pull'`
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -38,8 +38,7 @@ func processDockerPullSteps(db *sql.DB) {
 		}
 
 		// Check dependencies
-		if len(config.DockerPull.DependsOn) > 0 {
-			depsMet, err := checkDependencies(db, step.StepID, config.DockerPull.DependsOn)
+		depsMet, err := checkDependencies(db, step.StepID, stepLogger)
 			if err != nil {
 				stepLogger.Printf("Error checking dependencies for step %d: %v\n", step.StepID, err)
 				// Optionally, store this as a failure or keep step active for retry
@@ -49,7 +48,6 @@ func processDockerPullSteps(db *sql.DB) {
 				stepLogger.Printf("Step %d: Dependencies not met for docker_pull.\n", step.StepID)
 				continue // Skip this step until dependencies are met
 			}
-		}
 
 		// Check PreventRunBefore
 		if config.DockerPull.PreventRunBefore != "" {

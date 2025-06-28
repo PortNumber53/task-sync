@@ -21,7 +21,7 @@ func TestProcessDockerRubricsSteps(t *testing.T) {
 
 	t.Run("no active steps", func(t *testing.T) {
 		rows := sqlmock.NewRows([]string{"id", "task_id", "settings", "local_path"})
-		mock.ExpectQuery(regexp.QuoteMeta(`SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'active' AND t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> '' AND s.settings::text LIKE '%docker_rubrics%'`)).
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> '' AND s.settings::text LIKE '%docker_rubrics%'`)).
 			WillReturnRows(rows)
 
 		processDockerRubricsSteps(db)
@@ -32,7 +32,7 @@ func TestProcessDockerRubricsSteps(t *testing.T) {
 	})
 
 	t.Run("query error", func(t *testing.T) {
-		mock.ExpectQuery(regexp.QuoteMeta(`SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'active' AND t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> '' AND s.settings::text LIKE '%docker_rubrics%'`)).
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> '' AND s.settings::text LIKE '%docker_rubrics%'`)).
 			WillReturnError(errors.New("db error"))
 
 		processDockerRubricsSteps(db)

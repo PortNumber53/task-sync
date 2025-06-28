@@ -15,7 +15,7 @@ import (
 // The step succeeds only if all specified paths exist relative to the task's local_path.
 // It stores the result ('success' or 'failure' with messages) back into the step's results.
 func processFileExistsSteps(db *sql.DB) {
-	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.status = 'active' AND t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> '' AND s.settings ? 'file_exists'`
+	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> '' AND s.settings ? 'file_exists'`
 
 	rows, err := db.Query(query)
 	if err != nil {

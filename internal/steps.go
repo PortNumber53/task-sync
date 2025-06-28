@@ -39,62 +39,48 @@ func CreateStep(db *sql.DB, taskRef, title, settings string) (int, error) {
 	}
 
 	var newStepID int
-	err := db.QueryRow(`INSERT INTO steps (task_id, title, status, settings, created_at, updated_at) VALUES ($1, $2, 'active', $3::jsonb, now(), now()) RETURNING id`, taskID, title, settings).Scan(&newStepID)
+	err := db.QueryRow(`INSERT INTO steps (task_id, title, settings, created_at, updated_at) VALUES ($1, $2, $3::jsonb, now(), now()) RETURNING id`, taskID, title, settings).Scan(&newStepID)
 	if err != nil {
 		return 0, err
 	}
 	return newStepID, nil
 }
 
-// ActivateStep sets the status of a step to 'active'
-func ActivateStep(db *sql.DB, stepID int) error {
-	result, err := db.Exec(`UPDATE steps SET status = 'active', updated_at = NOW() WHERE id = $1`, stepID)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("no step found with ID %d", stepID)
-	}
-	return nil
-}
+
 
 // ListSteps prints all steps in the DB. If full is true, prints settings column too.
 func ListSteps(db *sql.DB, full bool) error {
 	var rows *sql.Rows
 	var err error
 	if full {
-		rows, err = db.Query(`SELECT id, task_id, title, status, settings, created_at, updated_at FROM steps ORDER BY id`)
+		rows, err = db.Query(`SELECT id, task_id, title, settings, created_at, updated_at FROM steps ORDER BY id`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
-		fmt.Printf("%-4s %-7s %-20s %-10s %-30s %-25s %-25s\n", "ID", "TaskID", "Title", "Status", "Settings", "Created At", "Updated At")
+		fmt.Printf("%-4s %-7s %-20s %-30s %-25s %-25s\n", "ID", "TaskID", "Title", "Settings", "Created At", "Updated At")
 		for rows.Next() {
 			var id, taskID int
-			var title, status, settings, createdAt, updatedAt string
-			if err := rows.Scan(&id, &taskID, &title, &status, &settings, &createdAt, &updatedAt); err != nil {
+			var title, settings, createdAt, updatedAt string
+			if err := rows.Scan(&id, &taskID, &title, &settings, &createdAt, &updatedAt); err != nil {
 				return err
 			}
-			fmt.Printf("%-4d %-7d %-20s %-10s %-30s %-25s %-25s\n", id, taskID, title, status, settings, createdAt, updatedAt)
+			fmt.Printf("%-4d %-7d %-20s %-30s %-25s %-25s\n", id, taskID, title, settings, createdAt, updatedAt)
 		}
 	} else {
-		rows, err = db.Query(`SELECT id, task_id, title, status, created_at, updated_at FROM steps ORDER BY id`)
+		rows, err = db.Query(`SELECT id, task_id, title, created_at, updated_at FROM steps ORDER BY id`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
-		fmt.Printf("%-4s %-7s %-20s %-10s %-25s %-25s\n", "ID", "TaskID", "Title", "Status", "Created At", "Updated At")
+		fmt.Printf("%-4s %-7s %-20s %-25s %-25s\n", "ID", "TaskID", "Title", "Created At", "Updated At")
 		for rows.Next() {
 			var id, taskID int
-			var title, status, createdAt, updatedAt string
-			if err := rows.Scan(&id, &taskID, &title, &status, &createdAt, &updatedAt); err != nil {
+			var title, createdAt, updatedAt string
+			if err := rows.Scan(&id, &taskID, &title, &createdAt, &updatedAt); err != nil {
 				return err
 			}
-			fmt.Printf("%-4d %-7d %-20s %-10s %-25s %-25s\n", id, taskID, title, status, createdAt, updatedAt)
+			fmt.Printf("%-4d %-7d %-20s %-25s %-25s\n", id, taskID, title, createdAt, updatedAt)
 		}
 	}
 	return nil
@@ -164,7 +150,12 @@ type DockerShellConfig struct {
 // DynamicLabConfig represents the configuration for a dynamic_lab step
 type DynamicLabConfig struct {
 	DynamicLab struct {
-		Files map[string]string `json:"files"`
+		Files       map[string]string `json:"files"`
+		RubricFile  string            `json:"rubric_file"`
+		DependsOn   []struct {
+			ID int `json:"id"`
+		} `json:"depends_on,omitempty"`
+		Environment DynamicRubricEnvironment `json:"environment,omitempty"`
 	} `json:"dynamic_lab"`
 }
 
@@ -216,59 +207,62 @@ func calculateFileHash(filePath string) (string, error) {
 }
 
 // checkDependencies verifies if all dependent steps have completed successfully
-func checkDependencies(db *sql.DB, stepID int, dependsOn []struct {
-	ID int `json:"id"`
-}) (bool, error) {
+func checkDependencies(db *sql.DB, stepID int, stepLogger *log.Logger) (bool, error) {
+	var dependsOnJSON string
+	// Correctly extract the top-level 'depends_on' key
+	err := db.QueryRow(`
+		SELECT COALESCE(
+			(SELECT value FROM jsonb_each(settings) WHERE key = 'depends_on'),
+			'[]'::jsonb
+		)::text
+		FROM steps WHERE id = $1
+	`, stepID).Scan(&dependsOnJSON)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return true, nil // Step not found, no dependencies to check.
+		}
+		return false, fmt.Errorf("could not retrieve dependencies for step %d: %w", stepID, err)
+	}
+
+	var dependsOn []struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(dependsOnJSON), &dependsOn); err != nil {
+		// It's possible the settings don't have a top-level depends_on, but a nested one.
+		// This is a fallback to a more general, but less efficient, parsing.
+		var settingsMap map[string]json.RawMessage
+		if err2 := json.Unmarshal([]byte(dependsOnJSON), &settingsMap); err2 != nil {
+			return false, fmt.Errorf("could not parse dependencies for step %d: %w", stepID, err)
+		}
+		if val, ok := settingsMap["depends_on"]; ok {
+			if err3 := json.Unmarshal(val, &dependsOn); err3 != nil {
+				return false, fmt.Errorf("could not parse nested dependencies for step %d: %w", stepID, err3)
+			}
+		}
+	}
+
 	if len(dependsOn) == 0 {
 		return true, nil
 	}
 
-	// Log the dependencies we're checking
 	depIDs := make([]int, len(dependsOn))
 	for i, dep := range dependsOn {
 		depIDs[i] = dep.ID
 	}
-	stepLogger.Printf("Step %d: checking dependencies: %v\n", stepID, depIDs)
 
-	placeholders := make([]string, len(dependsOn))
-	args := make([]interface{}, len(dependsOn)+1)
-	args[0] = stepID
-
-	for i, dep := range dependsOn {
-		placeholders[i] = fmt.Sprintf("$%d", i+2)
-		args[i+1] = dep.ID
-	}
-
-	// First, let's check the status of each dependency directly
-	for _, dep := range dependsOn {
-		var status string
-		var results sql.NullString
-		err := db.QueryRow("SELECT status, results FROM steps WHERE id = $1", dep.ID).Scan(&status, &results)
-		if err != nil {
-			stepLogger.Printf("Step %d: error checking status of dependency %d: %v\n", stepID, dep.ID, err)
-			continue
-		}
-		stepLogger.Printf("Step %d: dependency %d - status: %s, results: %v\n", stepID, dep.ID, status, results.String)
-	}
-
-	// We need to find if there are any dependencies that are NOT successful
-	// A dependency is successful if:
-	// 1. status is 'success' OR
-	// 2. results->>'result' is 'success'
-	query := fmt.Sprintf(`
+	query := `
 		SELECT NOT EXISTS (
-			SELECT 1 FROM steps
-			WHERE id IN (%s)
-			AND id != $1
-			AND status != 'success'
-			AND (results IS NULL OR results->>'result' IS NULL OR results->>'result' != 'success')
-		)`,
-		strings.Join(placeholders, ","))
+			SELECT 1
+			FROM steps s
+			WHERE s.id = ANY($1::int[])
+			AND (s.results->>'result' IS NULL OR s.results->>'result' != 'success')
+		)`
 
-	stepLogger.Printf("Step %d: running dependency check query: %s with args %v\n", stepID, query, args)
+	stepLogger.Printf("Step %d: running dependency check query: %s with args %v\n", stepID, query, depIDs)
 
 	var allDepsCompleted bool
-	err := db.QueryRow(query, args...).Scan(&allDepsCompleted)
+	err = db.QueryRow(query, pq.Array(depIDs)).Scan(&allDepsCompleted)
 	stepLogger.Printf("Step %d: dependency check result: %v, error: %v\n", stepID, allDepsCompleted, err)
 
 	return allDepsCompleted, err
@@ -278,7 +272,6 @@ type stepExec struct {
 	StepID    int
 	TaskID    int
 	Title     string
-	Status    string
 	Settings  string
 	LocalPath string
 }
@@ -287,12 +280,11 @@ type StepInfo struct {
 	ID         int                    `json:"id"`
 	TaskID     int                    `json:"task_id"`
 	Title      string                 `json:"title"`
-	Status     string                 `json:"status"`
 	Settings   map[string]interface{} `json:"settings"`
-	Results    map[string]interface{} `json:"results,omitempty"`
+	Results    map[string]interface{} `json:"results"`
 	CreatedAt  time.Time              `json:"created_at"`
 	UpdatedAt  time.Time              `json:"updated_at"`
-	RawResults *string                `json:"-"` // Raw JSON string from the database
+
 }
 
 // ProcessSteps is the main entry point for processing all pending steps.
@@ -335,20 +327,16 @@ func executePendingSteps(db *sql.DB, stepProcessors map[string]func(*sql.DB) err
 // GetStepInfo retrieves detailed information about a specific step by ID
 func GetStepInfo(db *sql.DB, stepID int) (*StepInfo, error) {
 	var info StepInfo
-	var settingsStr, resultsStr sql.NullString
-	var createdAt, updatedAt time.Time
+	var settingsJSON, resultsJSON sql.NullString
+
 
 	err := db.QueryRow(`
-		SELECT
-			s.id, s.task_id, s.title, s.status,
-			s.settings::text, s.results::text,
-			s.created_at, s.updated_at
+		SELECT s.id, s.task_id, s.title, s.settings::text, s.results::text, s.created_at, s.updated_at
 		FROM steps s
 		WHERE s.id = $1
 	`, stepID).Scan(
-		&info.ID, &info.TaskID, &info.Title, &info.Status,
-		&settingsStr, &resultsStr,
-		&createdAt, &updatedAt,
+		&info.ID, &info.TaskID, &info.Title,
+		&settingsJSON, &resultsJSON, &info.CreatedAt, &info.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("no step found with ID %d", stepID)
@@ -358,42 +346,33 @@ func GetStepInfo(db *sql.DB, stepID int) (*StepInfo, error) {
 	}
 
 	// Only parse settings if they exist and are not null
-	if settingsStr.Valid && settingsStr.String != "" && settingsStr.String != "null" {
+	if settingsJSON.Valid && settingsJSON.String != "" && settingsJSON.String != "null" {
 		info.Settings = make(map[string]interface{})
-		decoder := json.NewDecoder(strings.NewReader(settingsStr.String))
+		decoder := json.NewDecoder(strings.NewReader(settingsJSON.String))
 		decoder.UseNumber()
 		if err := decoder.Decode(&info.Settings); err != nil {
 			return nil, fmt.Errorf("error parsing settings: %w", err)
 		}
 	}
 
-	// Store raw results
-	if resultsStr.Valid {
-		info.RawResults = &resultsStr.String
-	}
-
 	// Only parse results if they exist and are not null
-	if resultsStr.Valid && resultsStr.String != "" && resultsStr.String != "null" {
+	if resultsJSON.Valid && resultsJSON.String != "" && resultsJSON.String != "null" {
 		info.Results = make(map[string]interface{})
-		decoder := json.NewDecoder(strings.NewReader(resultsStr.String))
+		decoder := json.NewDecoder(strings.NewReader(resultsJSON.String))
 		decoder.UseNumber()
 		if err := decoder.Decode(&info.Results); err != nil {
 			return nil, fmt.Errorf("error parsing results: %w", err)
 		}
 	}
 
-	info.CreatedAt = createdAt
-	info.UpdatedAt = updatedAt
-
 	return &info, nil
 }
 
-func CopyStep(db *sql.DB, stepID, toTaskID int) error {
-
+func CopyStep(db *sql.DB, fromStepID, toTaskID int) (int, error) {
 	// Start a transaction
 	tx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("error starting transaction: %w", err)
+		return 0, fmt.Errorf("error starting transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -401,43 +380,43 @@ func CopyStep(db *sql.DB, stepID, toTaskID int) error {
 	var targetTaskExists bool
 	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = $1)", toTaskID).Scan(&targetTaskExists)
 	if err != nil {
-		return fmt.Errorf("error checking target task: %w", err)
+		return 0, fmt.Errorf("error checking target task: %w", err)
 	}
 	if !targetTaskExists {
-		return fmt.Errorf("target task with ID %d does not exist", toTaskID)
+		return 0, fmt.Errorf("target task with ID %d does not exist", toTaskID)
 	}
 
-	// 2. Get the source step data
-	var title, status, settings string
+	// 1. Get the source step's data
+	var title, settings string
 	err = tx.QueryRow(
-		"SELECT title, status, settings FROM steps WHERE id = $1",
-		stepID,
-	).Scan(&title, &status, &settings)
-
-	if err == sql.ErrNoRows {
-		return fmt.Errorf("source step with ID %d does not exist", stepID)
-	}
+		"SELECT title, settings FROM steps WHERE id = $1",
+		fromStepID,
+	).Scan(&title, &settings)
 	if err != nil {
-		return fmt.Errorf("error fetching source step: %w", err)
+		return 0, fmt.Errorf("reading source step %d failed: %w", fromStepID, err)
 	}
 
-	// 3. Create the new step in the target task with the same status as source
-	_, err = tx.Exec(
-		`INSERT INTO steps (task_id, title, settings, status, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, now(), now())`,
-		toTaskID, title, settings, status,
-	)
+	// 2. (Future) Transform settings if needed, e.g., if it contains references
+	// to other steps in the original task. For now, we do a direct copy.
 
+	// 3. Create the new step in the target task
+	var newStepID int
+	err = tx.QueryRow(
+		`INSERT INTO steps (task_id, title, settings, created_at, updated_at)
+		 VALUES ($1, $2, $3::jsonb, now(), now())
+		 RETURNING id`,
+		toTaskID, title, settings,
+	).Scan(&newStepID)
 	if err != nil {
-		return fmt.Errorf("error creating new step: %w", err)
+		return 0, fmt.Errorf("creating new step in task %d failed: %w", toTaskID, err)
 	}
 
-	// 4. Commit the transaction
+	// Commit the transaction
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("error committing transaction: %w", err)
+		return 0, fmt.Errorf("error committing transaction: %w", err)
 	}
 
-	return nil
+	return newStepID, nil
 }
 
 // RemoveStepSettingKey removes a top-level key from the step's settings JSON.
@@ -523,15 +502,14 @@ func setNestedValue(dataMap map[string]interface{}, path string, value interface
 // It attempts to parse valueToSet as JSON; if it fails, valueToSet is treated as a string.
 func UpdateStepFieldOrSetting(db *sql.DB, stepID int, keyToSet string, valueToSet string) error {
 	// List of updatable direct columns in the 'steps' table
-	validDirectFields := map[string]bool{
-		"title":  true,
-		"status": true,
+	validFields := map[string]bool{
+		"title": true,
 	}
 
-	if _, isDirectField := validDirectFields[keyToSet]; isDirectField {
-		// Basic safety check, though keys are from a controlled map.
-		if keyToSet != "title" && keyToSet != "status" { // Ensure it's one of the explicitly handled direct fields
-			return fmt.Errorf("internal error: unhandled direct field for update: %s", keyToSet)
+	// If the key is a direct field on the 'steps' table
+	if _, ok := validFields[keyToSet]; ok {
+		if keyToSet != "title" { // Ensure it's one of the explicitly handled direct fields
+			return fmt.Errorf("invalid field to update: %s", keyToSet)
 		}
 
 		query := fmt.Sprintf("UPDATE steps SET %s = $1, updated_at = NOW() WHERE id = $2", keyToSet) // keyToSet is safe due to check above
@@ -639,164 +617,194 @@ func ClearStepResults(db *sql.DB, stepID int) error {
 }
 
 func processDynamicLabSteps(db *sql.DB) error {
-	newSteps, err := getStepsByStatusAndType(db, "new", "dynamic_lab")
+	steps, err := getStepsByType(db, "dynamic_lab")
 	if err != nil {
-		return fmt.Errorf("failed to get new dynamic_lab steps: %w", err)
+		return fmt.Errorf("failed to get dynamic_lab steps: %w", err)
 	}
-	activeSteps, err := getStepsByStatusAndType(db, "active", "dynamic_lab")
-	if err != nil {
-		return fmt.Errorf("failed to get active dynamic_lab steps: %w", err)
-	}
-	completedSteps, err := getStepsByStatusAndType(db, "completed", "dynamic_lab")
-	if err != nil {
-		return fmt.Errorf("failed to get completed dynamic_lab steps: %w", err)
-	}
-	steps := append(newSteps, activeSteps...)
-	steps = append(steps, completedSteps...)
 
 	for _, step := range steps {
 		var config DynamicLabConfig
 		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
 			log.Printf("Error parsing settings for step %d: %v", step.StepID, err)
-			results := map[string]interface{}{"error": fmt.Sprintf("Error parsing settings: %v", err)}
-			if err := updateStepStatusAndResults(db, step.StepID, "error", results); err != nil {
-				log.Printf("Failed to update step %d to error status with results: %v", step.StepID, err)
-			}
+			results := map[string]interface{}{"result": "error", "error": fmt.Sprintf("Error parsing settings: %v", err)}
+			resultsJSON, _ := json.Marshal(results)
+			db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID)
 			continue
 		}
 
 		newHashes, changed, err := dynamic_lab.Run(step.LocalPath, config.DynamicLab.Files)
 		if err != nil {
 			log.Printf("Error running dynamic_lab for step %d: %v", step.StepID, err)
-			results := map[string]interface{}{"error": err.Error()}
-			if err := updateStepStatusAndResults(db, step.StepID, "error", results); err != nil {
-				log.Printf("Failed to update step %d to error status with results: %v", step.StepID, err)
-			}
+			results := map[string]interface{}{"result": "error", "error": err.Error()}
+			resultsJSON, _ := json.Marshal(results)
+			db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID)
 			continue
 		}
 
-		if changed || step.Status == "new" {
-			log.Printf("File changes detected for dynamic_lab step %d. Updating hashes.", step.StepID)
-			config.DynamicLab.Files = newHashes
-			updatedSettingsBytes, err := json.Marshal(config)
-			if err != nil {
-				log.Printf("Error marshalling updated settings for step %d: %v", step.StepID, err)
-				continue
-			}
-
-			// Update settings in the database
-			if _, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2`, string(updatedSettingsBytes), step.StepID); err != nil {
-				log.Printf("Error updating settings for step %d: %v", step.StepID, err)
-				continue
-			}
-
-			// Update status and results
-			results := map[string]interface{}{"files": newHashes}
-			if err := updateStepStatusAndResults(db, step.StepID, "active", results); err != nil {
-				log.Printf("Error updating step %d to active: %v", step.StepID, err)
-			}
-		} else {
+		if !changed {
 			log.Printf("No file changes for dynamic_lab step %d.", step.StepID)
-		}
-	}
-
-	return nil
-}
-
-func getStepsByStatusAndType(db *sql.DB, status, stepType string) ([]stepExec, error) {
-	query := `
-		SELECT s.id, s.task_id, s.title, s.status, s.settings, COALESCE(t.local_path, '')
-		FROM steps s
-		JOIN tasks t ON s.task_id = t.id
-		WHERE s.status = $1 AND s.settings ? $2`
-
-	rows, err := db.Query(query, status, stepType)
-	if err != nil {
-		return nil, fmt.Errorf("querying for steps by status and type failed: %w", err)
-	}
-	defer rows.Close()
-
-	var steps []stepExec
-	for rows.Next() {
-		var step stepExec
-		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Title, &step.Status, &step.Settings, &step.LocalPath); err != nil {
-			return nil, fmt.Errorf("scanning step failed: %w", err)
-		}
-		steps = append(steps, step)
-	}
-
-	return steps, nil
-}
-
-func updateStepStatus(db *sql.DB, stepID int, status string) error {
-	_, err := db.Exec(`UPDATE steps SET status = $1, updated_at = NOW() WHERE id = $2`, status, stepID)
-	return err
-}
-
-func updateStepStatusAndResults(db *sql.DB, stepID int, status string, results map[string]interface{}) error {
-	resultsJSON, err := json.Marshal(results)
-	if err != nil {
-		return fmt.Errorf("failed to marshal results: %w", err)
-	}
-
-	_, err = db.Exec(`UPDATE steps SET status = $1, results = $2, updated_at = NOW() WHERE id = $3`, status, resultsJSON, stepID)
-	return err
-}
-
-func processDynamicRubricSteps(db *sql.DB) error {
-	log.Println("--- Starting to process dynamic_rubric steps ---")
-	// Get all active dynamic_rubric steps
-	steps, err := getStepsByStatusAndType(db, "active", "dynamic_rubric")
-	if err != nil {
-		return fmt.Errorf("failed to get active dynamic_rubric steps: %w", err)
-	}
-	log.Printf("Found %d dynamic_rubric steps to process.", len(steps))
-
-	for i, step := range steps {
-		log.Printf("Processing step %d/%d: ID %d", i+1, len(steps), step.StepID)
-
-		var config DynamicRubricConfig
-		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
-			log.Printf("Error unmarshalling settings for step %d: %v", step.StepID, err)
 			continue
 		}
 
-		// Find container_id from dependencies
+		log.Printf("File changes detected for dynamic_lab step %d. Re-generating steps.", step.StepID)
+
+		if err := deleteGeneratedSteps(db, step.StepID); err != nil {
+			log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
+			continue
+		}
+
+		rubricFile := config.DynamicLab.RubricFile
+		if rubricFile == "" {
+			log.Printf("dynamic_lab step %d settings does not specify a 'rubric_file'", step.StepID)
+			continue
+		}
+
+		criteria, newRubricHash, _, err := dynamic_lab.RunRubric(step.LocalPath, rubricFile, "") // Pass empty hash to force re-parse
+		if err != nil {
+			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
+			results := map[string]interface{}{"result": "error", "error": err.Error()}
+			resultsJSON, _ := json.Marshal(results)
+			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+				log.Printf("Failed to update step %d completion with error results: %v", step.StepID, err)
+			}
+			continue
+		}
+
 		var containerID string
-		for _, dep := range config.DynamicRubric.DependsOn {
-			depInfo, err := GetStepInfo(db, dep.ID)
+		var runStepDependencyID int
+		for _, dep := range config.DynamicLab.DependsOn {
+			var rawResults sql.NullString
+			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", dep.ID).Scan(&rawResults)
 			if err != nil {
 				log.Printf("Step %d: Error getting info for dependency step %d: %v", step.StepID, dep.ID, err)
 				continue
 			}
 
-			if depInfo.Results != nil {
-
-				if depInfo.RawResults == nil {
-					log.Printf("Dependency step %d has nil RawResults", dep.ID)
-					continue
-				}
-
+			if rawResults.Valid {
 				var results map[string]interface{}
-				if err := json.Unmarshal([]byte(*depInfo.RawResults), &results); err != nil {
+				if err := json.Unmarshal([]byte(rawResults.String), &results); err != nil {
 					log.Printf("Error unmarshalling results for dependency step %d: %v", dep.ID, err)
 					continue
 				}
 
 				if cID, ok := results["container_id"].(string); ok {
 					containerID = cID
-					log.Printf("Found container_id '%s' from dependency step %d", containerID, dep.ID)
-					break // Found it, no need to check other dependencies
+					runStepDependencyID = dep.ID
+					log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
+					break
 				}
-
 			}
 		}
 
 		if containerID == "" {
 			log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)
-			// We still mark as success because the rubric itself was processed, but no steps were generated.
-			if err := updateStepStatus(db, step.StepID, "success"); err != nil {
-				log.Printf("Error updating step %d status to success: %v", step.StepID, err)
+			results := map[string]interface{}{"result": "success", "info": "Could not find a container_id from any dependencies. Skipping generation."}
+			resultsJSON, _ := json.Marshal(results)
+			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+				log.Printf("Error updating step %d results: %v", step.StepID, err)
+			}
+			continue
+		}
+
+		for _, crit := range criteria {
+			var settings string
+			if config.DynamicLab.Environment.Docker {
+				settings = fmt.Sprintf(`{
+					"docker_shell": {
+						"command": [{"run": "%s"}],
+						"depends_on": [{"id": %d}],
+						"rubric_details": {
+							"score": %d,
+							"required": %t,
+							"description": "%s"
+						}
+					}
+				}`, crit.HeldOutTest, runStepDependencyID, crit.Score, crit.Required, crit.Rubric)
+			} else {
+				log.Printf("Step %d: Skipping criterion '%s' because environment is not docker.", step.StepID, crit.Title)
+				continue
+			}
+
+			if _, err := CreateStep(db, strconv.Itoa(step.TaskID), crit.Title, settings); err != nil {
+				log.Printf("Error creating step for criterion '%s' from step %d: %v", crit.Title, step.StepID, err)
+			}
+		}
+
+		config.DynamicLab.Files = newHashes
+		config.DynamicLab.Files[rubricFile] = newRubricHash
+		updatedSettings, err := json.Marshal(config)
+		if err != nil {
+			log.Printf("Error marshalling updated settings for step %d: %v", step.StepID, err)
+			continue
+		}
+		if _, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2`, string(updatedSettings), step.StepID); err != nil {
+			log.Printf("Error updating settings for step %d: %v", step.StepID, err)
+			continue
+		}
+
+		results := map[string]interface{}{"result": "success"}
+		resultsJSON, _ := json.Marshal(results)
+		if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+			log.Printf("Error updating step %d results to success: %v", step.StepID, err)
+		}
+	}
+
+	return nil
+}
+
+func processDynamicRubricSteps(db *sql.DB) error {
+	log.Println("Processing dynamic rubric steps...")
+	dynamicRubricSteps, err := getStepsByType(db, "dynamic_rubric")
+	if err != nil {
+		return fmt.Errorf("failed to get active dynamic_rubric steps: %w", err)
+	}
+	log.Printf("Found %d dynamic_rubric steps to process.", len(dynamicRubricSteps))
+
+	for i, step := range dynamicRubricSteps {
+		log.Printf("Processing step %d/%d: ID %d", i+1, len(dynamicRubricSteps), step.StepID)
+
+		var config DynamicRubricConfig
+		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
+			log.Printf("Error unmarshalling settings for step %d: %v", step.StepID, err)
+			results := map[string]interface{}{"result": "error", "error": fmt.Sprintf("Error parsing settings: %v", err)}
+			resultsJSON, _ := json.Marshal(results)
+			db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID)
+			continue
+		}
+
+		// Find container_id and its step ID from dependencies
+		var containerID string
+		var runStepDependencyID int
+		for _, dep := range config.DynamicRubric.DependsOn {
+			var rawResults sql.NullString
+			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", dep.ID).Scan(&rawResults)
+			if err != nil {
+				log.Printf("Step %d: Error getting info for dependency step %d: %v", step.StepID, dep.ID, err)
+				continue
+			}
+
+			if rawResults.Valid {
+				var results map[string]interface{}
+				if err := json.Unmarshal([]byte(rawResults.String), &results); err != nil {
+					log.Printf("Error unmarshalling results for dependency step %d: %v", dep.ID, err)
+					continue
+				}
+
+				if cID, ok := results["container_id"].(string); ok {
+					containerID = cID
+					runStepDependencyID = dep.ID // Capture the ID of the dependency that provides the container
+					log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
+					break // Found it, no need to check other dependencies
+				}
+			}
+		}
+
+		if containerID == "" {
+			log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)
+			results := map[string]interface{}{"result": "success", "info": "Could not find a container_id from any dependencies. Skipping generation."}
+			resultsJSON, _ := json.Marshal(results)
+			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+				log.Printf("Error updating step %d results: %v", step.StepID, err)
 			}
 			continue
 		}
@@ -805,6 +813,11 @@ func processDynamicRubricSteps(db *sql.DB) error {
 		criteria, newHash, changed, err := dynamic_lab.RunRubric(step.LocalPath, config.DynamicRubric.File, config.DynamicRubric.Hash)
 		if err != nil {
 			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
+			results := map[string]interface{}{"result": "error", "error": err.Error()}
+			resultsJSON, _ := json.Marshal(results)
+			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+				log.Printf("Failed to update step %d completion with error results: %v", step.StepID, err)
+			}
 			continue
 		}
 		log.Printf("Step %d: RunRubric completed. Changed: %t", step.StepID, changed)
@@ -812,39 +825,14 @@ func processDynamicRubricSteps(db *sql.DB) error {
 		if changed {
 			log.Printf("Rubric file changed for step %d. Updating generated steps.", step.StepID)
 
-			// Delete old generated steps
-			log.Printf("Step %d: Deleting old generated steps.", step.StepID)
 			if err := deleteGeneratedSteps(db, step.StepID); err != nil {
 				log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
 				continue
 			}
-			log.Printf("Step %d: Finished deleting old generated steps.", step.StepID)
 
-			// If docker environment is specified, create a docker_run step first.
-			var dockerRunStepID int
-			var err error
-			if config.DynamicRubric.Environment.Docker {
-				dockerRunSettings := fmt.Sprintf(`{
-					"docker_run": {
-						"image_tag": "%s",
-						"image_id": "%s"
-					}
-				}`, config.DynamicRubric.Environment.ImageTag, config.DynamicRubric.Environment.ImageID)
-
-				dockerRunStepID, err = CreateStep(db, strconv.Itoa(step.TaskID), "Setup Test Environment", dockerRunSettings)
-				if err != nil {
-					log.Printf("Error creating docker_run step for dynamic_rubric step %d: %v", step.StepID, err)
-					continue
-				}
-				log.Printf("Step %d: Created docker_run step with ID %d", step.StepID, dockerRunStepID)
-			}
-
-			// Create new steps from criteria
-			log.Printf("Step %d: Creating %d new steps from criteria.", step.StepID, len(criteria))
 			for _, crit := range criteria {
 				var settings string
 				if config.DynamicRubric.Environment.Docker {
-					// This docker_shell step will depend on the docker_run step created above.
 					settings = fmt.Sprintf(`{
 						"docker_shell": {
 							"command": [{"run": "%s"}],
@@ -855,20 +843,17 @@ func processDynamicRubricSteps(db *sql.DB) error {
 								"description": "%s"
 							}
 						}
-					}`, crit.HeldOutTest, dockerRunStepID, crit.Score, crit.Required, crit.Rubric)
+					}`, crit.HeldOutTest, runStepDependencyID, crit.Score, crit.Required, crit.Rubric)
 				} else {
 					log.Printf("Step %d: Skipping criterion '%s' because environment is not docker.", step.StepID, crit.Title)
-					continue // skip to next criterion
+					continue
 				}
 
 				if _, err := CreateStep(db, strconv.Itoa(step.TaskID), crit.Title, settings); err != nil {
 					log.Printf("Error creating step for criterion '%s' from step %d: %v", crit.Title, step.StepID, err)
 				}
 			}
-			log.Printf("Step %d: Finished creating new steps.", step.StepID)
 
-			// Update hash in parent step
-			log.Printf("Step %d: Updating hash in parent step.", step.StepID)
 			config.DynamicRubric.Hash = newHash
 			updatedSettings, err := json.Marshal(config)
 			if err != nil {
@@ -879,17 +864,19 @@ func processDynamicRubricSteps(db *sql.DB) error {
 				log.Printf("Error updating settings for step %d: %v", step.StepID, err)
 				continue
 			}
-			log.Printf("Step %d: Finished updating hash.", step.StepID)
 		}
 
-		// Mark the step as success since it has been processed
-		if err := updateStepStatus(db, step.StepID, "success"); err != nil {
-			log.Printf("Error updating step %d status to success: %v", step.StepID, err)
+		results := map[string]interface{}{"result": "success"}
+		resultsJSON, _ := json.Marshal(results)
+		if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+			log.Printf("Error updating step %d results to success: %v", step.StepID, err)
 		}
 	}
 	log.Println("--- Finished processing dynamic_rubric steps ---")
 	return nil
 }
+
+
 
 func deleteGeneratedSteps(db *sql.DB, parentStepID int) error {
 	// Find steps that depend on the parent step
@@ -925,7 +912,7 @@ func deleteGeneratedSteps(db *sql.DB, parentStepID int) error {
 
 func getStepsByType(db *sql.DB, stepType string) ([]stepExec, error) {
 	query := `
-		SELECT s.id, s.task_id, s.title, s.status, s.settings, COALESCE(t.local_path, '')
+		SELECT s.id, s.task_id, s.title, s.settings, COALESCE(t.local_path, '')
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE s.settings ? $1`
@@ -939,7 +926,7 @@ func getStepsByType(db *sql.DB, stepType string) ([]stepExec, error) {
 	var steps []stepExec
 	for rows.Next() {
 		var step stepExec
-		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Title, &step.Status, &step.Settings, &step.LocalPath); err != nil {
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Title, &step.Settings, &step.LocalPath); err != nil {
 			return nil, fmt.Errorf("scanning step failed: %w", err)
 		}
 		steps = append(steps, step)
@@ -1075,4 +1062,23 @@ func printChildren(nodes []*StepNode, prefix string) {
 		fmt.Printf("%s%s%d-%s\n", prefix, connector, node.ID, node.Title)
 		printChildren(node.Children, newPrefix)
 	}
+}
+
+// DeleteStep removes a step from the database by its ID.
+func DeleteStep(db *sql.DB, stepID int) error {
+	result, err := db.Exec("DELETE FROM steps WHERE id = $1", stepID)
+	if err != nil {
+		return fmt.Errorf("failed to delete step %d: %w", stepID, err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected for step %d: %w", stepID, err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("no step found with ID %d", stepID)
+	}
+
+	return nil
 }

@@ -28,7 +28,7 @@ Stores the individual steps that make up a task.
 | `id`         | `SERIAL`    | Primary Key                                                                 |
 | `task_id`    | `INTEGER`   | Foreign key to the `tasks` table.                                           |
 | `title`      | `TEXT`      | A descriptive title for the step.                                           |
-| `status`     | `TEXT`      | The current status (e.g., 'new', 'active', 'completed', 'failed').          |
+
 | `settings`   | `JSONB`     | A JSON object containing the configuration for this step's execution.       |
 | `results`    | `JSONB`     | A JSON object where the results of the step execution are stored.           |
 | `created_at` | `TIMESTAMPTZ` | Timestamp of creation.                                                      |
@@ -157,7 +157,7 @@ Runs a command in a new Docker container.
 
 ### 4. `docker_shell`
 
-Executes a shell command inside a specified Docker container or image.
+Executes one or more shell commands inside a pre-existing, running Docker container. This step locates a running container by its `image_tag` and verifies the container's image hash against a provided `image_id` to ensure it is up-to-date. It does **not** create or start containers.
 
 **Settings:**
 
@@ -165,14 +165,15 @@ Executes a shell command inside a specified Docker container or image.
 {
   "docker_shell": {
     "docker": {
-      "image_tag": "ubuntu:latest"
+      "image_tag": "my-app:1.0",
+      "image_id": "sha256:f1b3f..."
     },
     "command": [
       {
-        "command": "ls -la /app"
+        "run": "ls -la /app"
       },
       {
-        "command": "cat /app/config.yml"
+        "run": "cat /app/config.yml"
       }
     ],
     "depends_on": [
@@ -181,8 +182,10 @@ Executes a shell command inside a specified Docker container or image.
   }
 }
 ```
-- `docker`: Specifies the target. Use `image_tag` for a new container or `container_id`/`container_name` for an existing one.
-- `command`: A list of command objects to execute sequentially.
+- `docker`: Specifies the target container's properties.
+  - `image_tag` (required): The image tag used to find the running container.
+  - `image_id` (required): The expected image hash (or prefix) of the container's image. The step will fail if the actual hash does not match.
+- `command`: A list of command objects to execute sequentially. Each object is a map containing a single key that acts as a label for the command (e.g., `"run"`, `"test"`) and the shell command as the value.
 
 **Example CLI Command:**
 
@@ -190,10 +193,11 @@ Executes a shell command inside a specified Docker container or image.
 ./task-sync step create --task-id 1 --title "Inspect Container" --settings '{
   "docker_shell": {
     "docker": {
-      "image_tag": "my-app:1.0"
+      "image_tag": "my-app:1.0",
+      "image_id": "sha256:f1b3f..."
     },
     "command": [
-      { "command": "ls /" }
+      { "run": "ls /" }
     ],
     "depends_on": [{ "id": 2 }]
   }
@@ -247,7 +251,7 @@ Monitors specified files for changes by comparing their content hashes. This ste
 }
 ```
 
-- `files`: A map where keys are file paths and values are their expected SHA256 hashes. The step will update the hashes and its status if any file has changed.
+- `files`: A map where keys are file paths and values are their expected SHA256 hashes. The step will update the hashes if any file has changed.
 
 **Example CLI Command:**
 

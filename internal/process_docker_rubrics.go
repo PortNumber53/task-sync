@@ -14,8 +14,7 @@ func processDockerRubricsSteps(db *sql.DB) {
 	query := `SELECT s.id, s.task_id, s.settings, t.local_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
-		WHERE s.status = 'active'
-		AND t.status = 'active'
+		WHERE t.status = 'active'
 		AND t.local_path IS NOT NULL
 		AND t.local_path <> ''
 		AND s.settings::text LIKE '%docker_rubrics%'`
@@ -41,7 +40,7 @@ func processDockerRubricsSteps(db *sql.DB) {
 			continue
 		}
 
-		ok, err := checkDependencies(db, step.StepID, config.DockerRubrics.DependsOn)
+		ok, err := checkDependencies(db, step.StepID, stepLogger)
 		if err != nil {
 			stepLogger.Printf("Step %d: error checking dependencies: %v\n", step.StepID, err)
 			continue

@@ -113,25 +113,6 @@ func main() {
 		}
 		defer db.Close()
 
-		// step activate <id>
-		if subcommand == "activate" {
-			if len(os.Args) < 4 || os.Args[3] == "--help" || os.Args[3] == "-h" {
-				helpPkg.PrintStepActivateHelp()
-				os.Exit(0)
-			}
-			stepID, err := strconv.Atoi(os.Args[3])
-			if err != nil {
-				fmt.Printf("Invalid step ID: %v\n", os.Args[3])
-				os.Exit(1)
-			}
-			err = internal.ActivateStep(db, stepID)
-			if err != nil {
-				fmt.Printf("Failed to activate step: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Printf("Step %d activated.\n", stepID)
-			os.Exit(0)
-		}
 
 		// Handle help flag for subcommands
 		showHelp := false
@@ -164,6 +145,24 @@ func main() {
 				fmt.Printf("Error displaying step tree: %v\n", err)
 				os.Exit(1)
 			}
+			return
+		case "delete":
+			if len(os.Args) < 4 {
+				fmt.Println("Error: delete subcommand requires a step ID.")
+				helpPkg.PrintStepHelp()
+				os.Exit(1)
+			}
+			stepID, err := strconv.Atoi(os.Args[3])
+			if err != nil {
+				fmt.Printf("Error: invalid step ID '%s'. Must be an integer.\n", os.Args[3])
+				os.Exit(1)
+			}
+
+			if err := internal.DeleteStep(db, stepID); err != nil {
+				fmt.Printf("Error deleting step: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Step %d deleted successfully.\n", stepID)
 			return
 		case "list":
 			full := false
@@ -372,7 +371,6 @@ func main() {
 			// Format and print the step info
 			fmt.Printf("Step #%d: %s\n", info.ID, info.Title)
 			fmt.Printf("Task ID: %d\n", info.TaskID)
-			fmt.Printf("Status: %s\n", info.Status)
 			fmt.Printf("Created: %s\n", info.CreatedAt.Format(time.RFC3339))
 			fmt.Printf("Updated: %s\n", info.UpdatedAt.Format(time.RFC3339))
 
@@ -461,12 +459,13 @@ func main() {
 			defer db.Close()
 
 			// Copy the step
-			if err := internal.CopyStep(db, stepID, toTaskID); err != nil {
+			newStepID, err := internal.CopyStep(db, stepID, toTaskID)
+			if err != nil {
 				fmt.Printf("Error copying step: %v\n", err)
 				os.Exit(1)
 			}
 
-			fmt.Printf("Step with ID %d has been copied to task %d\n", stepID, toTaskID)
+			fmt.Printf("Step %d copied to task %d as new step %d.\n", stepID, toTaskID, newStepID)
 			return
 		}
 

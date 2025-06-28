@@ -11,8 +11,7 @@ func processDockerBuildSteps(db *sql.DB) {
 	query := `SELECT s.id, s.task_id, s.settings, t.local_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
-		WHERE s.status = 'active'
-		AND t.status = 'active'
+		WHERE t.status = 'active'
 		AND t.local_path IS NOT NULL
 		AND t.local_path <> ''
 		AND s.settings::text LIKE '%docker_build%'`
@@ -42,7 +41,7 @@ func processDockerBuildSteps(db *sql.DB) {
 		}
 
 		// Check if dependencies are met
-		ok, err := checkDependencies(db, step.StepID, config.DockerBuild.DependsOn)
+		ok, err := checkDependencies(db, step.StepID, stepLogger)
 		if err != nil {
 			stepLogger.Printf("Step %d: error checking dependencies: %v\n", step.StepID, err)
 			if errStore := StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "error checking dependencies"}); errStore != nil {
@@ -52,7 +51,7 @@ func processDockerBuildSteps(db *sql.DB) {
 		}
 		if !ok {
 			stepLogger.Printf("Step %d: waiting for dependencies to complete\n", step.StepID)
-			// StoreStepResult(db, step.StepID, map[string]interface{}{"result": "pending", "message": "waiting for dependencies"}) // Optional: update status to pending
+
 			continue
 		}
 

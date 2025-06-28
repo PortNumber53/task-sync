@@ -13,8 +13,7 @@ func processDockerRunSteps(db *sql.DB) {
 	query := `SELECT s.id, s.task_id, s.settings, t.local_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
-		WHERE s.status = 'active'
-		AND t.status = 'active'
+		WHERE t.status = 'active'
 		AND t.local_path IS NOT NULL
 		AND t.local_path <> ''
 		AND s.settings::text LIKE '%docker_run%'`
@@ -40,7 +39,7 @@ func processDockerRunSteps(db *sql.DB) {
 			continue
 		}
 
-		ok, err := checkDependencies(db, step.StepID, config.DockerRun.DependsOn)
+		ok, err := checkDependencies(db, step.StepID, stepLogger)
 		if err != nil {
 			stepLogger.Printf("Step %d: error checking dependencies: %v\n", step.StepID, err)
 			continue
@@ -81,10 +80,6 @@ func processDockerRunSteps(db *sql.DB) {
 			if currentImageID == "" {
 				StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "no image found with tag: " + config.DockerRun.ImageTag})
 				stepLogger.Printf("Step %d: no image found with tag %s\n", step.StepID, config.DockerRun.ImageTag)
-				_, errDb := db.Exec("UPDATE steps SET status = 'error', updated_at = NOW() WHERE id = $1", step.StepID)
-				if errDb != nil {
-					stepLogger.Printf("Step %d: Failed to update status to error after image not found: %v\n", step.StepID, errDb)
-				}
 				continue
 			}
 			imageIDToUse = currentImageID
@@ -128,9 +123,9 @@ func processDockerRunSteps(db *sql.DB) {
 								"container_name": config.DockerRun.ContainerName,
 							})
 							// Mark step as error because its settings in DB might be inconsistent
-							_, dbErr := db.Exec("UPDATE steps SET status = 'error', updated_at = NOW() WHERE id = $1", step.StepID)
+							_, dbErr := db.Exec("UPDATE steps SET updated_at = NOW() WHERE id = $1", step.StepID)
 							if dbErr != nil {
-								stepLogger.Printf("Step %d: Also failed to update status to error after marshal error for running container: %v\n", step.StepID, dbErr)
+								stepLogger.Printf("Step %d: Also failed to update updated_at after marshal error for running container: %v\n", step.StepID, dbErr)
 							}
 						} else {
 							StoreStepResult(db, step.StepID, map[string]interface{}{
@@ -140,10 +135,10 @@ func processDockerRunSteps(db *sql.DB) {
 								"container_name": config.DockerRun.ContainerName,
 								"image_id_used":  imageIDToUse,
 							})
-							// Update step settings (even if unchanged, for updated_at) and status to 'complete'
-							_, dbErr := db.Exec("UPDATE steps SET settings = $1, status = 'complete', updated_at = NOW() WHERE id = $2", string(updatedSettingsJSON), step.StepID)
+							// Update step settings (even if unchanged, for updated_at)
+							_, dbErr := db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(updatedSettingsJSON), step.StepID)
 							if dbErr != nil {
-								stepLogger.Printf("Step %d: Failed to update step settings/status to complete for already running container: %v\n", step.StepID, dbErr)
+								stepLogger.Printf("Step %d: Failed to update step settings to complete for already running container: %v\n", step.StepID, dbErr)
 							}
 						}
 						continue
@@ -178,10 +173,6 @@ func processDockerRunSteps(db *sql.DB) {
 		if !imageTagFound {
 			stepLogger.Printf("Step %d: '%%IMAGETAG%%' placeholder not found in docker_run parameters. Skipping.", step.StepID)
 			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "'%%IMAGETAG%%' placeholder not found in docker_run parameters"})
-			_, err := db.Exec(`UPDATE steps SET status = 'error', updated_at = now() WHERE id = $1`, step.StepID)
-			if err != nil {
-				stepLogger.Printf("Step %d: Failed to update step status to error: %v\n", step.StepID, err)
-			}
 			continue
 		}
 
@@ -226,10 +217,6 @@ func processDockerRunSteps(db *sql.DB) {
 				"result":  "failure",
 				"message": fmt.Sprintf("docker run command failed: %v. Output: %s", err, newContainerID),
 			})
-			_, updateErr := db.Exec("UPDATE steps SET status = 'error', updated_at = NOW() WHERE id = $1", step.StepID)
-			if updateErr != nil {
-				stepLogger.Printf("Step %d: Failed to update step status to error after docker run failure: %v\n", step.StepID, updateErr)
-			}
 		} else {
 			stepLogger.Printf("Step %d: command 'docker run %v' succeeded. Container ID: %s, Name: %s\n", step.StepID, detachedParams, newContainerID, containerName)
 			config.DockerRun.ContainerID = newContainerID
@@ -245,10 +232,6 @@ func processDockerRunSteps(db *sql.DB) {
 					"container_id":   newContainerID,
 					"container_name": containerName,
 				})
-				_, updateErr := db.Exec("UPDATE steps SET status = 'error', updated_at = NOW() WHERE id = $1", step.StepID)
-				if updateErr != nil {
-					stepLogger.Printf("Step %d: Failed to update step status to error after marshal failure: %v\n", step.StepID, updateErr)
-				}
 			} else {
 				StoreStepResult(db, step.StepID, map[string]interface{}{
 					"result":         "success",
@@ -256,9 +239,9 @@ func processDockerRunSteps(db *sql.DB) {
 					"container_id":   newContainerID,
 					"container_name": containerName,
 				})
-				_, updateErr := db.Exec("UPDATE steps SET settings = $1, status = 'success', updated_at = NOW() WHERE id = $2", string(newSettingsJSON), step.StepID)
+				_, updateErr := db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(newSettingsJSON), step.StepID)
 				if updateErr != nil {
-					stepLogger.Printf("Step %d: Failed to update step settings/status to success: %v\n", step.StepID, updateErr)
+					stepLogger.Printf("Step %d: Failed to update step settings to success: %v\n", step.StepID, updateErr)
 				}
 			}
 		}

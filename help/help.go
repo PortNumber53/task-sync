@@ -190,31 +190,13 @@ Available Commands:
   edit       Edit a step's settings
   info       Show detailed information about a step
   list       List all steps
-  activate   Set a step's status to active
+
 
 Use "task-sync step <command> --help" for more information about a command.
 `
 	fmt.Println(helpText)
 }
 
-// PrintStepActivateHelp prints help for the step activate command
-func PrintStepActivateHelp() {
-	helpText := `Set a step's status to active.
-
-Usage:
-  task-sync step activate STEP_ID
-
-Arguments:
-  STEP_ID    ID of the step to activate
-
-Examples:
-  # Activate step with ID 5
-  task-sync step activate 5
-
-  # Show this help message
-  task-sync step activate --help`
-	fmt.Println(helpText)
-}
 
 // PrintStepsListHelp prints help for the step list command
 func PrintStepsListHelp() {

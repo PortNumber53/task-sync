@@ -308,7 +308,7 @@ Parses a rubric file (in Markdown format) and generates child steps based on its
 ```json
 {
   "dynamic_rubric": {
-    "file": "rubric.md",
+    "rubrics": "rubric.md",
     "environment": {
       "docker": true,
       "image_tag": "your-image:latest",

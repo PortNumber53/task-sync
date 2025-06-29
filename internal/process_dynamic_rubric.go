@@ -55,8 +55,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 			}
 		}
 
-		// 2. Check the rubric file itself
-		log.Printf("Step %d: Running RunRubric on %s", step.StepID, config.DynamicRubric.Rubrics)
+		// 2. Check the rubric file itself and parse criteria
 		criteria, newRubricHash, rubricChanged, err := dynamic_lab.RunRubric(step.LocalPath, config.DynamicRubric.Rubrics, config.DynamicRubric.Hash)
 		if err != nil {
 			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
@@ -67,7 +66,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 			}
 			continue
 		}
-		log.Printf("Step %d: RunRubric completed. Changed: %t", step.StepID, rubricChanged)
+		log.Printf("Step %d: RunRubric completed. Rubric file changed: %t", step.StepID, rubricChanged)
 
 		if rubricChanged {
 			config.DynamicRubric.Hash = newRubricHash
@@ -94,25 +93,33 @@ func processDynamicRubricSteps(db *sql.DB) error {
 
 				if cID, ok := results["container_id"].(string); ok {
 					containerID = cID
-					runStepDependencyID = dep.ID // Capture the ID of the dependency that provides the container
-					log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
-					break // Found it, no need to check other dependencies
+					runStepDependencyID = dep.ID
+					break
 				}
 			}
 		}
 
-		if overallChanged {
-			if containerID == "" {
-				log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)
-				results := map[string]interface{}{"result": "success", "info": "Could not find a container_id from any dependencies. Skipping generation."}
-				resultsJSON, _ := json.Marshal(results)
-				if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-					log.Printf("Error updating step %d results: %v", step.StepID, err)
-				}
-				continue
+		if containerID == "" {
+			log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)
+			results := map[string]interface{}{"result": "success", "info": "Could not find a container_id from any dependencies. Skipping generation."}
+			resultsJSON, _ := json.Marshal(results)
+			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+				log.Printf("Error updating step %d results: %v", step.StepID, err)
 			}
+			continue
+		}
 
-			log.Printf("Rubric or associated files changed for step %d. Updating generated steps.", step.StepID)
+		stepsExist, err := generatedStepsExist(db, step.StepID)
+		if err != nil {
+			return fmt.Errorf("failed to check for generated steps for parent step %d: %w", step.StepID, err)
+		}
+
+		if overallChanged || !stepsExist {
+			if !stepsExist {
+				log.Printf("No generated steps found for step %d. Generating new steps.", step.StepID)
+			} else {
+				log.Printf("Rubric or associated files changed for step %d. Updating generated steps.", step.StepID)
+			}
 
 			if err := deleteGeneratedSteps(db, step.StepID, runStepDependencyID); err != nil {
 				log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
@@ -144,21 +151,24 @@ func processDynamicRubricSteps(db *sql.DB) error {
 				}
 			}
 
+			// Persist the updated hashes and rubric hash
 			updatedSettings, err := json.Marshal(config)
 			if err != nil {
 				log.Printf("Error marshalling updated settings for step %d: %v", step.StepID, err)
 				continue
 			}
-			if _, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2`, string(updatedSettings), step.StepID); err != nil {
+			if _, err := db.Exec(`UPDATE steps SET settings = $1, results = '{"result": "success"}', updated_at = NOW() WHERE id = $2`, string(updatedSettings), step.StepID); err != nil {
 				log.Printf("Error updating settings for step %d: %v", step.StepID, err)
 				continue
 			}
-		}
-
-		results := map[string]interface{}{"result": "success"}
-		resultsJSON, _ := json.Marshal(results)
-		if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-			log.Printf("Error updating step %d results to success: %v", step.StepID, err)
+		} else {
+			log.Printf("Step %d: No changes detected and generated steps exist. Skipping.", step.StepID)
+			// Also ensure result is success if we are skipping
+			results := map[string]interface{}{"result": "success"}
+			resultsJSON, _ := json.Marshal(results)
+			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+				log.Printf("Error updating step %d results to success: %v", step.StepID, err)
+			}
 		}
 	}
 	log.Println("--- Finished processing dynamic_rubric steps ---")

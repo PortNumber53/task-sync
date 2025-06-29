@@ -50,7 +50,7 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 		if len(stderrOutput) > 0 {
 			stepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
 		}
-		return fmt.Errorf("docker build failed: %v", err)
+		return fmt.Errorf("docker build failed: %w", err)
 	}
 
 	// Log the full output for debugging on success as well

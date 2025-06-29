@@ -285,7 +285,7 @@ func ProcessSteps(db *sql.DB) error {
 		"dynamic_lab":    processDynamicLabSteps,
 		"docker_pull":    func(db *sql.DB) error { processDockerPullSteps(db); return nil },
 		"docker_build":   func(db *sql.DB) error { processDockerBuildSteps(db); return nil },
-		"docker_run":     func(db *sql.DB) error { processDockerRunSteps(db); return nil },
+		"docker_run":     processDockerRunSteps,
 		"docker_shell":   func(db *sql.DB) error { processDockerShellSteps(db); return nil },
 		"docker_rubrics": func(db *sql.DB) error { processDockerRubricsSteps(db); return nil },
 		"file_exists":    func(db *sql.DB) error { processFileExistsSteps(db); return nil },

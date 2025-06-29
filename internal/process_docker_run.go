@@ -9,19 +9,19 @@ import (
 )
 
 // processDockerRunSteps processes docker run steps for active tasks
-func processDockerRunSteps(db *sql.DB) {
+func processDockerRunSteps(db *sql.DB) error {
 	query := `SELECT s.id, s.task_id, s.settings, t.local_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE t.status = 'active'
 		AND t.local_path IS NOT NULL
 		AND t.local_path <> ''
-		AND s.settings::text LIKE '%docker_run%'`
+		AND s.settings ? 'docker_run'`
 
 	rows, err := db.Query(query)
 	if err != nil {
 		stepLogger.Println("Docker run query error:", err)
-		return
+		return err
 	}
 	defer rows.Close()
 
@@ -246,4 +246,5 @@ func processDockerRunSteps(db *sql.DB) {
 			}
 		}
 	}
+	return nil
 }

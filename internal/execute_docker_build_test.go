@@ -17,6 +17,10 @@ func TestExecuteDockerBuild(t *testing.T) {
 	execCommand = mockExecCommand
 	defer func() { execCommand = originalExecCommand }()
 
+	// Save and restore the global mock state to prevent test pollution
+	originalMockShouldFail := mockShouldFail
+	defer func() { mockShouldFail = originalMockShouldFail }()
+
 	testCases := []struct {
 		name        string
 		config      *DockerBuildConfig
@@ -39,11 +43,27 @@ func TestExecuteDockerBuild(t *testing.T) {
 			db:        nil,
 			expectErr: false,
 		},
-		
+		{
+			name: "build failure",
+			config: &DockerBuildConfig{
+				DockerBuild: DockerBuild{
+					ImageTag: "fail-image:latest",
+					Params:   []string{"--platform linux/amd64", "-t %%IMAGETAG%%"},
+				},
+			},
+			workDir:     ".",
+			stepID:      1,
+			db:          nil,
+			expectErr:   true,
+			errContains: "docker build failed",
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Set the mock's behavior based on the test case expectation
+			mockShouldFail = tc.expectErr
+
 			err := executeDockerBuild(tc.workDir, tc.config, tc.stepID, tc.db)
 
 			if tc.expectErr {

@@ -15,7 +15,10 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 	var buildParams []string
 	for i, param := range config.DockerBuild.Params {
 		if strings.Contains(param, "%%IMAGETAG%%") {
-			config.DockerBuild.Params[i] = strings.ReplaceAll(param, "%%IMAGETAG%%", config.DockerBuild.ImageTag)
+			// Replace the placeholder and update the parameter for this iteration
+			param = strings.ReplaceAll(param, "%%IMAGETAG%%", config.DockerBuild.ImageTag)
+			// Also update the original config slice for consistency
+			config.DockerBuild.Params[i] = param
 		}
 		buildParams = append(buildParams, strings.Fields(param)...)
 	}

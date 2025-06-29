@@ -108,8 +108,7 @@ type DockerBuild struct {
 	Tags      []string          `json:"tags"`
 	ImageTag  string            `json:"image_tag"`
 	Params    []string          `json:"params"`
-	Files     []string          `json:"files"`
-	Hashes    map[string]string `json:"hashes"`
+	Files     map[string]string `json:"files"`
 	ImageID   string            `json:"image_id"`
 	DependsOn []Dependency      `json:"depends_on,omitempty"`
 }

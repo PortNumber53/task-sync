@@ -1,9 +1,13 @@
 package internal
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
+	"os"
 
 	"github.com/lib/pq"
 )
@@ -27,13 +31,33 @@ type DynamicRubricEnvironment struct {
 // DynamicRubricConfig represents the configuration for a dynamic_rubric step
 type DynamicRubricConfig struct {
 	DynamicRubric struct {
-		File      string `json:"file"`
-		Hash      string `json:"hash,omitempty"`
-		DependsOn []struct {
-			ID int `json:"id"`
-		} `json:"depends_on,omitempty"`
+		Rubrics     string                 `json:"rubrics"`
+		Hash        string                 `json:"hash,omitempty"`
+		Files       map[string]string      `json:"files,omitempty"`
+		Hashes      map[string]string      `json:"hashes,omitempty"`
+		DependsOn   []Dependency           `json:"depends_on,omitempty"`
 		Environment DynamicRubricEnvironment `json:"environment,omitempty"`
 	} `json:"dynamic_rubric"`
+}
+
+// getSHA256 calculates the SHA256 hash of a file.
+func getSHA256(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		// Handle file not found gracefully
+		if os.IsNotExist(err) {
+			return "", nil // Return empty hash and no error if file doesn't exist
+		}
+		return "", fmt.Errorf("failed to open file for hashing: %w", err)
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", fmt.Errorf("failed to copy file content to hasher: %w", err)
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func deleteGeneratedSteps(db *sql.DB, parentStepID int, runStepDependencyID int) error {

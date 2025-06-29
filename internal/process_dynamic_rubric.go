@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strconv"
 
 	"github.com/PortNumber53/task-sync/internal/tasks/dynamic_lab"
@@ -28,6 +29,49 @@ func processDynamicRubricSteps(db *sql.DB) error {
 			resultsJSON, _ := json.Marshal(results)
 			db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID)
 			continue
+		}
+
+		var overallChanged bool
+
+		// 1. Check hashes of files in the 'files' map
+		if config.DynamicRubric.Files != nil {
+			if config.DynamicRubric.Hashes == nil {
+				config.DynamicRubric.Hashes = make(map[string]string)
+			}
+			for file := range config.DynamicRubric.Files {
+				filePath := filepath.Join(step.LocalPath, file)
+				newHash, err := getSHA256(filePath)
+				if err != nil {
+					log.Printf("Error hashing file %s for step %d: %v", file, step.StepID, err)
+					continue
+				}
+
+				storedHash, ok := config.DynamicRubric.Hashes[file]
+				if !ok || storedHash != newHash {
+					log.Printf("File %s changed for step %d. Old hash: %s, New hash: %s", file, step.StepID, storedHash, newHash)
+					overallChanged = true
+					config.DynamicRubric.Hashes[file] = newHash
+				}
+			}
+		}
+
+		// 2. Check the rubric file itself
+		log.Printf("Step %d: Running RunRubric on %s", step.StepID, config.DynamicRubric.Rubrics)
+		criteria, newRubricHash, rubricChanged, err := dynamic_lab.RunRubric(step.LocalPath, config.DynamicRubric.Rubrics, config.DynamicRubric.Hash)
+		if err != nil {
+			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
+			results := map[string]interface{}{"result": "error", "error": err.Error()}
+			resultsJSON, _ := json.Marshal(results)
+			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+				log.Printf("Failed to update step %d completion with error results: %v", step.StepID, err)
+			}
+			continue
+		}
+		log.Printf("Step %d: RunRubric completed. Changed: %t", step.StepID, rubricChanged)
+
+		if rubricChanged {
+			config.DynamicRubric.Hash = newRubricHash
+			overallChanged = true
 		}
 
 		// Find container_id and its step ID from dependencies
@@ -57,31 +101,18 @@ func processDynamicRubricSteps(db *sql.DB) error {
 			}
 		}
 
-		if containerID == "" {
-			log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)
-			results := map[string]interface{}{"result": "success", "info": "Could not find a container_id from any dependencies. Skipping generation."}
-			resultsJSON, _ := json.Marshal(results)
-			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-				log.Printf("Error updating step %d results: %v", step.StepID, err)
+		if overallChanged {
+			if containerID == "" {
+				log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)
+				results := map[string]interface{}{"result": "success", "info": "Could not find a container_id from any dependencies. Skipping generation."}
+				resultsJSON, _ := json.Marshal(results)
+				if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
+					log.Printf("Error updating step %d results: %v", step.StepID, err)
+				}
+				continue
 			}
-			continue
-		}
 
-		log.Printf("Step %d: Running RunRubric", step.StepID)
-				criteria, newHash, changed, err := dynamic_lab.RunRubric(step.LocalPath, config.DynamicRubric.File, config.DynamicRubric.Hash)
-		if err != nil {
-			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
-			results := map[string]interface{}{"result": "error", "error": err.Error()}
-			resultsJSON, _ := json.Marshal(results)
-			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-				log.Printf("Failed to update step %d completion with error results: %v", step.StepID, err)
-			}
-			continue
-		}
-		log.Printf("Step %d: RunRubric completed. Changed: %t", step.StepID, changed)
-
-		if changed {
-			log.Printf("Rubric file changed for step %d. Updating generated steps.", step.StepID)
+			log.Printf("Rubric or associated files changed for step %d. Updating generated steps.", step.StepID)
 
 			if err := deleteGeneratedSteps(db, step.StepID, runStepDependencyID); err != nil {
 				log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
@@ -113,7 +144,6 @@ func processDynamicRubricSteps(db *sql.DB) error {
 				}
 			}
 
-			config.DynamicRubric.Hash = newHash
 			updatedSettings, err := json.Marshal(config)
 			if err != nil {
 				log.Printf("Error marshalling updated settings for step %d: %v", step.StepID, err)

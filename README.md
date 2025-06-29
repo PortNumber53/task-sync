@@ -145,6 +145,7 @@ Runs a command in a new or existing Docker container.
     ],
     "container_name": "my-app-container",
     "parameters": ["-p", "8080:80", "--rm"],
+    "keep_forever": true,
     "depends_on": [
       { "id": 102 }
     ]
@@ -157,6 +158,7 @@ Runs a command in a new or existing Docker container.
 - `command` (optional): The command and arguments to execute inside the container. If not provided, the container will be started with its default command.
 - `container_name` (optional): A specific name for the container. If not provided, a name will be generated automatically.
 - `parameters` (optional): A list of extra parameters to pass to the `docker run` command (e.g., `["-p", "8080:80", "--rm"]`).
+- `keep_forever` (optional): A boolean flag. If set to `true`, the system will ensure the container keeps running, even if no long-running command is specified in `parameters`. This is useful for services that need to be persistently available.
 - `depends_on` (optional): This step will typically depend on a `docker_build` or `docker_pull` step to ensure the image is available.
 - `container_id` (output): The ID of the running container. This field is populated automatically.
 
@@ -367,4 +369,52 @@ Pulls a Docker image from a registry.
     "image_tag": "nginx:latest"
   }
 }'
+
+### 9. `docker_pool`
+
+Manages a pool of identical Docker containers, ensuring a specified number of instances are running. This is useful for creating a set of workers or services that can be used by other steps.
+
+**Settings:**
+
+```json
+{
+  "docker_pool": {
+    "image_tag": "my-worker-app:latest",
+    "image_id": "sha256:...",
+    "pool_size": 3,
+    "parameters": ["--network", "my-net"],
+    "keep_forever": true,
+    "depends_on": [
+      { "id": 102 }
+    ],
+    "containers": [
+        { "container_id": "abc...", "container_name": "worker_1" },
+        { "container_id": "def...", "container_name": "worker_2" },
+        { "container_id": "ghi...", "container_name": "worker_3" }
+    ]
+  }
+}
+```
+
+- `image_tag` (required): The Docker image to use for the containers in the pool.
+- `image_id` (optional): The specific image ID to use. If provided by a dependency (like a `docker_build` step), it will be used.
+- `pool_size` (required): The desired number of containers to maintain in the pool.
+- `parameters` (optional): A list of extra parameters to pass to the `docker run` command for each container.
+- `keep_forever` (optional): A boolean flag. If set to `true`, the system will ensure the containers keep running, even if no long-running command is specified in `parameters`.
+- `depends_on` (optional): This step will typically depend on a `docker_build` or `docker_pull` step.
+- `containers` (output): A list of objects, each containing the `container_id` and `container_name` of a container in the pool. This field is populated automatically.
+
+**Example CLI Command:**
+
+```bash
+./task-sync step create --task-id 1 --title "Create Worker Pool" --settings '{
+  "docker_pool": {
+    "image_tag": "my-worker:1.0",
+    "pool_size": 4,
+    "keep_forever": true,
+    "parameters": ["--memory=256m"],
+    "depends_on": [{ "id": 7 }]
+  }
+}'
+```
 ```

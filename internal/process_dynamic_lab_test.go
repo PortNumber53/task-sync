@@ -10,8 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-
-
 // TestProcessDynamicLabSteps_ContainerIdInheritance tests that a dynamic_lab step
 // correctly inherits the container_id from its dependencies, generates new steps
 // based on its rubric, and updates the database accordingly.
@@ -51,7 +49,7 @@ func TestProcessDynamicLabSteps_ContainerIdInheritance(t *testing.T) {
 
 	mock.ExpectQuery("SELECT s.id, s.task_id, s.title, s.settings, COALESCE").WillReturnRows(rows)
 	mock.ExpectQuery("SELECT results FROM steps WHERE id").WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"results"}).AddRow(sql.NullString{String: string(dependencyResults), Valid: true}))
-	mock.ExpectQuery("SELECT id FROM steps WHERE").WithArgs(1, 2).WillReturnRows(sqlmock.NewRows([]string{"id"})) // deleteGeneratedSteps
+	mock.ExpectQuery("SELECT id FROM steps WHERE").WithArgs(1, 2).WillReturnRows(sqlmock.NewRows([]string{"id"}))        // deleteGeneratedSteps
 	mock.ExpectQuery("SELECT id FROM tasks WHERE").WithArgs(1).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1)) // getTaskByID
 
 	// This is an INSERT ... RETURNING id, so it's a query

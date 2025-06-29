@@ -182,19 +182,21 @@ func processDockerRunSteps(db *sql.DB) error {
 			processedDockerRunParams = append(processedDockerRunParams, strings.Fields(replacedParam)...)
 		}
 
-		hasKeepAliveCmd := false
-		for _, param := range dockerRunParams {
-			if (strings.Contains(param, "while true") && strings.Contains(param, "sleep")) ||
-				strings.Contains(param, "sleep infinity") ||
-				strings.Contains(param, "tail -f") {
-				hasKeepAliveCmd = true
-				break
+		if config.DockerRun.KeepForever {
+			hasKeepAliveCmd := false
+			for _, param := range dockerRunParams {
+				if (strings.Contains(param, "while true") && strings.Contains(param, "sleep")) ||
+					strings.Contains(param, "sleep infinity") ||
+					strings.Contains(param, "tail -f") {
+					hasKeepAliveCmd = true
+					break
+				}
 			}
-		}
 
-		if !hasKeepAliveCmd {
-			keepAliveArgs := []string{"-c", "while true; do sleep 30; done"}
-			processedDockerRunParams = append(processedDockerRunParams, keepAliveArgs...)
+			if !hasKeepAliveCmd {
+				keepAliveArgs := []string{"-c", "while true; do sleep 30; done"}
+				processedDockerRunParams = append(processedDockerRunParams, keepAliveArgs...)
+			}
 		}
 
 		randomSuffix, err := GenerateRandomString(4)

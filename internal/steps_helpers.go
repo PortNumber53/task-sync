@@ -31,11 +31,11 @@ type DynamicRubricEnvironment struct {
 // DynamicRubricConfig represents the configuration for a dynamic_rubric step
 type DynamicRubricConfig struct {
 	DynamicRubric struct {
-		Rubrics     string                 `json:"rubrics"`
-		Hash        string                 `json:"hash,omitempty"`
-		Files       map[string]string      `json:"files,omitempty"`
-		Hashes      map[string]string      `json:"hashes,omitempty"`
-		DependsOn   []Dependency           `json:"depends_on,omitempty"`
+		Rubrics     string                   `json:"rubrics"`
+		Hash        string                   `json:"hash,omitempty"`
+		Files       map[string]string        `json:"files,omitempty"`
+		Hashes      map[string]string        `json:"hashes,omitempty"`
+		DependsOn   []Dependency             `json:"depends_on,omitempty"`
 		Environment DynamicRubricEnvironment `json:"environment,omitempty"`
 	} `json:"dynamic_rubric"`
 }

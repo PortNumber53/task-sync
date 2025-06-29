@@ -39,5 +39,3 @@ func Run(localPath string, files []string, oldHashes map[string]string) (newHash
 
 	return newHashes, changed, nil
 }
-
-

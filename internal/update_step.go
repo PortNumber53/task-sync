@@ -88,6 +88,70 @@ func setNestedValue(dataMap map[string]interface{}, path string, value interface
 	return nil
 }
 
+// removeNestedKey removes a key from a nested map based on a dot-separated path.
+func removeNestedKey(dataMap map[string]interface{}, path string) {
+	parts := strings.Split(path, ".")
+	currentMap := dataMap
+
+	for i, key := range parts {
+		if i == len(parts)-1 {
+			delete(currentMap, key)
+			return
+		}
+
+		next, ok := currentMap[key]
+		if !ok {
+			// Key doesn't exist, so nothing to remove.
+			return
+		}
+
+		nextMap, ok := next.(map[string]interface{})
+		if !ok {
+			// Path is not a map, can't continue.
+			return
+		}
+		currentMap = nextMap
+	}
+}
+
+// RemoveStepSettingKey removes a key from a step's settings JSON.
+// Dot notation (e.g., "docker_run.image_tag") is supported for nested keys.
+func RemoveStepSettingKey(db *sql.DB, stepID int, keyToRemove string) error {
+	stepInfo, err := GetStepInfo(db, stepID)
+	if err != nil {
+		return fmt.Errorf("failed to get step info for step %d: %w", stepID, err)
+	}
+
+	if stepInfo.Settings == nil {
+		// Nothing to remove
+		return nil
+	}
+
+	removeNestedKey(stepInfo.Settings, keyToRemove)
+
+	updatedSettingsBytes, err := json.Marshal(stepInfo.Settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated settings for step %d: %w", stepID, err)
+	}
+
+	result, err := db.Exec(
+		"UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2",
+		string(updatedSettingsBytes),
+		stepID,
+	)
+	if err != nil {
+		return fmt.Errorf("error updating step settings in database for step %d: %w", stepID, err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error checking affected rows for step ID %d settings update: %w", stepID, err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("no step found with ID %d during settings update", stepID)
+	}
+	return nil
+}
+
 // UpdateStepFieldOrSetting updates a direct field of a step or a key within its settings JSON.
 // For settings, dot notation (e.g., "docker_run.image_tag") is supported for nested keys.
 // It attempts to parse valueToSet as JSON; if it fails, valueToSet is treated as a string.
@@ -139,24 +203,7 @@ func UpdateStepFieldOrSetting(db *sql.DB, stepID int, keyToSet string, valueToSe
 			// Not a valid JSON value on its own, so treat it as a plain string.
 			if valueToSet == "" {
 				// Special case: empty string means remove the key.
-				keys := strings.Split(keyToSet, ".")
-				currentMap := stepInfo.Settings
-				for i, key := range keys {
-					if i == len(keys)-1 {
-						delete(currentMap, key)
-						break
-					}
-					next, ok := currentMap[key]
-					if !ok {
-						break
-					}
-					nextMap, ok := next.(map[string]interface{})
-					if !ok {
-						// Path is not a map, can't continue.
-						break
-					}
-					currentMap = nextMap
-				}
+				removeNestedKey(stepInfo.Settings, keyToSet)
 			} else {
 				if errSet := setNestedValue(stepInfo.Settings, keyToSet, valueToSet); errSet != nil {
 					return fmt.Errorf("failed to set nested key '%s' in settings for step %d: %w", keyToSet, stepID, errSet)

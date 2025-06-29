@@ -42,6 +42,12 @@ type DockerRunConfig struct {
 	DockerRun DockerRun `json:"docker_run"`
 }
 
+// DockerPoolConfig represents the configuration for a docker_pool step.
+
+type DockerPoolConfig struct {
+	DockerPool DockerPool `json:"docker_pool"`
+}
+
 // FileExistsConfig represents the configuration for a file_exists step.
 type FileExistsConfig struct {
 	FileExists []string `json:"file_exists"`
@@ -99,6 +105,7 @@ type DependencyHolder struct {
 type StepConfigHolder struct {
 	DockerBuild *DependencyHolder `json:"docker_build,omitempty"`
 	DockerRun   *DependencyHolder `json:"docker_run,omitempty"`
+	DockerPool  *DependencyHolder `json:"docker_pool,omitempty"`
 	DockerShell *DependencyHolder `json:"docker_shell,omitempty"`
 }
 
@@ -132,6 +139,25 @@ type DockerRun struct {
 	ContainerName string       `json:"container_name"`
 	Parameters    []string     `json:"parameters"`
 	DependsOn     []Dependency `json:"depends_on,omitempty"`
+	KeepForever   bool         `json:"keep_forever,omitempty"`
+}
+
+// DockerPool contains details for the docker pool process.
+type DockerPool struct {
+	Image       string          `json:"image"`
+	ImageTag    string          `json:"image_tag"`
+	ImageID     string          `json:"image_id"`
+	PoolSize    int             `json:"pool_size"`
+	Containers  []ContainerInfo `json:"containers"`
+	Parameters  []string        `json:"parameters"`
+	DependsOn   []Dependency    `json:"depends_on,omitempty"`
+	KeepForever bool            `json:"keep_forever,omitempty"`
+}
+
+// ContainerInfo holds information about a single container in a pool.
+type ContainerInfo struct {
+	ContainerID   string `json:"container_id"`
+	ContainerName string `json:"container_name"`
 }
 
 // CreateStep inserts a new step for a task and returns the new step's ID.
@@ -285,6 +311,7 @@ func ProcessSteps(db *sql.DB) error {
 		"docker_pull":    func(db *sql.DB) error { processDockerPullSteps(db); return nil },
 		"docker_build":   func(db *sql.DB) error { processDockerBuildSteps(db); return nil },
 		"docker_run":     processDockerRunSteps,
+		"docker_pool":    processDockerPoolSteps,
 		"docker_shell":   func(db *sql.DB) error { processDockerShellSteps(db); return nil },
 		"docker_rubrics": func(db *sql.DB) error { processDockerRubricsSteps(db); return nil },
 		"file_exists":    func(db *sql.DB) error { processFileExistsSteps(db); return nil },
@@ -366,58 +393,6 @@ func CopyStep(db *sql.DB, fromStepID, toTaskID int) (int, error) {
 	return newStepID, nil
 }
 
-// RemoveStepSettingKey removes a top-level key from the step's settings JSON.
-func RemoveStepSettingKey(db *sql.DB, stepID int, keyToRemove string) error {
-	stepInfo, err := GetStepInfo(db, stepID)
-	if err != nil {
-		return fmt.Errorf("failed to get step info for step %d: %w", stepID, err)
-	}
-
-	if stepInfo.Settings == nil {
-		// Nothing to remove if settings are nil, or key effectively doesn't exist
-		// Depending on desired behavior, could return an error or just succeed silently.
-		// For now, succeed silently as the key is not present.
-		return nil
-	}
-
-	// Check if key exists before trying to delete
-	if _, ok := stepInfo.Settings[keyToRemove]; !ok {
-		// Key not found, consider this a success as the state is as if it were removed.
-		// Alternatively, return an error: fmt.Errorf("key '%s' not found in settings for step %d", keyToRemove, stepID)
-		return nil
-	}
-
-	// Remove the key
-	delete(stepInfo.Settings, keyToRemove)
-
-	// Marshal the updated settings back to JSON
-	updatedSettingsBytes, err := json.Marshal(stepInfo.Settings)
-	if err != nil {
-		return fmt.Errorf("failed to marshal updated settings for step %d: %w", stepID, err)
-	}
-
-	// Update the database
-	result, err := db.Exec(
-		"UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2",
-		string(updatedSettingsBytes),
-		stepID,
-	)
-	if err != nil {
-		return fmt.Errorf("error updating step settings in database for step %d: %w", stepID, err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("error checking affected rows for step %d: %w", stepID, err)
-	}
-	if rowsAffected == 0 {
-		// This case should ideally be caught by GetStepInfo, but as a safeguard:
-		return fmt.Errorf("no step found with ID %d during update", stepID)
-	}
-
-	return nil
-}
-
 // ClearStepResults clears the results for a step
 func ClearStepResults(db *sql.DB, stepID int) error {
 	result, err := db.Exec(
@@ -487,21 +462,33 @@ func TreeSteps(db *sql.DB) error {
 		nodes[id] = node
 		taskSteps[taskID] = append(taskSteps[taskID], node)
 
-		var settings struct {
-			DependsOn []struct {
-				ID int `json:"id"`
-			} `json:"depends_on"`
+		var topLevel map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(settingsStr), &topLevel); err != nil {
+			continue
 		}
 
-		var topLevel map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(settingsStr), &topLevel); err == nil {
-			for _, rawMessage := range topLevel {
-				if err := json.Unmarshal(rawMessage, &settings); err == nil {
-					if len(settings.DependsOn) > 0 {
-						for _, dep := range settings.DependsOn {
-							dependencies[id] = append(dependencies[id], dep.ID)
-						}
+		// Check for top-level depends_on
+		if dependsOnRaw, ok := topLevel["depends_on"]; ok {
+			var deps []Dependency
+			if err := json.Unmarshal(dependsOnRaw, &deps); err == nil {
+				for _, dep := range deps {
+					dependencies[id] = append(dependencies[id], dep.ID)
+				}
+				continue // Found deps, go to next step
+			}
+		}
+
+		// Fallback for nested depends_on
+		for _, rawMessage := range topLevel {
+			var nested struct {
+				DependsOn []Dependency `json:"depends_on"`
+			}
+			if err := json.Unmarshal(rawMessage, &nested); err == nil {
+				if len(nested.DependsOn) > 0 {
+					for _, dep := range nested.DependsOn {
+						dependencies[id] = append(dependencies[id], dep.ID)
 					}
+					break // Found deps, break from inner loop
 				}
 			}
 		}

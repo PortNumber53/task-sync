@@ -10,6 +10,9 @@ import (
 	"github.com/PortNumber53/task-sync/internal/tasks/dynamic_lab"
 )
 
+var dynamicLabRun = dynamic_lab.Run
+var dynamicLabRubricRun = dynamic_lab.RunRubric
+
 func processDynamicLabSteps(db *sql.DB) error {
 	steps, err := getStepsByType(db, "dynamic_lab")
 	if err != nil {
@@ -26,7 +29,51 @@ func processDynamicLabSteps(db *sql.DB) error {
 			continue
 		}
 
-		newHashes, changed, err := dynamic_lab.Run(step.LocalPath, config.DynamicLab.Files)
+		var files []string
+		var migrated bool
+
+		// Check for old format (files is a map) and migrate if necessary
+		if fileMap, ok := config.DynamicLab.Files.(map[string]interface{}); ok {
+			log.Printf("Step %d: Migrating 'files' from map to files/hashes format", step.StepID)
+			migrated = true
+
+			// Extract files from map keys
+			files = make([]string, 0, len(fileMap))
+			for k := range fileMap {
+				files = append(files, k)
+			}
+
+			// Overwrite the Files field in the config with the new slice format
+			config.DynamicLab.Files = files
+
+			// Re-serialize the entire config to update the step's settings in the database later
+			updatedSettings, err := json.Marshal(config)
+			if err != nil {
+				return fmt.Errorf("failed to re-marshal migrated settings for step %d: %w", step.StepID, err)
+			}
+			step.Settings = string(updatedSettings) // Update the in-memory step settings
+
+		} else if fileSlice, ok := config.DynamicLab.Files.([]interface{}); ok {
+			// New format, but as []interface{}. Convert to []string.
+			for _, v := range fileSlice {
+				if fileStr, ok := v.(string); ok {
+					files = append(files, fileStr)
+				}
+			}
+		} else if fileSlice, ok := config.DynamicLab.Files.([]string); ok {
+			// New format, already []string.
+			files = fileSlice
+		} else if config.DynamicLab.Files != nil {
+			// Handle case where it might be an unexpected type
+			err := fmt.Errorf("files field for step %d is of an unexpected type: %T", step.StepID, config.DynamicLab.Files)
+			log.Print(err.Error())
+			results := map[string]interface{}{"result": "error", "error": err.Error()}
+			resultsJSON, _ := json.Marshal(results)
+			db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID)
+			continue
+		}
+
+		newHashes, changed, err := dynamicLabRun(step.LocalPath, files, config.DynamicLab.Hashes)
 		if err != nil {
 			log.Printf("Error running dynamic_lab for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": err.Error()}
@@ -35,29 +82,97 @@ func processDynamicLabSteps(db *sql.DB) error {
 			continue
 		}
 
-		// Find container_id and its step ID from dependencies
+		if migrated {
+			changed = true
+		}
+
+		// Find container_id by traversing the dependency graph
 		var containerID string
 		var runStepDependencyID int
+
+		queue := make([]int, 0)
 		for _, dep := range config.DynamicLab.DependsOn {
+			queue = append(queue, dep.ID)
+		}
+
+		visited := make(map[int]bool)
+		for _, id := range queue {
+			visited[id] = true
+		}
+
+		for len(queue) > 0 {
+			currentStepID := queue[0]
+			queue = queue[1:]
+
 			var rawResults sql.NullString
-			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", dep.ID).Scan(&rawResults)
+			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", currentStepID).Scan(&rawResults)
 			if err != nil {
-				log.Printf("Step %d: Error getting info for dependency step %d: %v", step.StepID, dep.ID, err)
+				log.Printf("Step %d: Error getting results for dependency step %d: %v", step.StepID, currentStepID, err)
+				continue
+			}
+			if rawResults.Valid {
+				var results map[string]interface{}
+				if err := json.Unmarshal([]byte(rawResults.String), &results); err == nil {
+					if cID, ok := results["container_id"].(string); ok && cID != "" {
+						containerID = cID
+						runStepDependencyID = currentStepID
+						log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
+						break
+					}
+				}
+			}
+
+			var settingsStr string
+			err = db.QueryRow("SELECT settings FROM steps WHERE id = $1", currentStepID).Scan(&settingsStr)
+			if err != nil {
+				log.Printf("Step %d: Error getting settings for dependency step %d: %v", step.StepID, currentStepID, err)
 				continue
 			}
 
-			if rawResults.Valid {
-				var results map[string]interface{}
-				if err := json.Unmarshal([]byte(rawResults.String), &results); err != nil {
-					log.Printf("Error unmarshalling results for dependency step %d: %v", dep.ID, err)
-					continue
+			var topLevel map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(settingsStr), &topLevel); err == nil {
+				for _, rawMessage := range topLevel {
+					var holder DependencyHolder
+					if err := json.Unmarshal(rawMessage, &holder); err == nil {
+						for _, dep := range holder.DependsOn {
+							if !visited[dep.ID] {
+								visited[dep.ID] = true
+								queue = append(queue, dep.ID)
+							}
+						}
+					}
 				}
+			}
+		}
 
-				if cID, ok := results["container_id"].(string); ok {
-					containerID = cID
-					runStepDependencyID = dep.ID // Capture the ID of the dependency that provides the container
-					log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
-					break // Found it, no need to check other dependencies
+		if containerID == "" {
+			log.Printf("Step %d: Could not find container_id in dependency graph. Searching all steps in task %d.", step.StepID, step.TaskID)
+
+			query := `SELECT id, results FROM steps WHERE task_id = $1 AND settings ? 'docker_run' ORDER BY id DESC`
+			rows, err := db.Query(query, step.TaskID)
+			if err != nil {
+				log.Printf("Error querying for docker_run steps in task %d: %v", step.TaskID, err)
+			} else {
+				defer rows.Close()
+				for rows.Next() {
+					var depStepID int
+					var rawResults sql.NullString
+					if err := rows.Scan(&depStepID, &rawResults); err != nil {
+						log.Printf("Error scanning docker_run step: %v", err)
+						continue
+					}
+
+					if rawResults.Valid {
+						var results map[string]interface{}
+						if err := json.Unmarshal([]byte(rawResults.String), &results); err == nil {
+							if cID, ok := results["container_id"].(string); ok && cID != "" {
+								containerID = cID
+								runStepDependencyID = depStepID
+								log.Printf("Found container_id '%s' via task-wide search from step %d.", containerID, runStepDependencyID)
+								break
+							}
+						}
+					}
 				}
 			}
 		}
@@ -80,7 +195,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 			continue
 		}
 
-		criteria, newRubricHash, _, err := dynamic_lab.RunRubric(step.LocalPath, rubricFile, "") // Pass empty hash to force re-parse
+		criteria, newRubricHash, _, err := dynamicLabRubricRun(step.LocalPath, rubricFile, "") // Pass empty hash to force re-parse
 		if err != nil {
 			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": err.Error()}
@@ -91,15 +206,17 @@ func processDynamicLabSteps(db *sql.DB) error {
 			continue
 		}
 
-
+		if containerID != "" && !config.DynamicLab.Environment.Docker {
+			log.Printf("Step %d: Found container_id, ensuring environment is set to docker.", step.StepID)
+			config.DynamicLab.Environment.Docker = true
+			changed = true
+		}
 
 		if containerID == "" {
 			log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)
 			results := map[string]interface{}{"result": "success", "info": "Could not find a container_id from any dependencies. Skipping generation."}
 			resultsJSON, _ := json.Marshal(results)
-			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-				log.Printf("Error updating step %d results: %v", step.StepID, err)
-			}
+			db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID)
 			continue
 		}
 
@@ -127,8 +244,11 @@ func processDynamicLabSteps(db *sql.DB) error {
 			}
 		}
 
-		config.DynamicLab.Files = newHashes
-		config.DynamicLab.Files[rubricFile] = newRubricHash
+		config.DynamicLab.Hashes = newHashes
+		if config.DynamicLab.Hashes == nil {
+			config.DynamicLab.Hashes = make(map[string]string)
+		}
+		config.DynamicLab.Hashes[rubricFile] = newRubricHash
 		updatedSettings, err := json.Marshal(config)
 		if err != nil {
 			log.Printf("Error marshalling updated settings for step %d: %v", step.StepID, err)

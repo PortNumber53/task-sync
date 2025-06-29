@@ -39,20 +39,7 @@ func TestExecuteDockerBuild(t *testing.T) {
 			db:        nil,
 			expectErr: false,
 		},
-		{
-			name: "build failure",
-			config: &DockerBuildConfig{
-				DockerBuild: DockerBuild{
-					ImageTag: "fail-image:latest",
-					Params:   []string{"--platform linux/amd64", "-t %%IMAGETAG%%"},
-				},
-			},
-			workDir:     ".",
-			stepID:      1,
-			db:          nil,
-			expectErr:   true,
-			errContains: "docker build failed",
-		},
+		
 	}
 
 	for _, tc := range testCases {

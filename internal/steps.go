@@ -44,7 +44,7 @@ type DockerRunConfig struct {
 
 // FileExistsConfig represents the configuration for a file_exists step.
 type FileExistsConfig struct {
-	FileExists FileExists `json:"file_exists"`
+	FileExists []string `json:"file_exists"`
 }
 
 // DockerRubricsConfig represents the configuration for a docker_rubrics step.
@@ -72,6 +72,19 @@ type DockerShellConfig struct {
 	} `json:"docker_shell"`
 }
 
+// DynamicLabConfig represents the configuration for a dynamic_lab step.
+type DynamicLabConfig struct {
+	DynamicLab struct {
+		RubricFile  string            `json:"rubric_file"`
+		Files       interface{}       `json:"files,omitempty"`
+		Hashes      map[string]string `json:"hashes,omitempty"`
+		Environment struct {
+			Docker bool `json:"docker"`
+		} `json:"environment"`
+		DependsOn []Dependency `json:"depends_on,omitempty"`
+	} `json:"dynamic_lab"`
+}
+
 // --- Detail Structs ---
 
 // Dependency defines a dependency on another step.
@@ -94,7 +107,7 @@ type DockerBuild struct {
 	Context   string            `json:"context"`
 	Tags      []string          `json:"tags"`
 	ImageTag  string            `json:"image_tag"`
-	Params    []string `json:"params"`
+	Params    []string          `json:"params"`
 	Files     []string          `json:"files"`
 	Hashes    map[string]string `json:"hashes"`
 	ImageID   string            `json:"image_id"`
@@ -112,19 +125,14 @@ type DockerPull struct {
 
 // DockerRun contains details for the docker run process.
 type DockerRun struct {
-	Image         string            `json:"image"`
-	ImageTag      string            `json:"image_tag"`
-	ImageID       string            `json:"image_id"`
-	Command       []string          `json:"command"`
-	ContainerID   string            `json:"container_id"`
-	ContainerName string            `json:"container_name"`
-	Parameters    []string          `json:"parameters"`
-	DependsOn     []Dependency      `json:"depends_on,omitempty"`
-}
-
-// FileExists contains details for the file exists check.
-type FileExists struct {
-	Path string `json:"path"`
+	Image         string       `json:"image"`
+	ImageTag      string       `json:"image_tag"`
+	ImageID       string       `json:"image_id"`
+	Command       []string     `json:"command"`
+	ContainerID   string       `json:"container_id"`
+	ContainerName string       `json:"container_name"`
+	Parameters    []string     `json:"parameters"`
+	DependsOn     []Dependency `json:"depends_on,omitempty"`
 }
 
 // CreateStep inserts a new step for a task and returns the new step's ID.

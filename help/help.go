@@ -197,7 +197,6 @@ Use "task-sync step <command> --help" for more information about a command.
 	fmt.Println(helpText)
 }
 
-
 // PrintStepsListHelp prints help for the step list command
 func PrintStepsListHelp() {
 	helpText := `List all steps in the task system.
@@ -271,6 +270,25 @@ Examples:
 
   # Show this help message
   task-sync task edit --help`
+	fmt.Println(helpText)
+}
+
+// PrintTaskHelp prints help for the root task command
+func PrintTaskHelp() {
+	helpText := `Manage tasks in the task system.
+
+Usage:
+  task-sync task <command> [flags]
+
+Available Commands:
+  create     Create a new task
+  delete     Delete a task
+  edit       Edit a task's details
+  info       Show detailed information about a task
+  list       List all tasks
+
+Use "task-sync task <command> --help" for more information about a command.
+`
 	fmt.Println(helpText)
 }
 

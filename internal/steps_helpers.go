@@ -1,0 +1,106 @@
+package internal
+
+import (
+	"database/sql"
+	"fmt"
+	"log"
+
+	"github.com/lib/pq"
+)
+
+// StepExec is a private struct used for handling step execution data.
+type StepExec struct {
+	StepID    int
+	TaskID    int
+	Title     string
+	Settings  string
+	LocalPath string
+}
+
+// DynamicRubricEnvironment defines the execution environment for generated steps.
+type DynamicRubricEnvironment struct {
+	Docker   bool   `json:"docker"`
+	ImageTag string `json:"image_tag"`
+	ImageID  string `json:"image_id"`
+}
+
+// DynamicRubricConfig represents the configuration for a dynamic_rubric step
+type DynamicRubricConfig struct {
+	DynamicRubric struct {
+		File      string `json:"file"`
+		Hash      string `json:"hash,omitempty"`
+		DependsOn []struct {
+			ID int `json:"id"`
+		} `json:"depends_on,omitempty"`
+		Environment DynamicRubricEnvironment `json:"environment,omitempty"`
+	} `json:"dynamic_rubric"`
+}
+
+// DynamicLabConfig represents the configuration for a dynamic_lab step
+type DynamicLabConfig struct {
+	DynamicLab struct {
+		Files      map[string]string `json:"files"`
+		RubricFile string            `json:"rubric_file"`
+		DependsOn  []struct {
+			ID int `json:"id"`
+		} `json:"depends_on,omitempty"`
+		Environment DynamicRubricEnvironment `json:"environment,omitempty"`
+	} `json:"dynamic_lab"`
+}
+
+func deleteGeneratedSteps(db *sql.DB, parentStepID int) error {
+	// Find steps that depend on the parent step
+	query := `
+		SELECT id FROM steps WHERE settings -> 'docker_shell' -> 'depends_on' @> jsonb_build_array(jsonb_build_object('id', $1::int))
+	`
+	rows, err := db.Query(query, parentStepID)
+	if err != nil {
+		return fmt.Errorf("querying for generated steps failed: %w", err)
+	}
+	defer rows.Close()
+
+	var idsToDelete []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scanning generated step id failed: %w", err)
+		}
+		idsToDelete = append(idsToDelete, id)
+	}
+
+	if len(idsToDelete) > 0 {
+		deleteQuery := `DELETE FROM steps WHERE id = ANY($1::int[])`
+		_, err := db.Exec(deleteQuery, pq.Array(idsToDelete))
+		if err != nil {
+			return fmt.Errorf("deleting generated steps failed: %w", err)
+		}
+		log.Printf("Deleted %d generated steps for parent step %d", len(idsToDelete), parentStepID)
+	}
+
+	return nil
+}
+
+func getStepsByType(db *sql.DB, stepType string) ([]StepExec, error) {
+	query := `
+		SELECT s.id, s.task_id, s.title, s.settings, COALESCE(t.local_path, '')
+		FROM steps s
+		JOIN tasks t ON s.task_id = t.id
+		WHERE s.settings ? $1`
+
+	rows, err := db.Query(query, stepType)
+	if err != nil {
+		return nil, fmt.Errorf("querying for steps by type failed: %w", err)
+	}
+	defer rows.Close()
+
+	var steps []StepExec
+	for rows.Next() {
+		var step StepExec
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Title, &step.Settings, &step.LocalPath); err != nil {
+			return nil, fmt.Errorf("scanning step failed: %w", err)
+		}
+		steps = append(steps, step)
+	}
+
+	return steps, nil
+}

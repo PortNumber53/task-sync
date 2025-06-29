@@ -1,4 +1,4 @@
-module github.com/yourusername/task-sync
+module github.com/PortNumber53/task-sync
 
 go 1.24
 

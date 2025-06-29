@@ -39,15 +39,15 @@ func processDockerPullSteps(db *sql.DB) {
 
 		// Check dependencies
 		depsMet, err := checkDependencies(db, step.StepID, stepLogger)
-			if err != nil {
-				stepLogger.Printf("Error checking dependencies for step %d: %v\n", step.StepID, err)
-				// Optionally, store this as a failure or keep step active for retry
-				continue
-			}
-			if !depsMet {
-				stepLogger.Printf("Step %d: Dependencies not met for docker_pull.\n", step.StepID)
-				continue // Skip this step until dependencies are met
-			}
+		if err != nil {
+			stepLogger.Printf("Error checking dependencies for step %d: %v\n", step.StepID, err)
+			// Optionally, store this as a failure or keep step active for retry
+			continue
+		}
+		if !depsMet {
+			stepLogger.Printf("Step %d: Dependencies not met for docker_pull.\n", step.StepID)
+			continue // Skip this step until dependencies are met
+		}
 
 		// Check PreventRunBefore
 		if config.DockerPull.PreventRunBefore != "" {

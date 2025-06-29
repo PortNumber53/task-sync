@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+var mockShouldFail bool
+
 // A simple io.Writer that discards its input, to suppress log output during tests.
 type testWriter struct{}
 
@@ -22,6 +24,9 @@ func mockExecCommand(command string, args ...string) *exec.Cmd {
 	cmd := exec.Command(os.Args[0], cs...)
 	// This environment variable is crucial for the helper process to identify when it's being run as a mock.
 	cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1"}
+	if mockShouldFail {
+		cmd.Env = append(cmd.Env, "GO_HELPER_PROCESS_SHOULD_FAIL=1")
+	}
 	return cmd
 }
 
@@ -31,6 +36,11 @@ func mockExecCommand(command string, args ...string) *exec.Cmd {
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
+	}
+
+	if os.Getenv("GO_HELPER_PROCESS_SHOULD_FAIL") == "1" {
+		fmt.Fprintln(os.Stderr, "simulated command failure")
+		os.Exit(1)
 	}
 
 	// os.Args are: [/path/to/test/binary, -test.run=TestHelperProcess, --, command, arg1, arg2, ...]

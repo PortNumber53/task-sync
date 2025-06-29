@@ -43,6 +43,31 @@ func processDockerShellSteps(db *sql.DB) {
 			continue
 		}
 
+		// Inherit image_id and image_tag from dependencies if not specified
+		if config.DockerShell.Docker.ImageID == "" || config.DockerShell.Docker.ImageTag == "" {
+			var imageID, imageTag string
+			// Search through direct dependencies
+			for _, dep := range config.DockerShell.DependsOn {
+				id, tag, err := findImageDetailsRecursive(db, dep.ID, make(map[int]bool))
+				if err != nil {
+					stepLogger.Printf("Step %d: error searching for image details in dependency %d: %v", stepID, dep.ID, err)
+					continue // Try next dependency
+				}
+				if id != "" {
+					imageID = id
+					imageTag = tag
+					stepLogger.Printf("Step %d: Found ImageID '%s' and ImageTag '%s' from dependency step %d\n", stepID, imageID, imageTag, dep.ID)
+					break // Found it, stop searching
+				}
+			}
+
+			if imageID != "" {
+				config.DockerShell.Docker.ImageID = imageID
+				config.DockerShell.Docker.ImageTag = imageTag
+				stepLogger.Printf("Step %d: Inherited ImageID '%s' and ImageTag '%s' from dependency chain\n", stepID, imageID, imageTag)
+			}
+		}
+
 		targetImageTag := config.DockerShell.Docker.ImageTag
 		expectedImageHash := config.DockerShell.Docker.ImageID
 
@@ -99,6 +124,68 @@ func processDockerShellSteps(db *sql.DB) {
 
 // findContainerByImageTag searches for a running container with the given image tag.
 // It returns the container ID and the full image hash (ImageID) of the container.
+func findImageDetailsRecursive(db *sql.DB, stepID int, visited map[int]bool) (string, string, error) {
+	if visited[stepID] {
+		return "", "", fmt.Errorf("circular dependency detected at step %d", stepID)
+	}
+	visited[stepID] = true
+
+	stepInfo, err := GetStepInfo(db, stepID)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get info for step %d: %w", stepID, err)
+	}
+
+	// Check current step's settings for image details. Only return if we find BOTH id and tag.
+	if buildSettings, ok := stepInfo.Settings["docker_build"].(map[string]interface{}); ok {
+		if id, ok := buildSettings["image_id"].(string); ok && id != "" {
+			if tag, ok := buildSettings["image_tag"].(string); ok && tag != "" {
+				return id, tag, nil
+			}
+		}
+	}
+	if runSettings, ok := stepInfo.Settings["docker_run"].(map[string]interface{}); ok {
+		if id, ok := runSettings["image_id"].(string); ok && id != "" {
+			if tag, ok := runSettings["image_tag"].(string); ok && tag != "" {
+				return id, tag, nil
+			}
+		}
+	}
+
+	// If not found, recurse through this step's dependencies
+	settingsBytes, err := json.Marshal(stepInfo.Settings)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to re-marshal settings for step %d: %w", stepID, err)
+	}
+
+	var holder StepConfigHolder
+	if err := json.Unmarshal(settingsBytes, &holder); err != nil {
+		// Not an error, might just not have dependencies
+		return "", "", nil
+	}
+
+	var dependencies []Dependency
+	if holder.DockerBuild != nil {
+		dependencies = holder.DockerBuild.DependsOn
+	} else if holder.DockerRun != nil {
+		dependencies = holder.DockerRun.DependsOn
+	} else if holder.DockerShell != nil {
+		dependencies = holder.DockerShell.DependsOn
+	}
+
+	for _, dep := range dependencies {
+		imageID, imageTag, err := findImageDetailsRecursive(db, dep.ID, visited)
+		if err != nil {
+			stepLogger.Printf("error in sub-dependency branch of step %d: %v", dep.ID, err)
+			continue
+		}
+		if imageID != "" {
+			return imageID, imageTag, nil // Found it!
+		}
+	}
+
+	return "", "", nil // Not found in this branch
+}
+
 func findContainerByImageTag(imageTag string) (string, string, error) {
 	// Find container IDs using the image tag
 	cmd := execCommand("docker", "ps", "--filter", fmt.Sprintf("ancestor=%s", imageTag), "--format", "{{.ID}}")

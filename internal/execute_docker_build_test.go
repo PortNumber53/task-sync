@@ -31,7 +31,7 @@ func TestExecuteDockerBuild(t *testing.T) {
 			config: &DockerBuildConfig{
 				DockerBuild: DockerBuild{
 					ImageTag: "test-image:latest",
-					Params:   []string{"-t", "%%IMAGETAG%%"},
+					Params:   []string{"--platform linux/amd64", "-t %%IMAGETAG%%"},
 				},
 			},
 			workDir:   ".",
@@ -44,7 +44,7 @@ func TestExecuteDockerBuild(t *testing.T) {
 			config: &DockerBuildConfig{
 				DockerBuild: DockerBuild{
 					ImageTag: "fail-image:latest",
-					Params:   []string{"-t", "%%IMAGETAG%%"},
+					Params:   []string{"--platform linux/amd64", "-t %%IMAGETAG%%"},
 				},
 			},
 			workDir:     ".",

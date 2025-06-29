@@ -11,12 +11,121 @@ import (
 	"os"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/lib/pq"
-	"github.com/yourusername/task-sync/internal/tasks/dynamic_lab"
 )
+
+// stepExec holds the necessary information for executing a step.
+// It's populated from a database query joining steps and tasks.
+type stepExec struct {
+	StepID    int
+	TaskID    int
+	Settings  string
+	LocalPath string
+}
+
+// --- Top-level Config Structs ---
+
+// DockerBuildConfig represents the configuration for a docker_build step.
+type DockerBuildConfig struct {
+	DockerBuild DockerBuild `json:"docker_build"`
+}
+
+// DockerPullConfig represents the configuration for a docker_pull step.
+type DockerPullConfig struct {
+	DockerPull DockerPull `json:"docker_pull"`
+}
+
+// DockerRunConfig represents the configuration for a docker_run step.
+type DockerRunConfig struct {
+	DockerRun DockerRun `json:"docker_run"`
+}
+
+// FileExistsConfig represents the configuration for a file_exists step.
+type FileExistsConfig struct {
+	FileExists FileExists `json:"file_exists"`
+}
+
+// DockerRubricsConfig represents the configuration for a docker_rubrics step.
+type DockerRubricsConfig struct {
+	DockerRubrics struct {
+		Files     []string          `json:"files"`
+		Hashes    map[string]string `json:"hashes"`
+		ImageID   string            `json:"image_id"`
+		ImageTag  string            `json:"image_tag"`
+		DependsOn []Dependency      `json:"depends_on,omitempty"`
+	} `json:"docker_rubrics"`
+}
+
+// DockerShellConfig represents the configuration for a docker_shell step.
+type DockerShellConfig struct {
+	DockerShell struct {
+		Command []map[string]string `json:"command"`
+		Docker  struct {
+			ContainerID   string `json:"container_id"`
+			ContainerName string `json:"container_name"`
+			ImageID       string `json:"image_id"`
+			ImageTag      string `json:"image_tag"`
+		} `json:"docker"`
+		DependsOn []Dependency `json:"depends_on,omitempty"`
+	} `json:"docker_shell"`
+}
+
+// --- Detail Structs ---
+
+// Dependency defines a dependency on another step.
+type Dependency struct {
+	ID int `json:"id"`
+}
+
+type DependencyHolder struct {
+	DependsOn []Dependency `json:"depends_on"`
+}
+
+type StepConfigHolder struct {
+	DockerBuild *DependencyHolder `json:"docker_build,omitempty"`
+	DockerRun   *DependencyHolder `json:"docker_run,omitempty"`
+	DockerShell *DependencyHolder `json:"docker_shell,omitempty"`
+}
+
+// DockerBuild contains details for the docker build process.
+type DockerBuild struct {
+	Context   string            `json:"context"`
+	Tags      []string          `json:"tags"`
+	ImageTag  string            `json:"image_tag"`
+	Params    []string `json:"params"`
+	Files     []string          `json:"files"`
+	Hashes    map[string]string `json:"hashes"`
+	ImageID   string            `json:"image_id"`
+	DependsOn []Dependency      `json:"depends_on,omitempty"`
+}
+
+// DockerPull contains details for the docker pull process.
+type DockerPull struct {
+	Image            string       `json:"image"`
+	ImageTag         string       `json:"image_tag"`
+	ImageID          string       `json:"image_id"`
+	PreventRunBefore string       `json:"prevent_run_before,omitempty"`
+	DependsOn        []Dependency `json:"depends_on,omitempty"`
+}
+
+// DockerRun contains details for the docker run process.
+type DockerRun struct {
+	Image         string            `json:"image"`
+	ImageTag      string            `json:"image_tag"`
+	ImageID       string            `json:"image_id"`
+	Command       []string          `json:"command"`
+	ContainerID   string            `json:"container_id"`
+	ContainerName string            `json:"container_name"`
+	Parameters    []string          `json:"parameters"`
+	DependsOn     []Dependency      `json:"depends_on,omitempty"`
+}
+
+// FileExists contains details for the file exists check.
+type FileExists struct {
+	Path string `json:"path"`
+}
 
 // CreateStep inserts a new step for a task and returns the new step's ID.
 func CreateStep(db *sql.DB, taskRef, title, settings string) (int, error) {
@@ -45,8 +154,6 @@ func CreateStep(db *sql.DB, taskRef, title, settings string) (int, error) {
 	}
 	return newStepID, nil
 }
-
-
 
 // ListSteps prints all steps in the DB. If full is true, prints settings column too.
 func ListSteps(db *sql.DB, full bool) error {
@@ -84,110 +191,6 @@ func ListSteps(db *sql.DB, full bool) error {
 		}
 	}
 	return nil
-}
-
-// DockerBuild defines the structure for docker build specific settings.
-type DockerBuild struct {
-	DependsOn []struct {
-		ID int `json:"id"`
-	} `json:"depends_on"`
-	Files    []string          `json:"files"`
-	Hashes   map[string]string `json:"hashes"`
-	Params   []string          `json:"params"`
-	ImageID  string            `json:"image_id"`
-	ImageTag string            `json:"image_tag"`
-}
-
-// DockerBuildConfig represents the configuration for a docker build step
-type DockerBuildConfig struct {
-	DockerBuild DockerBuild `json:"docker_build"`
-}
-
-// DockerRubricsConfig represents the configuration for a docker rubrics step
-type DockerRubricsConfig struct {
-	DockerRubrics struct {
-		DependsOn []struct {
-			ID int `json:"id"`
-		} `json:"depends_on"`
-		Files    []string          `json:"files"`
-		Hashes   map[string]string `json:"hashes"`
-		ImageID  string            `json:"image_id"`
-		ImageTag string            `json:"image_tag"`
-	} `json:"docker_rubrics"`
-}
-
-// DockerRunConfig represents the configuration for a docker run step
-type DockerRunConfig struct {
-	DockerRun struct {
-		DependsOn []struct {
-			ID int `json:"id"`
-		} `json:"depends_on"`
-		Parameters    []string `json:"parameters"`
-		ImageID       string   `json:"image_id"`
-		ImageTag      string   `json:"image_tag"`
-		ContainerID   string   `json:"container_id,omitempty"`
-		ContainerName string   `json:"container_name,omitempty"`
-		ContainerHash string   `json:"container_hash,omitempty"`
-	} `json:"docker_run"`
-}
-
-// DockerShellConfig represents the configuration for a docker shell step
-type DockerShellConfig struct {
-	DockerShell struct {
-		Command   []map[string]string `json:"command"`
-		DependsOn []struct {
-			ID int `json:"id"`
-		} `json:"depends_on"`
-		Docker struct {
-			ContainerID   string `json:"container_id"`
-			ContainerName string `json:"container_name"`
-			ImageID       string `json:"image_id"`
-			ImageTag      string `json:"image_tag"`
-		} `json:"docker"`
-	} `json:"docker_shell"`
-}
-
-// DynamicLabConfig represents the configuration for a dynamic_lab step
-type DynamicLabConfig struct {
-	DynamicLab struct {
-		Files       map[string]string `json:"files"`
-		RubricFile  string            `json:"rubric_file"`
-		DependsOn   []struct {
-			ID int `json:"id"`
-		} `json:"depends_on,omitempty"`
-		Environment DynamicRubricEnvironment `json:"environment,omitempty"`
-	} `json:"dynamic_lab"`
-}
-
-// DockerPullConfig represents the configuration for a docker pull step
-type DockerPullConfig struct {
-	DockerPull struct {
-		DependsOn []struct {
-			ID int `json:"id"`
-		} `json:"depends_on,omitempty"`
-		ImageTag         string `json:"image_tag"`
-		ImageID          string `json:"image_id,omitempty"`           // Optional: for verification after pull
-		PreventRunBefore string `json:"prevent_run_before,omitempty"` // RFC3339 timestamp
-	} `json:"docker_pull"`
-}
-
-// DynamicRubricEnvironment defines the execution environment for generated steps.
-type DynamicRubricEnvironment struct {
-	Docker   bool   `json:"docker"`
-	ImageTag string `json:"image_tag"`
-	ImageID  string `json:"image_id"`
-}
-
-// DynamicRubricConfig represents the configuration for a dynamic_rubric step
-type DynamicRubricConfig struct {
-	DynamicRubric struct {
-		File      string `json:"file"`
-		Hash      string `json:"hash,omitempty"`
-		DependsOn []struct {
-			ID int `json:"id"`
-		} `json:"depends_on,omitempty"`
-		Environment DynamicRubricEnvironment `json:"environment,omitempty"`
-	} `json:"dynamic_rubric"`
 }
 
 // calculateFileHash calculates the SHA256 hash of a file
@@ -268,25 +271,6 @@ func checkDependencies(db *sql.DB, stepID int, stepLogger *log.Logger) (bool, er
 	return allDepsCompleted, err
 }
 
-type stepExec struct {
-	StepID    int
-	TaskID    int
-	Title     string
-	Settings  string
-	LocalPath string
-}
-
-type StepInfo struct {
-	ID         int                    `json:"id"`
-	TaskID     int                    `json:"task_id"`
-	Title      string                 `json:"title"`
-	Settings   map[string]interface{} `json:"settings"`
-	Results    map[string]interface{} `json:"results"`
-	CreatedAt  time.Time              `json:"created_at"`
-	UpdatedAt  time.Time              `json:"updated_at"`
-
-}
-
 // ProcessSteps is the main entry point for processing all pending steps.
 func ProcessSteps(db *sql.DB) error {
 	stepProcessors := map[string]func(*sql.DB) error{
@@ -322,50 +306,6 @@ func executePendingSteps(db *sql.DB, stepProcessors map[string]func(*sql.DB) err
 	time.Sleep(5 * time.Second)
 
 	return nil
-}
-
-// GetStepInfo retrieves detailed information about a specific step by ID
-func GetStepInfo(db *sql.DB, stepID int) (*StepInfo, error) {
-	var info StepInfo
-	var settingsJSON, resultsJSON sql.NullString
-
-
-	err := db.QueryRow(`
-		SELECT s.id, s.task_id, s.title, s.settings::text, s.results::text, s.created_at, s.updated_at
-		FROM steps s
-		WHERE s.id = $1
-	`, stepID).Scan(
-		&info.ID, &info.TaskID, &info.Title,
-		&settingsJSON, &resultsJSON, &info.CreatedAt, &info.UpdatedAt,
-	)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("no step found with ID %d", stepID)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	// Only parse settings if they exist and are not null
-	if settingsJSON.Valid && settingsJSON.String != "" && settingsJSON.String != "null" {
-		info.Settings = make(map[string]interface{})
-		decoder := json.NewDecoder(strings.NewReader(settingsJSON.String))
-		decoder.UseNumber()
-		if err := decoder.Decode(&info.Settings); err != nil {
-			return nil, fmt.Errorf("error parsing settings: %w", err)
-		}
-	}
-
-	// Only parse results if they exist and are not null
-	if resultsJSON.Valid && resultsJSON.String != "" && resultsJSON.String != "null" {
-		info.Results = make(map[string]interface{})
-		decoder := json.NewDecoder(strings.NewReader(resultsJSON.String))
-		decoder.UseNumber()
-		if err := decoder.Decode(&info.Results); err != nil {
-			return nil, fmt.Errorf("error parsing results: %w", err)
-		}
-	}
-
-	return &info, nil
 }
 
 func CopyStep(db *sql.DB, fromStepID, toTaskID int) (int, error) {
@@ -471,132 +411,6 @@ func RemoveStepSettingKey(db *sql.DB, stepID int, keyToRemove string) error {
 	return nil
 }
 
-// setNestedValue sets a value in a nested map based on a dot-separated path.
-// It creates intermediate maps if they don't exist.
-func setNestedValue(dataMap map[string]interface{}, path string, value interface{}) error {
-	parts := strings.Split(path, ".")
-	current := dataMap
-
-	for i, part := range parts {
-		if i == len(parts)-1 { // Last part, set the value
-			current[part] = value
-		} else { // Intermediate part, navigate or create map
-			if _, ok := current[part]; !ok {
-				// Part doesn't exist, create a new map
-				current[part] = make(map[string]interface{})
-			}
-
-			nextMap, ok := current[part].(map[string]interface{})
-			if !ok {
-				// Part exists but is not a map, cannot traverse
-				return fmt.Errorf("cannot set value at path '%s': segment '%s' is not an object", path, part)
-			}
-			current = nextMap
-		}
-	}
-	return nil
-}
-
-// UpdateStepFieldOrSetting updates a direct field of a step or a key within its settings JSON.
-// For settings, dot notation (e.g., "docker_run.image_tag") is supported for nested keys.
-// It attempts to parse valueToSet as JSON; if it fails, valueToSet is treated as a string.
-func UpdateStepFieldOrSetting(db *sql.DB, stepID int, keyToSet string, valueToSet string) error {
-	// List of updatable direct columns in the 'steps' table
-	validFields := map[string]bool{
-		"title": true,
-	}
-
-	// If the key is a direct field on the 'steps' table
-	if _, ok := validFields[keyToSet]; ok {
-		if keyToSet != "title" { // Ensure it's one of the explicitly handled direct fields
-			return fmt.Errorf("invalid field to update: %s", keyToSet)
-		}
-
-		query := fmt.Sprintf("UPDATE steps SET %s = $1, updated_at = NOW() WHERE id = $2", keyToSet) // keyToSet is safe due to check above
-		result, err := db.Exec(query, valueToSet, stepID)
-		if err != nil {
-			return fmt.Errorf("error updating step field %s: %w", keyToSet, err)
-		}
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("error checking affected rows for step field %s update: %w", keyToSet, err)
-		}
-		if rowsAffected == 0 {
-			return fmt.Errorf("no step found with ID %d, or %s was already set to '%s'", stepID, keyToSet, valueToSet)
-		}
-		return nil
-	} else {
-		// Assume keyToSet is for the 'settings' JSON field
-		stepInfo, err := GetStepInfo(db, stepID)
-		if err != nil {
-			return fmt.Errorf("failed to get step info for step %d: %w", stepID, err)
-		}
-
-		if stepInfo.Settings == nil {
-			stepInfo.Settings = make(map[string]interface{})
-		}
-
-		var jsonValue interface{}
-		// Attempt to unmarshal valueToSet to see if it's a JSON primitive (number, boolean, null) or a pre-formatted JSON object/array.
-		err = json.Unmarshal([]byte(valueToSet), &jsonValue)
-		if err == nil {
-			// It's a valid JSON value (e.g. "123", "true", "null", "{\"a\":1}")
-			if errSet := setNestedValue(stepInfo.Settings, keyToSet, jsonValue); errSet != nil {
-				return fmt.Errorf("failed to set nested key '%s' in settings for step %d: %w", keyToSet, stepID, errSet)
-			}
-		} else {
-			// Not a valid JSON value on its own, so treat it as a plain string.
-			if valueToSet == "" {
-				// Special case: empty string means remove the key.
-				keys := strings.Split(keyToSet, ".")
-				currentMap := stepInfo.Settings
-				for i, key := range keys {
-					if i == len(keys)-1 {
-						delete(currentMap, key)
-						break
-					}
-					next, ok := currentMap[key]
-					if !ok {
-						break
-					}
-					nextMap, ok := next.(map[string]interface{})
-					if !ok {
-						// Path is not a map, can't continue.
-						break
-					}
-					currentMap = nextMap
-				}
-			} else {
-				if errSet := setNestedValue(stepInfo.Settings, keyToSet, valueToSet); errSet != nil {
-					return fmt.Errorf("failed to set nested key '%s' in settings for step %d: %w", keyToSet, stepID, errSet)
-				}
-			}
-		}
-
-		updatedSettingsBytes, err := json.Marshal(stepInfo.Settings)
-		if err != nil {
-			return fmt.Errorf("failed to marshal updated settings for step %d: %w", stepID, err)
-		}
-
-		result, err := db.Exec(
-			"UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2",
-			string(updatedSettingsBytes),
-			stepID,
-		)
-		if err != nil {
-			return fmt.Errorf("error updating step settings in database for step %d: %w", stepID, err)
-		}
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("error checking affected rows for step ID %d settings update: %w", stepID, err)
-		}
-		if rowsAffected == 0 {
-			return fmt.Errorf("no step found with ID %d during settings update", stepID)
-		}
-		return nil
-	}
-}
-
 // ClearStepResults clears the results for a step
 func ClearStepResults(db *sql.DB, stepID int) error {
 	result, err := db.Exec(
@@ -614,325 +428,6 @@ func ClearStepResults(db *sql.DB, stepID int) error {
 		return fmt.Errorf("no step found with ID %d", stepID)
 	}
 	return nil
-}
-
-func processDynamicLabSteps(db *sql.DB) error {
-	steps, err := getStepsByType(db, "dynamic_lab")
-	if err != nil {
-		return fmt.Errorf("failed to get dynamic_lab steps: %w", err)
-	}
-
-	for _, step := range steps {
-		var config DynamicLabConfig
-		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
-			log.Printf("Error parsing settings for step %d: %v", step.StepID, err)
-			results := map[string]interface{}{"result": "error", "error": fmt.Sprintf("Error parsing settings: %v", err)}
-			resultsJSON, _ := json.Marshal(results)
-			db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID)
-			continue
-		}
-
-		newHashes, changed, err := dynamic_lab.Run(step.LocalPath, config.DynamicLab.Files)
-		if err != nil {
-			log.Printf("Error running dynamic_lab for step %d: %v", step.StepID, err)
-			results := map[string]interface{}{"result": "error", "error": err.Error()}
-			resultsJSON, _ := json.Marshal(results)
-			db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID)
-			continue
-		}
-
-		if !changed {
-			log.Printf("No file changes for dynamic_lab step %d.", step.StepID)
-			continue
-		}
-
-		log.Printf("File changes detected for dynamic_lab step %d. Re-generating steps.", step.StepID)
-
-		if err := deleteGeneratedSteps(db, step.StepID); err != nil {
-			log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
-			continue
-		}
-
-		rubricFile := config.DynamicLab.RubricFile
-		if rubricFile == "" {
-			log.Printf("dynamic_lab step %d settings does not specify a 'rubric_file'", step.StepID)
-			continue
-		}
-
-		criteria, newRubricHash, _, err := dynamic_lab.RunRubric(step.LocalPath, rubricFile, "") // Pass empty hash to force re-parse
-		if err != nil {
-			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
-			results := map[string]interface{}{"result": "error", "error": err.Error()}
-			resultsJSON, _ := json.Marshal(results)
-			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-				log.Printf("Failed to update step %d completion with error results: %v", step.StepID, err)
-			}
-			continue
-		}
-
-		var containerID string
-		var runStepDependencyID int
-		for _, dep := range config.DynamicLab.DependsOn {
-			var rawResults sql.NullString
-			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", dep.ID).Scan(&rawResults)
-			if err != nil {
-				log.Printf("Step %d: Error getting info for dependency step %d: %v", step.StepID, dep.ID, err)
-				continue
-			}
-
-			if rawResults.Valid {
-				var results map[string]interface{}
-				if err := json.Unmarshal([]byte(rawResults.String), &results); err != nil {
-					log.Printf("Error unmarshalling results for dependency step %d: %v", dep.ID, err)
-					continue
-				}
-
-				if cID, ok := results["container_id"].(string); ok {
-					containerID = cID
-					runStepDependencyID = dep.ID
-					log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
-					break
-				}
-			}
-		}
-
-		if containerID == "" {
-			log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)
-			results := map[string]interface{}{"result": "success", "info": "Could not find a container_id from any dependencies. Skipping generation."}
-			resultsJSON, _ := json.Marshal(results)
-			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-				log.Printf("Error updating step %d results: %v", step.StepID, err)
-			}
-			continue
-		}
-
-		for _, crit := range criteria {
-			var settings string
-			if config.DynamicLab.Environment.Docker {
-				settings = fmt.Sprintf(`{
-					"docker_shell": {
-						"command": [{"run": "%s"}],
-						"depends_on": [{"id": %d}],
-						"rubric_details": {
-							"score": %d,
-							"required": %t,
-							"description": "%s"
-						}
-					}
-				}`, crit.HeldOutTest, runStepDependencyID, crit.Score, crit.Required, crit.Rubric)
-			} else {
-				log.Printf("Step %d: Skipping criterion '%s' because environment is not docker.", step.StepID, crit.Title)
-				continue
-			}
-
-			if _, err := CreateStep(db, strconv.Itoa(step.TaskID), crit.Title, settings); err != nil {
-				log.Printf("Error creating step for criterion '%s' from step %d: %v", crit.Title, step.StepID, err)
-			}
-		}
-
-		config.DynamicLab.Files = newHashes
-		config.DynamicLab.Files[rubricFile] = newRubricHash
-		updatedSettings, err := json.Marshal(config)
-		if err != nil {
-			log.Printf("Error marshalling updated settings for step %d: %v", step.StepID, err)
-			continue
-		}
-		if _, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2`, string(updatedSettings), step.StepID); err != nil {
-			log.Printf("Error updating settings for step %d: %v", step.StepID, err)
-			continue
-		}
-
-		results := map[string]interface{}{"result": "success"}
-		resultsJSON, _ := json.Marshal(results)
-		if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-			log.Printf("Error updating step %d results to success: %v", step.StepID, err)
-		}
-	}
-
-	return nil
-}
-
-func processDynamicRubricSteps(db *sql.DB) error {
-	log.Println("Processing dynamic rubric steps...")
-	dynamicRubricSteps, err := getStepsByType(db, "dynamic_rubric")
-	if err != nil {
-		return fmt.Errorf("failed to get active dynamic_rubric steps: %w", err)
-	}
-	log.Printf("Found %d dynamic_rubric steps to process.", len(dynamicRubricSteps))
-
-	for i, step := range dynamicRubricSteps {
-		log.Printf("Processing step %d/%d: ID %d", i+1, len(dynamicRubricSteps), step.StepID)
-
-		var config DynamicRubricConfig
-		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
-			log.Printf("Error unmarshalling settings for step %d: %v", step.StepID, err)
-			results := map[string]interface{}{"result": "error", "error": fmt.Sprintf("Error parsing settings: %v", err)}
-			resultsJSON, _ := json.Marshal(results)
-			db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID)
-			continue
-		}
-
-		// Find container_id and its step ID from dependencies
-		var containerID string
-		var runStepDependencyID int
-		for _, dep := range config.DynamicRubric.DependsOn {
-			var rawResults sql.NullString
-			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", dep.ID).Scan(&rawResults)
-			if err != nil {
-				log.Printf("Step %d: Error getting info for dependency step %d: %v", step.StepID, dep.ID, err)
-				continue
-			}
-
-			if rawResults.Valid {
-				var results map[string]interface{}
-				if err := json.Unmarshal([]byte(rawResults.String), &results); err != nil {
-					log.Printf("Error unmarshalling results for dependency step %d: %v", dep.ID, err)
-					continue
-				}
-
-				if cID, ok := results["container_id"].(string); ok {
-					containerID = cID
-					runStepDependencyID = dep.ID // Capture the ID of the dependency that provides the container
-					log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
-					break // Found it, no need to check other dependencies
-				}
-			}
-		}
-
-		if containerID == "" {
-			log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)
-			results := map[string]interface{}{"result": "success", "info": "Could not find a container_id from any dependencies. Skipping generation."}
-			resultsJSON, _ := json.Marshal(results)
-			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-				log.Printf("Error updating step %d results: %v", step.StepID, err)
-			}
-			continue
-		}
-
-		log.Printf("Step %d: Running RunRubric", step.StepID)
-		criteria, newHash, changed, err := dynamic_lab.RunRubric(step.LocalPath, config.DynamicRubric.File, config.DynamicRubric.Hash)
-		if err != nil {
-			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
-			results := map[string]interface{}{"result": "error", "error": err.Error()}
-			resultsJSON, _ := json.Marshal(results)
-			if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-				log.Printf("Failed to update step %d completion with error results: %v", step.StepID, err)
-			}
-			continue
-		}
-		log.Printf("Step %d: RunRubric completed. Changed: %t", step.StepID, changed)
-
-		if changed {
-			log.Printf("Rubric file changed for step %d. Updating generated steps.", step.StepID)
-
-			if err := deleteGeneratedSteps(db, step.StepID); err != nil {
-				log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
-				continue
-			}
-
-			for _, crit := range criteria {
-				var settings string
-				if config.DynamicRubric.Environment.Docker {
-					settings = fmt.Sprintf(`{
-						"docker_shell": {
-							"command": [{"run": "%s"}],
-							"depends_on": [{"id": %d}],
-							"rubric_details": {
-								"score": %d,
-								"required": %t,
-								"description": "%s"
-							}
-						}
-					}`, crit.HeldOutTest, runStepDependencyID, crit.Score, crit.Required, crit.Rubric)
-				} else {
-					log.Printf("Step %d: Skipping criterion '%s' because environment is not docker.", step.StepID, crit.Title)
-					continue
-				}
-
-				if _, err := CreateStep(db, strconv.Itoa(step.TaskID), crit.Title, settings); err != nil {
-					log.Printf("Error creating step for criterion '%s' from step %d: %v", crit.Title, step.StepID, err)
-				}
-			}
-
-			config.DynamicRubric.Hash = newHash
-			updatedSettings, err := json.Marshal(config)
-			if err != nil {
-				log.Printf("Error marshalling updated settings for step %d: %v", step.StepID, err)
-				continue
-			}
-			if _, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2`, string(updatedSettings), step.StepID); err != nil {
-				log.Printf("Error updating settings for step %d: %v", step.StepID, err)
-				continue
-			}
-		}
-
-		results := map[string]interface{}{"result": "success"}
-		resultsJSON, _ := json.Marshal(results)
-		if _, err := db.Exec("UPDATE steps SET results = $1, updated_at = NOW() WHERE id = $2", string(resultsJSON), step.StepID); err != nil {
-			log.Printf("Error updating step %d results to success: %v", step.StepID, err)
-		}
-	}
-	log.Println("--- Finished processing dynamic_rubric steps ---")
-	return nil
-}
-
-
-
-func deleteGeneratedSteps(db *sql.DB, parentStepID int) error {
-	// Find steps that depend on the parent step
-	query := `
-		SELECT id FROM steps WHERE settings -> 'docker_shell' -> 'depends_on' @> jsonb_build_array(jsonb_build_object('id', $1::int))
-	`
-	rows, err := db.Query(query, parentStepID)
-	if err != nil {
-		return fmt.Errorf("querying for generated steps failed: %w", err)
-	}
-	defer rows.Close()
-
-	var idsToDelete []int
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("scanning generated step id failed: %w", err)
-		}
-		idsToDelete = append(idsToDelete, id)
-	}
-
-	if len(idsToDelete) > 0 {
-		deleteQuery := `DELETE FROM steps WHERE id = ANY($1::int[])`
-		_, err := db.Exec(deleteQuery, pq.Array(idsToDelete))
-		if err != nil {
-			return fmt.Errorf("deleting generated steps failed: %w", err)
-		}
-		log.Printf("Deleted %d generated steps for parent step %d", len(idsToDelete), parentStepID)
-	}
-
-	return nil
-}
-
-func getStepsByType(db *sql.DB, stepType string) ([]stepExec, error) {
-	query := `
-		SELECT s.id, s.task_id, s.title, s.settings, COALESCE(t.local_path, '')
-		FROM steps s
-		JOIN tasks t ON s.task_id = t.id
-		WHERE s.settings ? $1`
-
-	rows, err := db.Query(query, stepType)
-	if err != nil {
-		return nil, fmt.Errorf("querying for steps by type failed: %w", err)
-	}
-	defer rows.Close()
-
-	var steps []stepExec
-	for rows.Next() {
-		var step stepExec
-		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Title, &step.Settings, &step.LocalPath); err != nil {
-			return nil, fmt.Errorf("scanning step failed: %w", err)
-		}
-		steps = append(steps, step)
-	}
-
-	return steps, nil
 }
 
 type StepNode struct {

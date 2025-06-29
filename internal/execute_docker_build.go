@@ -13,11 +13,11 @@ import (
 func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, db *sql.DB) error {
 	// Process docker build parameters, replacing the image tag placeholder
 	var buildParams []string
-	for _, p := range config.DockerBuild.Params {
-		// Replace placeholder
-		processedParam := strings.ReplaceAll(p, "%%IMAGETAG%%", config.DockerBuild.ImageTag)
-		// Split params like "--platform linux/amd64" into two parts
-		buildParams = append(buildParams, strings.Fields(processedParam)...)
+	for i, param := range config.DockerBuild.Params {
+		if strings.Contains(param, "%%IMAGETAG%%") {
+			config.DockerBuild.Params[i] = strings.ReplaceAll(param, "%%IMAGETAG%%", config.DockerBuild.ImageTag)
+		}
+		buildParams = append(buildParams, strings.Fields(param)...)
 	}
 
 	// Defensive check for empty params

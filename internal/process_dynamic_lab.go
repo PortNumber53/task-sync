@@ -35,6 +35,33 @@ func processDynamicLabSteps(db *sql.DB) error {
 			continue
 		}
 
+		// Find container_id and its step ID from dependencies
+		var containerID string
+		var runStepDependencyID int
+		for _, dep := range config.DynamicLab.DependsOn {
+			var rawResults sql.NullString
+			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", dep.ID).Scan(&rawResults)
+			if err != nil {
+				log.Printf("Step %d: Error getting info for dependency step %d: %v", step.StepID, dep.ID, err)
+				continue
+			}
+
+			if rawResults.Valid {
+				var results map[string]interface{}
+				if err := json.Unmarshal([]byte(rawResults.String), &results); err != nil {
+					log.Printf("Error unmarshalling results for dependency step %d: %v", dep.ID, err)
+					continue
+				}
+
+				if cID, ok := results["container_id"].(string); ok {
+					containerID = cID
+					runStepDependencyID = dep.ID // Capture the ID of the dependency that provides the container
+					log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
+					break // Found it, no need to check other dependencies
+				}
+			}
+		}
+
 		if !changed {
 			log.Printf("No file changes for dynamic_lab step %d.", step.StepID)
 			continue
@@ -42,7 +69,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 
 		log.Printf("File changes detected for dynamic_lab step %d. Re-generating steps.", step.StepID)
 
-		if err := deleteGeneratedSteps(db, step.StepID); err != nil {
+		if err := deleteGeneratedSteps(db, step.StepID, runStepDependencyID); err != nil {
 			log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
 			continue
 		}
@@ -64,31 +91,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 			continue
 		}
 
-		var containerID string
-		var runStepDependencyID int
-		for _, dep := range config.DynamicLab.DependsOn {
-			var rawResults sql.NullString
-			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", dep.ID).Scan(&rawResults)
-			if err != nil {
-				log.Printf("Step %d: Error getting info for dependency step %d: %v", step.StepID, dep.ID, err)
-				continue
-			}
 
-			if rawResults.Valid {
-				var results map[string]interface{}
-				if err := json.Unmarshal([]byte(rawResults.String), &results); err != nil {
-					log.Printf("Error unmarshalling results for dependency step %d: %v", dep.ID, err)
-					continue
-				}
-
-				if cID, ok := results["container_id"].(string); ok {
-					containerID = cID
-					runStepDependencyID = dep.ID
-					log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
-					break
-				}
-			}
-		}
 
 		if containerID == "" {
 			log.Printf("Step %d: Could not find a container_id from any dependencies. Skipping generation.", step.StepID)

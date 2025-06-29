@@ -68,7 +68,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 		}
 
 		log.Printf("Step %d: Running RunRubric", step.StepID)
-		criteria, newHash, changed, err := dynamic_lab.RunRubric(step.LocalPath, config.DynamicRubric.File, config.DynamicRubric.Hash)
+				criteria, newHash, changed, err := dynamic_lab.RunRubric(step.LocalPath, config.DynamicRubric.File, config.DynamicRubric.Hash)
 		if err != nil {
 			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": err.Error()}
@@ -83,7 +83,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 		if changed {
 			log.Printf("Rubric file changed for step %d. Updating generated steps.", step.StepID)
 
-			if err := deleteGeneratedSteps(db, step.StepID); err != nil {
+			if err := deleteGeneratedSteps(db, step.StepID, runStepDependencyID); err != nil {
 				log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
 				continue
 			}
@@ -95,13 +95,14 @@ func processDynamicRubricSteps(db *sql.DB) error {
 						"docker_shell": {
 							"command": [{"run": "%s"}],
 							"depends_on": [{"id": %d}],
+							"generated_by": %d,
 							"rubric_details": {
 								"score": %d,
 								"required": %t,
 								"description": "%s"
 							}
 						}
-					}`, crit.HeldOutTest, runStepDependencyID, crit.Score, crit.Required, crit.Rubric)
+					}`, crit.HeldOutTest, runStepDependencyID, step.StepID, crit.Score, crit.Required, crit.Rubric)
 				} else {
 					log.Printf("Step %d: Skipping criterion '%s' because environment is not docker.", step.StepID, crit.Title)
 					continue

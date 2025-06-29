@@ -1,14 +1,11 @@
 package cmd
 
 import (
-	"bytes"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	helpPkg "github.com/PortNumber53/task-sync/help"
 	"github.com/PortNumber53/task-sync/internal"
@@ -135,38 +132,6 @@ func HandleStep() {
 	}
 }
 
-func HandleStepDelete(db *sql.DB) {
-	if len(os.Args) < 4 {
-		fmt.Println("Error: delete subcommand requires a step ID.")
-		helpPkg.PrintStepHelp()
-		os.Exit(1)
-	}
-	stepID, err := strconv.Atoi(os.Args[3])
-	if err != nil {
-		fmt.Printf("Error: invalid step ID '%s'. Must be an integer.\n", os.Args[3])
-		os.Exit(1)
-	}
-
-	if err := internal.DeleteStep(db, stepID); err != nil {
-		fmt.Printf("Error deleting step: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("Step %d deleted successfully.\n", stepID)
-}
-
-func HandleStepList(db *sql.DB) {
-	full := false
-	for i := 3; i < len(os.Args); i++ {
-		if os.Args[i] == "--full" {
-			full = true
-		}
-	}
-	if err := internal.ListSteps(db, full); err != nil {
-		fmt.Printf("List steps error: %v\n", err)
-		os.Exit(1)
-	}
-}
-
 func HandleStepCreate(db *sql.DB) {
 	var taskRef, title, settings string
 	for i := 3; i < len(os.Args); i++ {
@@ -210,144 +175,6 @@ func HandleStepCreate(db *sql.DB) {
 		os.Exit(1)
 	}
 	fmt.Printf("Step created successfully with ID: %d\n", newStepID)
-}
-
-func HandleStepEdit(db *sql.DB) {
-	if len(os.Args) < 4 {
-		helpPkg.PrintStepEditHelp()
-		os.Exit(1)
-	}
-
-	stepID, err := strconv.Atoi(os.Args[3])
-	if err != nil {
-		fmt.Printf("Error: invalid step ID '%s'\n", os.Args[3])
-		helpPkg.PrintStepEditHelp()
-		os.Exit(1)
-	}
-
-	_, getStepErr := internal.GetStepInfo(db, stepID)
-	if getStepErr != nil {
-		fmt.Printf("Error preparing to edit step %d: %v\n", stepID, getStepErr)
-		os.Exit(1)
-	}
-
-	sets := make(map[string]string)
-	var removeKey string
-	for i := 4; i < len(os.Args); i++ {
-		if os.Args[i] == "--set" {
-			if i+1 >= len(os.Args) {
-				fmt.Println("Error: --set requires a key=value argument")
-				helpPkg.PrintStepEditHelp()
-				os.Exit(1)
-			}
-			kv := strings.SplitN(os.Args[i+1], "=", 2)
-			if len(kv) != 2 {
-				fmt.Printf("Error: invalid format for --set, expected key=value, got '%s'\n", os.Args[i+1])
-				helpPkg.PrintStepEditHelp()
-				os.Exit(1)
-			}
-			sets[kv[0]] = kv[1]
-			i++
-		} else if os.Args[i] == "--remove-key" {
-			if i+1 >= len(os.Args) {
-				fmt.Println("Error: --remove-key requires a key argument")
-				helpPkg.PrintStepEditHelp()
-				os.Exit(1)
-			}
-			removeKey = os.Args[i+1]
-			i++
-		}
-	}
-
-	if len(sets) > 0 && removeKey != "" {
-		fmt.Println("Error: --set and --remove-key are mutually exclusive")
-		helpPkg.PrintStepEditHelp()
-		os.Exit(1)
-	}
-
-	if len(sets) == 0 && removeKey == "" {
-		fmt.Println("Error: either --set or --remove-key must be provided")
-		helpPkg.PrintStepEditHelp()
-		os.Exit(1)
-	}
-
-	if removeKey != "" {
-		if err := internal.RemoveStepSettingKey(db, stepID, removeKey); err != nil {
-			fmt.Printf("Error removing key '%s' for step %d: %v\n", removeKey, stepID, err)
-			os.Exit(1)
-		}
-		fmt.Printf("Successfully removed key '%s' from step %d\n", removeKey, stepID)
-		return
-	}
-
-	var updateErrors []string
-	for key, value := range sets {
-		err := internal.UpdateStepFieldOrSetting(db, stepID, key, value)
-		if err != nil {
-			updateErrors = append(updateErrors, fmt.Sprintf("failed to set '%s': %v", key, err))
-		}
-	}
-
-	if len(updateErrors) > 0 {
-		fmt.Printf("Error updating step %d:\n", stepID)
-		for _, errMsg := range updateErrors {
-			fmt.Printf("  - %s\n", errMsg)
-		}
-		os.Exit(1)
-	}
-
-	if len(sets) > 0 {
-		fmt.Printf("Step %d updated successfully.\n", stepID)
-	}
-}
-
-func HandleStepInfo(db *sql.DB) {
-	if len(os.Args) < 4 {
-		helpPkg.PrintStepInfoHelp()
-		os.Exit(1)
-	}
-
-	stepID, err := strconv.Atoi(os.Args[3])
-	if err != nil {
-		fmt.Printf("Error: invalid step ID '%s'\n", os.Args[3])
-		helpPkg.PrintStepInfoHelp()
-		os.Exit(1)
-	}
-
-	info, err := internal.GetStepInfo(db, stepID)
-	if err != nil {
-		fmt.Printf("Error getting step info: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Step #%d: %s\n", info.ID, info.Title)
-	fmt.Printf("Task ID: %d\n", info.TaskID)
-	fmt.Printf("Created: %s\n", info.CreatedAt.Format(time.RFC3339))
-	fmt.Printf("Updated: %s\n", info.UpdatedAt.Format(time.RFC3339))
-
-	fmt.Println("\nSettings:")
-	var settingsBuf bytes.Buffer
-	encoder := json.NewEncoder(&settingsBuf)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("  ", "  ")
-	if err := encoder.Encode(info.Settings); err != nil {
-		fmt.Printf("Error formatting settings: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(settingsBuf.String())
-
-	if len(info.Results) > 0 {
-		fmt.Println("\nResults:")
-		var resultsBuf bytes.Buffer
-		encoder := json.NewEncoder(&resultsBuf)
-		encoder.SetEscapeHTML(false)
-		encoder.SetIndent("  ", "  ")
-		if err := encoder.Encode(info.Results); err != nil {
-			fmt.Printf("Error formatting results: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println(resultsBuf.String())
-	}
 }
 
 func HandleStepCopy(db *sql.DB) {

@@ -1,6 +1,7 @@
 TASK_DATA.md
 repo.tar.gz
 Dockerfile
+held_out_tests.patch
 
 tmp/
 

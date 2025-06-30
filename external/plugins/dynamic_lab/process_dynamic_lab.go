@@ -1,4 +1,4 @@
-package internal
+package dynamic_lab
 
 import (
 	"database/sql"
@@ -7,20 +7,19 @@ import (
 	"log"
 	"strconv"
 
-	"github.com/PortNumber53/task-sync/internal/tasks/dynamic_lab"
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
-var dynamicLabRun = dynamic_lab.Run
-var dynamicLabRubricRun = dynamic_lab.RunRubric
+var dynamicLabRun = Run
 
 func processDynamicLabSteps(db *sql.DB) error {
-	steps, err := getStepsByType(db, "dynamic_lab")
+	steps, err := models.GetStepsByType(db, "dynamic_lab")
 	if err != nil {
 		return fmt.Errorf("failed to get dynamic_lab steps: %w", err)
 	}
 
 	for _, step := range steps {
-		var config DynamicLabConfig
+		var config models.DynamicLabConfig
 		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
 			log.Printf("Error parsing settings for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": fmt.Sprintf("Error parsing settings: %v", err)}
@@ -91,8 +90,11 @@ func processDynamicLabSteps(db *sql.DB) error {
 		var runStepDependencyID int
 
 		queue := make([]int, 0)
-		for _, dep := range config.DynamicLab.DependsOn {
-			queue = append(queue, dep.ID)
+		// First, check direct dependencies
+		if config.DynamicLab.DependsOn != nil {
+			for _, dep := range config.DynamicLab.DependsOn {
+				queue = append(queue, dep.ID)
+			}
 		}
 
 		visited := make(map[int]bool)
@@ -132,7 +134,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 			var topLevel map[string]json.RawMessage
 			if err := json.Unmarshal([]byte(settingsStr), &topLevel); err == nil {
 				for _, rawMessage := range topLevel {
-					var holder DependencyHolder
+					var holder models.DependencyHolder
 					if err := json.Unmarshal(rawMessage, &holder); err == nil {
 						for _, dep := range holder.DependsOn {
 							if !visited[dep.ID] {
@@ -184,7 +186,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 
 		log.Printf("File changes detected for dynamic_lab step %d. Re-generating steps.", step.StepID)
 
-		if err := deleteGeneratedSteps(db, step.StepID, runStepDependencyID); err != nil {
+		if err := models.DeleteGeneratedSteps(db, step.StepID); err != nil {
 			log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
 			continue
 		}
@@ -195,7 +197,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 			continue
 		}
 
-		criteria, newRubricHash, _, err := dynamicLabRubricRun(step.LocalPath, rubricFile, "") // Pass empty hash to force re-parse
+		criteria, newRubricHash, _, err := rubricParserImpl.RunRubric(step.LocalPath, config.DynamicLab.RubricFile, "") // Pass empty hash to force re-parse
 		if err != nil {
 			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": err.Error()}
@@ -239,7 +241,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 				continue
 			}
 
-			if _, err := CreateStep(db, strconv.Itoa(step.TaskID), crit.Title, settings); err != nil {
+			if _, err := models.CreateStep(db, strconv.Itoa(step.TaskID), crit.Title, settings); err != nil {
 				log.Printf("Error creating step for criterion '%s' from step %d: %v", crit.Title, step.StepID, err)
 			}
 		}

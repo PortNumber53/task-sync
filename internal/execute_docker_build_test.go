@@ -3,8 +3,12 @@ package internal
 import (
 	"database/sql"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 // TestExecuteDockerBuild tests the executeDockerBuild function.
@@ -23,7 +27,7 @@ func TestExecuteDockerBuild(t *testing.T) {
 
 	testCases := []struct {
 		name        string
-		config      *DockerBuildConfig
+		config      *models.DockerBuildConfig
 		workDir     string
 		stepID      int
 		db          *sql.DB
@@ -32,39 +36,50 @@ func TestExecuteDockerBuild(t *testing.T) {
 	}{
 		{
 			name: "success",
-			config: &DockerBuildConfig{
-				DockerBuild: DockerBuild{
+			config: &models.DockerBuildConfig{
 					ImageTag: "test-image:latest",
-					Params:   []string{"--platform linux/amd64", "-t %%IMAGETAG%%"},
+					ImageID:  "",
 				},
-			},
-			workDir:   ".",
 			stepID:    1,
 			db:        nil,
 			expectErr: false,
 		},
 		{
 			name: "build failure",
-			config: &DockerBuildConfig{
-				DockerBuild: DockerBuild{
+			config: &models.DockerBuildConfig{
 					ImageTag: "fail-image:latest",
-					Params:   []string{"--platform linux/amd64", "-t %%IMAGETAG%%"},
+					ImageID:  "",
 				},
-			},
-			workDir:     ".",
 			stepID:      1,
 			db:          nil,
 			expectErr:   true,
-			errContains: "docker build failed",
+			errContains: "failed to get image ID",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Create a temporary directory for the test case
+			tempDir, err := os.MkdirTemp("", "test-docker-build")
+			if err != nil {
+				t.Fatalf("Failed to create temp dir: %v", err)
+			}
+			defer os.RemoveAll(tempDir)
+
+			// Write a dummy Dockerfile into the temporary directory
+			dockerfilePath := filepath.Join(tempDir, "Dockerfile")
+			dockerfileContent := []byte("FROM busybox")
+			if err := os.WriteFile(dockerfilePath, dockerfileContent, 0644); err != nil {
+				t.Fatalf("Failed to write dummy Dockerfile: %v", err)
+			}
+
+			// Set the workDir for the test case
+			tc.workDir = tempDir
+
 			// Set the mock's behavior based on the test case expectation
 			mockShouldFail = tc.expectErr
 
-			err := executeDockerBuild(tc.workDir, tc.config, tc.stepID, tc.db)
+			err = executeDockerBuild(tc.workDir, tc.config, tc.stepID, tc.db)
 
 			if tc.expectErr {
 				if err == nil {

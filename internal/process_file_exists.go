@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 // processFileExistsSteps checks for the existence of files specified in step settings.
@@ -22,60 +24,60 @@ func processFileExistsSteps(db *sql.DB) {
 
 	rows, err := db.Query(query)
 	if err != nil {
-		stepLogger.Println("File exists query error:", err)
+		models.StepLogger.Println("File exists query error:", err)
 		return
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var step stepExec
+		var step models.StepExec
 		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
-			stepLogger.Println("Row scan error:", err)
+			models.StepLogger.Println("Row scan error:", err)
 			continue
 		}
 
 		var settings map[string]interface{}
 		if err := json.Unmarshal([]byte(step.Settings), &settings); err != nil {
 			errMsg := "invalid settings json"
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
-			stepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
+			models.StepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
 			continue
 		}
 
 		filePathsValue, ok := settings["file_exists"]
 		if !ok {
-			stepLogger.Printf("Step %d: 'file_exists' key missing in settings\n", step.StepID)
+			models.StepLogger.Printf("Step %d: 'file_exists' key missing in settings\n", step.StepID)
 			continue
 		}
 
 		feConfig, ok := filePathsValue.(map[string]interface{})
 		if !ok {
 			errMsg := "invalid type for 'file_exists'; expected an object"
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
-			stepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
+			models.StepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
 			continue
 		}
 
 		filesMapValue, ok := feConfig["files"]
 		if !ok {
 			errMsg := "'files' key missing in 'file_exists' settings"
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
-			stepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
+			models.StepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
 			continue
 		}
 
 		filesMap, ok := filesMapValue.(map[string]interface{})
 		if !ok {
 			errMsg := "invalid type for 'files'; expected a map of file paths"
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
-			stepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
+			models.StepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
 			continue
 		}
 
 		if len(filesMap) == 0 {
 			errMsg := "'file_exists.files' is present but contains no paths"
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
-			stepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg})
+			models.StepLogger.Printf("Step %d: %s\n", step.StepID, errMsg)
 			continue
 		}
 
@@ -101,26 +103,26 @@ func processFileExistsSteps(db *sql.DB) {
 			settings["file_exists"] = feConfig
 			newSettingsJSON, err := json.Marshal(settings)
 			if err != nil {
-				StoreStepResult(db, step.StepID, map[string]interface{}{
+				models.StoreStepResult(db, step.StepID, map[string]interface{}{
 					"result":  "success",
 					"message": fmt.Sprintf("All files found, but failed to marshal updated settings: %v", err),
 					"files":   updatedFiles,
 				})
-				stepLogger.Printf("Step %d: Failed to marshal updated settings: %v\n", step.StepID, err)
+				models.StepLogger.Printf("Step %d: Failed to marshal updated settings: %v\n", step.StepID, err)
 				continue
 			}
 
 			_, err = db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(newSettingsJSON), step.StepID)
 			if err != nil {
-				stepLogger.Printf("Step %d: Failed to update step settings with timestamps: %v\n", step.StepID, err)
+				models.StepLogger.Printf("Step %d: Failed to update step settings with timestamps: %v\n", step.StepID, err)
 			}
 
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "files": updatedFiles})
-			stepLogger.Printf("Step %d: file_exists check SUCCESS for all paths\n", step.StepID)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "files": updatedFiles})
+			models.StepLogger.Printf("Step %d: file_exists check SUCCESS for all paths\n", step.StepID)
 		} else {
 			fullErrMsg := strings.Join(errorMessages, "; ")
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fullErrMsg})
-			stepLogger.Printf("Step %d: file_exists check FAILURE: %s\n", step.StepID, fullErrMsg)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fullErrMsg})
+			models.StepLogger.Printf("Step %d: file_exists check FAILURE: %s\n", step.StepID, fullErrMsg)
 		}
 	}
 }

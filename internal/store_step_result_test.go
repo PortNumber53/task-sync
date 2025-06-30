@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 func TestStoreStepResult(t *testing.T) {
@@ -22,7 +23,7 @@ func TestStoreStepResult(t *testing.T) {
 			WithArgs(resultJSON, 1).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
-		err = StoreStepResult(db, 1, result)
+		err = models.StoreStepResult(db, 1, result)
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -42,7 +43,7 @@ func TestStoreStepResult(t *testing.T) {
 			WithArgs(resultJSON, 1).
 			WillReturnResult(sqlmock.NewResult(0, 0)) // 0 rows affected
 
-		err = StoreStepResult(db, 1, result)
+		err = models.StoreStepResult(db, 1, result)
 		if err == nil {
 			t.Error("expected error for missing step, got nil")
 		}
@@ -62,7 +63,7 @@ func TestStoreStepResult(t *testing.T) {
 			WithArgs(resultJSON, 2).
 			WillReturnError(sql.ErrConnDone)
 
-		err = StoreStepResult(db, 2, result)
+		err = models.StoreStepResult(db, 2, result)
 		if err == nil {
 			t.Error("expected error for DB failure, got nil")
 		}

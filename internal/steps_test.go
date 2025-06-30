@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"log"
+
 	"os"
 	"strings"
 	"testing"
@@ -12,6 +12,8 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/lib/pq"
+
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 // sqlOpen is a package-level variable to allow mocking of sql.Open in tests.
@@ -27,9 +29,9 @@ func TestCreateStep(t *testing.T) {
 	defer db.Close()
 
 	t.Run("valid taskRef as ID", func(t *testing.T) {
-		// Expect a query for task by ID
-		mock.ExpectQuery("SELECT id FROM tasks WHERE id = \\$1").
-			WithArgs(42).
+		// Expect a query for task by ref
+		mock.ExpectQuery("SELECT id FROM tasks WHERE ref = \\$1").
+			WithArgs("42").
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(42))
 		// Expect insert and return of new ID
 		mock.ExpectQuery("INSERT INTO steps").
@@ -47,7 +49,7 @@ func TestCreateStep(t *testing.T) {
 	})
 
 	t.Run("valid taskRef as name", func(t *testing.T) {
-		mock.ExpectQuery("SELECT id FROM tasks WHERE name = \\$1").
+		mock.ExpectQuery("SELECT id FROM tasks WHERE ref = \\$1").
 			WithArgs("mytask").
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
 		// Expect insert and return of new ID
@@ -73,7 +75,7 @@ func TestCreateStep(t *testing.T) {
 	})
 
 	t.Run("taskRef not found", func(t *testing.T) {
-		mock.ExpectQuery("SELECT id FROM tasks WHERE name = \\$1").
+		mock.ExpectQuery("SELECT id FROM tasks WHERE ref = \\$1").
 			WithArgs("notask").
 			WillReturnError(sql.ErrNoRows)
 
@@ -96,10 +98,10 @@ func TestListSteps(t *testing.T) {
 	defer db.Close()
 
 	t.Run("full=false, prints basic columns", func(t *testing.T) {
-		rows := sqlmock.NewRows([]string{"id", "task_id", "title", "created_at", "updated_at"}).
-			AddRow(1, 10, "Step1", "2024-01-01", "2024-01-02").
-			AddRow(2, 20, "Step2", "2024-02-01", "2024-02-02")
-		mock.ExpectQuery("SELECT id, task_id, title, created_at, updated_at FROM steps ORDER BY id").
+		rows := sqlmock.NewRows([]string{"id", "task_id", "title"}).
+			AddRow(1, 10, "Step1").
+			AddRow(2, 20, "Step2")
+		mock.ExpectQuery("SELECT id, task_id, title FROM steps ORDER BY id").
 			WillReturnRows(rows)
 
 		oldStdout := os.Stdout
@@ -125,9 +127,9 @@ func TestListSteps(t *testing.T) {
 	})
 
 	t.Run("full=true, prints settings", func(t *testing.T) {
-		rows := sqlmock.NewRows([]string{"id", "task_id", "title", "settings", "created_at", "updated_at"}).
-			AddRow(1, 10, "Step1", "{\"foo\":1}", "2024-01-01", "2024-01-02")
-		mock.ExpectQuery("SELECT id, task_id, title, settings, created_at, updated_at FROM steps ORDER BY id").
+		rows := sqlmock.NewRows([]string{"id", "task_id", "title", "settings"}).
+			AddRow(1, 10, "Step1", "{\"foo\":1}")
+		mock.ExpectQuery("SELECT id, task_id, title, settings FROM steps ORDER BY id").
 			WillReturnRows(rows)
 
 		oldStdout := os.Stdout
@@ -153,7 +155,7 @@ func TestListSteps(t *testing.T) {
 	})
 
 	t.Run("db error", func(t *testing.T) {
-		mock.ExpectQuery("SELECT id, task_id, title, created_at, updated_at FROM steps ORDER BY id").
+		mock.ExpectQuery("SELECT id, task_id, title FROM steps ORDER BY id").
 			WillReturnError(sql.ErrConnDone)
 		err := ListSteps(db, false)
 		if err == nil {
@@ -162,8 +164,8 @@ func TestListSteps(t *testing.T) {
 	})
 
 	t.Run("no rows", func(t *testing.T) {
-		rows := sqlmock.NewRows([]string{"id", "task_id", "title", "created_at", "updated_at"})
-		mock.ExpectQuery("SELECT id, task_id, title, created_at, updated_at FROM steps ORDER BY id").
+		rows := sqlmock.NewRows([]string{"id", "task_id", "title"})
+		mock.ExpectQuery("SELECT id, task_id, title FROM steps ORDER BY id").
 			WillReturnRows(rows)
 
 		oldStdout := os.Stdout
@@ -180,8 +182,8 @@ func TestListSteps(t *testing.T) {
 
 		out, _ := io.ReadAll(r)
 		output := string(out)
-		if !strings.Contains(output, "ID") || strings.Contains(output, "Step1") {
-			t.Errorf("output missing expected header or contains unexpected data: %q", output)
+		if output != "Steps:\n" {
+			t.Errorf("expected output 'Steps:\n', got %q", output)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("unmet expectations: %v", err)
@@ -210,7 +212,7 @@ func TestCalculateFileHash(t *testing.T) {
 		// echo -n "hello world" | sha256sum
 		expectedHash := "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
 
-		hash, err := calculateFileHash(tmpfile.Name())
+		hash, err := models.GetSHA256(tmpfile.Name())
 		if err != nil {
 			t.Errorf("expected no error, but got: %v", err)
 		}
@@ -221,7 +223,7 @@ func TestCalculateFileHash(t *testing.T) {
 	})
 
 	t.Run("file not found", func(t *testing.T) {
-		_, err := calculateFileHash("non-existent-file.txt")
+		_, err := models.GetSHA256("non-existent-file.txt")
 		if err == nil {
 			t.Error("expected an error for a non-existent file, but got nil")
 		}
@@ -238,11 +240,7 @@ func TestExecutePendingSteps(t *testing.T) {
 	// Use a channel to record the order of function calls
 	callOrder := make(chan string, 10) // Increased buffer size
 
-	// Mock implementation for processDynamicRubricSteps
-	// This is called before the main loop, so we need to mock its DB interaction
-	mock.ExpectQuery("SELECT s.id, s.task_id, s.title, s.settings, COALESCE\\(t.local_path, ''\\) FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.settings \\? \\$1").
-		WithArgs("dynamic_rubric").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "task_id", "title", "settings", "local_path"}))
+
 
 	// Create a map of mock step processors
 	mockStepProcessors := map[string]func(*sql.DB) error{
@@ -512,14 +510,14 @@ func TestCheckDependencies(t *testing.T) {
 		t.Fatalf("an error '%s' was not expected when opening a stub database connection", err)
 	}
 	defer db.Close()
-	testLogger := log.New(io.Discard, "", 0)
 
 	t.Run("no dependencies", func(t *testing.T) {
 		mock.ExpectQuery(`SELECT COALESCE\s*\(\s*\(SELECT value FROM jsonb_each\s*\(settings\)\s*WHERE key = 'depends_on'\)\s*,\s*'\[\]'::jsonb\s*\)\s*::text\s*FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow("[]"))
 
-		ok, err := checkDependencies(db, 1, testLogger)
+		stepExec := &models.StepExec{StepID: 1}
+		ok, err := models.CheckDependencies(db, stepExec)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -542,7 +540,8 @@ func TestCheckDependencies(t *testing.T) {
 			WithArgs(pq.Array([]int{2, 3})).
 			WillReturnRows(sqlmock.NewRows([]string{"not_exists"}).AddRow(true))
 
-		ok, err := checkDependencies(db, 1, testLogger)
+		stepExec := &models.StepExec{StepID: 1}
+		ok, err := models.CheckDependencies(db, stepExec)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -565,7 +564,8 @@ func TestCheckDependencies(t *testing.T) {
 			WithArgs(pq.Array([]int{2, 3})).
 			WillReturnRows(sqlmock.NewRows([]string{"not_exists"}).AddRow(false))
 
-		ok, err := checkDependencies(db, 1, testLogger)
+		stepExec := &models.StepExec{StepID: 1}
+		ok, err := models.CheckDependencies(db, stepExec)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -588,7 +588,8 @@ func TestCheckDependencies(t *testing.T) {
 			WithArgs(pq.Array([]int{2})).
 			WillReturnError(fmt.Errorf("db error"))
 
-		ok, err := checkDependencies(db, 1, testLogger)
+		stepExec := &models.StepExec{StepID: 1}
+		ok, err := models.CheckDependencies(db, stepExec)
 		if err == nil {
 			t.Errorf("expected error, got nil")
 		}
@@ -605,7 +606,8 @@ func TestCheckDependencies(t *testing.T) {
 			WithArgs(1).
 			WillReturnError(fmt.Errorf("db error"))
 
-		ok, err := checkDependencies(db, 1, testLogger)
+		stepExec := &models.StepExec{StepID: 1}
+		ok, err := models.CheckDependencies(db, stepExec)
 		if err == nil {
 			t.Errorf("expected error, got nil")
 		}
@@ -623,7 +625,8 @@ func TestCheckDependencies(t *testing.T) {
 			WithArgs(1).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(dependsOnJSON))
 
-		ok, err := checkDependencies(db, 1, testLogger)
+		stepExec := &models.StepExec{StepID: 1}
+		ok, err := models.CheckDependencies(db, stepExec)
 		if err == nil {
 			t.Errorf("expected error, got nil")
 		}

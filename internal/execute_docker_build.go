@@ -6,22 +6,26 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
+
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 // executeDockerBuild executes the docker build command and captures the image ID
-func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, db *sql.DB) error {
+func executeDockerBuild(workDir string, config *models.DockerBuildConfig, stepID int, db *sql.DB) error {
 	// Process docker build parameters, replacing the image tag placeholder
 	var buildParams []string
-	for i, param := range config.DockerBuild.Params {
-		if strings.Contains(param, "%%IMAGETAG%%") {
-			// Replace the placeholder and update the parameter for this iteration
-			param = strings.ReplaceAll(param, "%%IMAGETAG%%", config.DockerBuild.ImageTag)
-			// Also update the original config slice for consistency
-			config.DockerBuild.Params[i] = param
-		}
-		buildParams = append(buildParams, strings.Fields(param)...)
+	// Convert DependsOn to a map for easier access
+	dependsOnMap := make(map[int]bool)
+	for _, dep := range config.DependsOn {
+		dependsOnMap[dep.ID] = true
 	}
+
+	// Add build parameters
+	buildParams = append(buildParams, "-t", config.ImageTag)
+
+
 
 	// Defensive check for empty params
 	if len(buildParams) == 0 {
@@ -30,10 +34,9 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 
 	// Construct the full command
 	cmdArgs := append([]string{"build"}, buildParams...)
-	cmdArgs = append(cmdArgs, workDir) // Append the build context path
-	stepLogger.Printf("Step %d: constructing docker build command: docker %s", stepID, strings.Join(cmdArgs, " "))
+	stepLogger.Printf("Step %d: constructing docker build command: docker %s %s", stepID, strings.Join(cmdArgs, " "), workDir)
 
-	cmd := execCommand("docker", cmdArgs...)
+	cmd := exec.Command("docker", append(cmdArgs, workDir)...)
 	cmd.Dir = workDir
 
 	// Create buffers and multi-writers to capture output
@@ -48,10 +51,10 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 		stdoutOutput := stdoutBuf.String()
 		stderrOutput := stderrBuf.String()
 		if len(stdoutOutput) > 0 {
-			stepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
+			models.StepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
 		}
 		if len(stderrOutput) > 0 {
-			stepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
+			models.StepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
 		}
 		return fmt.Errorf("docker build failed: %w", err)
 	}
@@ -61,20 +64,20 @@ func executeDockerBuild(workDir string, config *DockerBuildConfig, stepID int, d
 	stderrOutput := stderrBuf.String()
 
 	if len(stdoutOutput) > 0 {
-		stepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
+		models.StepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
 	}
 	if len(stderrOutput) > 0 {
-		stepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
+		models.StepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
 	}
 
 	// Get the image ID
-	imageID, err := getDockerImageID(config.DockerBuild.ImageTag)
+	imageID, err := getDockerImageID(config.ImageTag)
 	if err != nil {
 		return fmt.Errorf("failed to get image ID: %w", err)
 	}
 
 	// Update the config with the new image ID
-	config.DockerBuild.ImageID = imageID
+	config.ImageID = imageID
 
 	// The caller (processDockerBuildSteps) is now responsible for marshalling and saving the updated config.
 	// This function's responsibility is to execute the build and update the ImageID in the passed config object.

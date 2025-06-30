@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 // processDockerPoolSteps processes docker pool steps for active tasks
@@ -20,48 +22,53 @@ func processDockerPoolSteps(db *sql.DB) error {
 
 	rows, err := db.Query(query)
 	if err != nil {
-		stepLogger.Println("Docker pool query error:", err)
+		models.StepLogger.Println("Docker pool query error:", err)
 		return err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var step stepExec
+		var step models.StepExec
 		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
-			stepLogger.Println("Row scan error:", err)
+			models.StepLogger.Println("Row scan error:", err)
 			continue
 		}
 
-		var config DockerPoolConfig
+		var config models.DockerPoolConfig
 		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker pool config"})
-			stepLogger.Printf("Step %d: invalid docker pool config: %v\n", step.StepID, err)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker pool config"})
+			models.StepLogger.Printf("Step %d: invalid docker pool config: %v\n", step.StepID, err)
 			continue
 		}
 
-		ok, err := checkDependencies(db, step.StepID, stepLogger)
+		ok, err := models.CheckDependencies(db, &step)
 		if err != nil {
-			stepLogger.Printf("Step %d: error checking dependencies: %v\n", step.StepID, err)
+			models.StepLogger.Printf("Step %d: error checking dependencies: %v\n", step.StepID, err)
 			continue
 		}
 		if !ok {
-			stepLogger.Printf("Step %d: waiting for dependencies to complete\n", step.StepID)
+			models.StepLogger.Printf("Step %d: waiting for dependencies to complete\n", step.StepID)
 			continue
 		}
 
 		var imageIDToUse string
 		var buildStepImageID string
 
-		for _, dep := range config.DockerPool.DependsOn {
-			depInfo, err := GetStepInfo(db, dep.ID)
+		for _, dep := range config.DependsOn {
+			depInfo, err := models.GetStepInfo(db, dep.ID)
 			if err != nil {
-				stepLogger.Printf("Step %d: Error getting info for dependency step %d: %v\n", step.StepID, dep.ID, err)
+				models.StepLogger.Printf("Step %d: Error getting info for dependency step %d: %v\n", step.StepID, dep.ID, err)
 				continue
 			}
-			if depSettings, ok := depInfo.Settings["docker_build"].(map[string]interface{}); ok {
-				if id, ok := depSettings["image_id"].(string); ok && id != "" && id != "sha256:" {
+			var depSettingsMap map[string]interface{}
+			if err := json.Unmarshal([]byte(depInfo), &depSettingsMap); err != nil {
+				models.StepLogger.Printf("Step %d: Error unmarshalling dependency step %d settings: %v\n", step.StepID, dep.ID, err)
+				continue
+			}
+			if dockerBuildSettings, ok := depSettingsMap["docker_build"].(map[string]interface{}); ok {
+				if id, ok := dockerBuildSettings["image_id"].(string); ok && id != "" && id != "sha256:" {
 					buildStepImageID = id
-					stepLogger.Printf("Step %d: Found image_id '%s' from build dependency step %d\n", step.StepID, buildStepImageID, dep.ID)
+					models.StepLogger.Printf("Step %d: Found image_id '%s' from build dependency step %d\n", step.StepID, buildStepImageID, dep.ID)
 					break
 				}
 			}
@@ -69,42 +76,42 @@ func processDockerPoolSteps(db *sql.DB) error {
 
 		if buildStepImageID != "" {
 			imageIDToUse = buildStepImageID
-			stepLogger.Printf("Step %d: Prioritizing image_id '%s' from build dependency.\n", step.StepID, imageIDToUse)
+			models.StepLogger.Printf("Step %d: Prioritizing image_id '%s' from build dependency.\n", step.StepID, imageIDToUse)
 		} else {
-			stepLogger.Printf("Step %d: No build dependency with a valid image_id found. Falling back to inspecting tag '%s'.\n", step.StepID, config.DockerPool.ImageTag)
-			currentImageID, err := getDockerImageID(config.DockerPool.ImageTag)
+			models.StepLogger.Printf("Step %d: No build dependency with a valid image_id found. Falling back to inspecting tag '%s'.\n", step.StepID, config.ImageTag)
+			currentImageID, _, err := models.GetDockerImageID(db, step.StepID, models.StepLogger)
 			if err != nil {
-				stepLogger.Printf("Step %d: error getting current image ID by tag: %v\n", step.StepID, err)
+				models.StepLogger.Printf("Step %d: error getting current image ID by tag: %v\n", step.StepID, err)
 				continue
 			}
 			if currentImageID == "" {
-				StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "no image found with tag: " + config.DockerPool.ImageTag})
-				stepLogger.Printf("Step %d: no image found with tag %s\n", step.StepID, config.DockerPool.ImageTag)
+				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "no image found with tag: " + config.ImageTag})
+				models.StepLogger.Printf("Step %d: no image found with tag %s\n", step.StepID, config.ImageTag)
 				continue
 			}
 			imageIDToUse = currentImageID
 		}
 
-		if config.DockerPool.ImageID != imageIDToUse {
-			stepLogger.Printf("Step %d: Stored image_id ('%s') is outdated. Updating to '%s' and skipping this run.\n", step.StepID, config.DockerPool.ImageID, imageIDToUse)
-			config.DockerPool.ImageID = imageIDToUse
+		if config.ImageID != imageIDToUse {
+			models.StepLogger.Printf("Step %d: Stored image_id ('%s') is outdated. Updating to '%s' and skipping this run.\n", step.StepID, config.ImageID, imageIDToUse)
+			config.ImageID = imageIDToUse
 			updatedSettings, _ := json.Marshal(config)
 			_, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = now() WHERE id = $2`, string(updatedSettings), step.StepID)
 			if err != nil {
-				stepLogger.Printf("Step %d: Failed to update settings with new image_id: %v\n", step.StepID, err)
+				models.StepLogger.Printf("Step %d: Failed to update settings with new image_id: %v\n", step.StepID, err)
 			}
-			StoreStepResult(db, step.StepID, map[string]interface{}{"result": "pending", "message": "Image ID updated from dependency, will run next cycle."})
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "pending", "message": "Image ID updated from dependency, will run next cycle."})
 			continue
 		}
 
 		// Logic for handling a pool of containers
-		numContainers := config.DockerPool.PoolSize
+		numContainers := config.PoolSize
 		if numContainers <= 0 {
 			numContainers = 1 // Default to one container if not specified
 		}
 
-		var runningContainers []ContainerInfo
-		for _, container := range config.DockerPool.Containers {
+		var runningContainers []models.ContainerInfo
+		for _, container := range config.Containers {
 			inspectCmd := exec.Command("docker", "inspect", container.ContainerID)
 			output, err := inspectCmd.CombinedOutput()
 			if err == nil {
@@ -125,10 +132,10 @@ func processDockerPoolSteps(db *sql.DB) error {
 		}
 
 		if len(runningContainers) == numContainers {
-			stepLogger.Printf("Step %d: All %d containers are already running with the correct image.\n", step.StepID, numContainers)
-			config.DockerPool.Containers = runningContainers
+			models.StepLogger.Printf("Step %d: All %d containers are already running with the correct image.\n", step.StepID, numContainers)
+			config.Containers = runningContainers
 			updatedSettingsJSON, _ := json.Marshal(config)
-			StoreStepResult(db, step.StepID, map[string]interface{}{
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{
 				"result":     "success",
 				"message":    "All containers already running and DB state confirmed.",
 				"containers": runningContainers,
@@ -139,14 +146,14 @@ func processDockerPoolSteps(db *sql.DB) error {
 
 		// Start missing containers
 		for i := len(runningContainers); i < numContainers; i++ {
-			dockerRunParams := config.DockerPool.Parameters
+			dockerRunParams := config.Parameters
 			processedDockerRunParams := []string{}
 			for _, param := range dockerRunParams {
 				replacedParam := strings.Replace(param, "%%IMAGETAG%%", imageIDToUse, -1)
 				processedDockerRunParams = append(processedDockerRunParams, strings.Fields(replacedParam)...)
 			}
 
-			if config.DockerPool.KeepForever {
+			if config.KeepForever {
 				hasKeepAliveCmd := false
 				for _, param := range dockerRunParams {
 					if (strings.Contains(param, "while true") && strings.Contains(param, "sleep")) ||
@@ -164,7 +171,7 @@ func processDockerPoolSteps(db *sql.DB) error {
 				}
 			}
 
-			randomSuffix, _ := GenerateRandomString(4)
+			randomSuffix, _ := models.GenerateRandomString(4)
 			containerName := fmt.Sprintf("tasksync_step%d_%s_%d", step.StepID, randomSuffix, i)
 
 			detachedParams := append([]string{"-d", "--name", containerName}, processedDockerRunParams...)
@@ -174,19 +181,19 @@ func processDockerPoolSteps(db *sql.DB) error {
 			newContainerID := strings.TrimSpace(string(output))
 
 			if err != nil {
-				stepLogger.Printf("Step %d: command 'docker run %v' failed: %v\nOutput: %s\n", step.StepID, detachedParams, err, newContainerID)
+				models.StepLogger.Printf("Step %d: command 'docker run %v' failed: %v\nOutput: %s\n", step.StepID, detachedParams, err, newContainerID)
 				// Decide on error handling, maybe fail the whole step
 			} else {
-				stepLogger.Printf("Step %d: command 'docker run %v' succeeded. Container ID: %s, Name: %s\n", step.StepID, detachedParams, newContainerID, containerName)
-				runningContainers = append(runningContainers, ContainerInfo{ContainerID: newContainerID, ContainerName: containerName})
+				models.StepLogger.Printf("Step %d: command 'docker run %v' succeeded. Container ID: %s, Name: %s\n", step.StepID, detachedParams, newContainerID, containerName)
+				runningContainers = append(runningContainers, models.ContainerInfo{ContainerID: newContainerID, ContainerName: containerName})
 			}
 		}
 
-		config.DockerPool.Containers = runningContainers
-		config.DockerPool.ImageID = imageIDToUse
+		config.Containers = runningContainers
+		config.ImageID = imageIDToUse
 		newSettingsJSON, _ := json.Marshal(config)
 
-		StoreStepResult(db, step.StepID, map[string]interface{}{
+		models.StoreStepResult(db, step.StepID, map[string]interface{}{
 			"result":     "success",
 			"message":    fmt.Sprintf("%d/%d containers running.", len(runningContainers), numContainers),
 			"containers": runningContainers,

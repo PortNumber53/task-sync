@@ -1,4 +1,4 @@
-package internal
+package dynamic_lab
 
 import (
 	"database/sql"
@@ -8,12 +8,12 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/PortNumber53/task-sync/internal/tasks/dynamic_lab"
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 func processDynamicRubricSteps(db *sql.DB) error {
 	log.Println("Processing dynamic rubric steps...")
-	dynamicRubricSteps, err := getStepsByType(db, "dynamic_rubric")
+	dynamicRubricSteps, err := models.GetStepsByType(db, "dynamic_rubric")
 	if err != nil {
 		return fmt.Errorf("failed to get active dynamic_rubric steps: %w", err)
 	}
@@ -22,7 +22,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 	for i, step := range dynamicRubricSteps {
 		log.Printf("Processing step %d/%d: ID %d", i+1, len(dynamicRubricSteps), step.StepID)
 
-		var config DynamicRubricConfig
+		var config models.DynamicRubricConfig
 		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
 			log.Printf("Error unmarshalling settings for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": fmt.Sprintf("Error parsing settings: %v", err)}
@@ -40,7 +40,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 			}
 			for file := range config.DynamicRubric.Files {
 				filePath := filepath.Join(step.LocalPath, file)
-				newHash, err := getSHA256(filePath)
+				newHash, err := models.GetSHA256(filePath)
 				if err != nil {
 					log.Printf("Error hashing file %s for step %d: %v", file, step.StepID, err)
 					continue
@@ -56,7 +56,11 @@ func processDynamicRubricSteps(db *sql.DB) error {
 		}
 
 		// 2. Check the rubric file itself and parse criteria
-		criteria, newRubricHash, rubricChanged, err := dynamic_lab.RunRubric(step.LocalPath, config.DynamicRubric.Rubrics, config.DynamicRubric.Hash)
+		if len(config.DynamicRubric.Rubrics) == 0 {
+			return fmt.Errorf("no rubric files specified in step %d", step.StepID)
+		}
+		rubricFile := config.DynamicRubric.Rubrics[0] // Use the first rubric file
+		criteria, newRubricHash, rubricChanged, err := models.RunRubric(step.LocalPath, rubricFile, config.DynamicRubric.Hash)
 		if err != nil {
 			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": err.Error()}
@@ -96,6 +100,17 @@ func processDynamicRubricSteps(db *sql.DB) error {
 					runStepDependencyID = dep.ID
 					break
 				}
+
+				// Also check for 'containers' from docker_pool step
+				if containers, ok := results["containers"].([]interface{}); ok && len(containers) > 0 {
+					if firstContainer, ok := containers[0].(map[string]interface{}); ok {
+						if cID, ok := firstContainer["container_id"].(string); ok {
+							containerID = cID
+							runStepDependencyID = dep.ID
+							break
+						}
+					}
+				}
 			}
 		}
 
@@ -109,7 +124,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 			continue
 		}
 
-		stepsExist, err := generatedStepsExist(db, step.StepID)
+		stepsExist, err := models.GeneratedStepsExist(db, step.StepID)
 		if err != nil {
 			return fmt.Errorf("failed to check for generated steps for parent step %d: %w", step.StepID, err)
 		}
@@ -121,7 +136,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 				log.Printf("Rubric or associated files changed for step %d. Updating generated steps.", step.StepID)
 			}
 
-			if err := deleteGeneratedSteps(db, step.StepID, runStepDependencyID); err != nil {
+			if err := models.DeleteGeneratedSteps(db, step.StepID); err != nil {
 				log.Printf("Error deleting generated steps for step %d: %v", step.StepID, err)
 				continue
 			}
@@ -134,19 +149,21 @@ func processDynamicRubricSteps(db *sql.DB) error {
 							"command": [{"run": "%s"}],
 							"depends_on": [{"id": %d}],
 							"generated_by": %d,
+							"image_id": "%s",
+							"image_tag": "%s",
 							"rubric_details": {
 								"score": %d,
 								"required": %t,
 								"description": "%s"
 							}
 						}
-					}`, crit.HeldOutTest, runStepDependencyID, step.StepID, crit.Score, crit.Required, crit.Rubric)
+					}`, crit.HeldOutTest, runStepDependencyID, step.StepID, config.DynamicRubric.Environment.ImageID, config.DynamicRubric.Environment.ImageTag, crit.Score, crit.Required, crit.Rubric)
 				} else {
 					log.Printf("Step %d: Skipping criterion '%s' because environment is not docker.", step.StepID, crit.Title)
 					continue
 				}
 
-				if _, err := CreateStep(db, strconv.Itoa(step.TaskID), crit.Title, settings); err != nil {
+				if _, err := models.CreateStep(db, strconv.Itoa(step.TaskID), crit.Title, settings); err != nil {
 					log.Printf("Error creating step for criterion '%s' from step %d: %v", crit.Title, step.StepID, err)
 				}
 			}

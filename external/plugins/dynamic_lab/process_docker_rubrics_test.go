@@ -1,4 +1,4 @@
-package internal
+package dynamic_lab
 
 import (
 	"errors"
@@ -8,6 +8,20 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+// testWriter is a mock io.Writer for testing
+type testWriter struct{}
+
+func (tw testWriter) Write(p []byte) (n int, err error) {
+	return len(p), nil
+}
+
+// Initialize stepLogger for tests
+var stepLogger *log.Logger
+
+func init() {
+	stepLogger = log.New(testWriter{}, "", 0)
+}
 
 func TestProcessDockerRubricsSteps(t *testing.T) {
 	// Initialize logger to avoid nil pointer issues

@@ -1,4 +1,4 @@
-package internal
+package dynamic_lab
 
 import (
 	"database/sql"
@@ -6,9 +6,28 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/PortNumber53/task-sync/internal/tasks/dynamic_lab"
+	"github.com/PortNumber53/task-sync/pkg/models"
 	"github.com/stretchr/testify/assert"
 )
+
+// mockFileSystem is a mock implementation of fileSystem
+type mockFileSystem struct{}
+
+// mockRubricParser is a mock implementation of rubricParser
+type mockRubricParser struct{}
+
+// Run mocks the Run function
+func (m *mockFileSystem) Run(localPath string, files []string, oldHashes map[string]string) (map[string]string, bool, error) {
+	return map[string]string{}, true, nil
+}
+
+// RunRubric mocks the RunRubric function
+func (m *mockRubricParser) RunRubric(localPath, file, hash string) ([]models.Criterion, string, bool, error) {
+	return []models.Criterion{{
+		Title:       "crit-1",
+		HeldOutTest: "test.sh",
+	}}, "new_rubric_hash", true, nil
+}
 
 // TestProcessDynamicLabSteps_ContainerIdInheritance tests that a dynamic_lab step
 // correctly inherits the container_id from its dependencies, generates new steps
@@ -20,18 +39,21 @@ func TestProcessDynamicLabSteps_ContainerIdInheritance(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Mock the dynamic_lab functions
-	originalDynamicLabRun := dynamicLabRun
-	dynamicLabRun = func(localPath string, files []string, oldHashes map[string]string) (map[string]string, bool, error) {
-		return map[string]string{}, true, nil
-	}
-	originalRubricRun := dynamicLabRubricRun
-	dynamicLabRubricRun = func(path, file, hash string) ([]dynamic_lab.Criterion, string, bool, error) {
-		return []dynamic_lab.Criterion{{Title: "crit-1", HeldOutTest: "test.sh"}}, "new_rubric_hash", true, nil
-	}
+	// Create mocks
+	fs := &mockFileSystem{}
+	rp := &mockRubricParser{}
+
+	// Save original functions and replace with mocks
+	originalFS := fileSystemImpl
+	originalRP := rubricParserImpl
+
+	fileSystemImpl = fs
+	rubricParserImpl = rp
+
+	// Restore original functions when test is done
 	defer func() {
-		dynamicLabRun = originalDynamicLabRun
-		dynamicLabRubricRun = originalRubricRun
+		fileSystemImpl = originalFS
+		rubricParserImpl = originalRP
 	}()
 
 	// --- Test Data ---
@@ -49,8 +71,8 @@ func TestProcessDynamicLabSteps_ContainerIdInheritance(t *testing.T) {
 
 	mock.ExpectQuery("SELECT s.id, s.task_id, s.title, s.settings, COALESCE").WillReturnRows(rows)
 	mock.ExpectQuery("SELECT results FROM steps WHERE id").WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"results"}).AddRow(sql.NullString{String: string(dependencyResults), Valid: true}))
-	mock.ExpectQuery("SELECT id FROM steps WHERE").WithArgs(1, 2).WillReturnRows(sqlmock.NewRows([]string{"id"}))        // deleteGeneratedSteps
-	mock.ExpectQuery("SELECT id FROM tasks WHERE").WithArgs(1).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1)) // getTaskByID
+	mock.ExpectExec(`DELETE FROM steps WHERE settings->'generated_by' \? \$1`).WithArgs("1").WillReturnResult(sqlmock.NewResult(1, 1)) // deleteGeneratedSteps
+	mock.ExpectQuery("SELECT id FROM tasks WHERE").WithArgs("1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1)) // getTaskByID
 
 	// This is an INSERT ... RETURNING id, so it's a query
 	mock.ExpectQuery("INSERT INTO steps").WithArgs(1, "crit-1", sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(100))

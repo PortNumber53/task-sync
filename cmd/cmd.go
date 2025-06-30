@@ -3,16 +3,20 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 
 	helpPkg "github.com/PortNumber53/task-sync/help"
 	"github.com/PortNumber53/task-sync/internal"
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 func HandleRunSteps() {
-	internal.InitStepLogger(os.Stdout)
+	var logWriter io.Writer = os.Stdout
+	internal.InitStepLogger(logWriter)
+	models.InitStepLogger(logWriter)
 
 	pgURL, err := internal.GetPgURLFromEnv()
 	if err != nil {

@@ -41,17 +41,6 @@ func RunAPIServer(listenAddr string) error {
 		fmt.Println("[Config] Error loading config:", err)
 	}
 
-	var logWriter io.Writer = os.Stdout
-	if cfg != nil && cfg.LogFile != "" {
-		f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			fmt.Println("[Config] Failed to open log file:", err)
-		} else {
-			logWriter = f
-		}
-	}
-	InitStepLogger(logWriter)
-
 	pgURL, err := GetPgURLFromEnv()
 	if err != nil {
 		stepLogger.Fatalf("DB config error: %v", err)

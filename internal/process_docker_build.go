@@ -3,6 +3,7 @@ package internal
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"path/filepath"
 
@@ -34,30 +35,29 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger) {
 		}
 
 		// First, unmarshal into a map to extract the docker_build section
-		var configMap map[string]interface{}
+		var configMap map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(step.Settings), &configMap); err != nil {
 			stepLogger.Printf("Step %d: invalid settings format: %v\n", step.StepID, err)
 			continue
 		}
 
-		// Extract the docker_build section
-		dockerBuildMap, ok := configMap["docker_build"].(map[string]interface{})
+		// Extract the docker_build section as json.RawMessage
+		dockerBuildRaw, ok := configMap["docker_build"]
 		if !ok {
 			stepLogger.Printf("Step %d: missing docker_build section in settings\n", step.StepID)
 			continue
 		}
 
-		// Marshal the docker_build section back to JSON and unmarshal into DockerBuildConfig
-		dockerBuildJSON, err := json.Marshal(dockerBuildMap)
-		if err != nil {
-			stepLogger.Printf("Step %d: failed to marshal docker_build section: %v\n", step.StepID, err)
+		var config models.DockerBuildConfig
+		if err := json.Unmarshal(dockerBuildRaw, &config); err != nil {
+			stepLogger.Printf("Step %d: invalid docker build config: %v\n", step.StepID, err)
 			continue
 		}
 
-		var config models.DockerBuildConfig
-		if err := json.Unmarshal(dockerBuildJSON, &config); err != nil {
-			stepLogger.Printf("Step %d: invalid docker build config: %v\n", step.StepID, err)
-			continue
+		// Ensure ImageTag is set. If not provided, generate a default.
+		if config.ImageTag == "" {
+			config.ImageTag = fmt.Sprintf("task-sync-step-%d", step.StepID)
+			stepLogger.Printf("Step %d: ImageTag not specified, defaulting to '%s'\n", step.StepID, config.ImageTag)
 		}
 
 		// Check if any files have changed
@@ -76,18 +76,21 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger) {
 			}
 		}
 
+		buildSkipped := false
 		if !filesChanged && config.ImageID != "" {
-			stepLogger.Printf("Step %d: docker build skipped, no file changes and image already built. ImageID: %s\n", step.StepID, config.ImageID)
-			continue // Skip build and update if no changes
+			stepLogger.Printf("Step %d: docker build skipped, no file changes and image already built. ImageID: %s, ImageTag: %s\n", step.StepID, config.ImageID, config.ImageTag)
+			buildSkipped = true
 		}
 
-		// Log the build start
-		stepLogger.Printf("Step %d: building image %s:%s\n", step.StepID, config.ImageID, config.ImageTag)
+		if !buildSkipped {
+			// Log the build start
+			stepLogger.Printf("Step %d: building image %s:%s\n", step.StepID, config.ImageID, config.ImageTag)
 
-		// Execute the build
-		if err := executeDockerBuild(step.LocalPath, &config, step.StepID, db); err != nil {
-			stepLogger.Printf("Step %d: docker build failed: %v\n", step.StepID, err)
-			continue
+			// Execute the build
+			if err := executeDockerBuild(step.LocalPath, &config, step.StepID, db); err != nil {
+				stepLogger.Printf("Step %d: docker build failed: %v\n", step.StepID, err)
+				continue
+			}
 		}
 
 		// Update the config with the docker_build section and new file hashes

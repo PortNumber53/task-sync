@@ -34,10 +34,17 @@ func processDockerPoolSteps(db *sql.DB) error {
 			continue
 		}
 
-		var config models.DockerPoolConfig
-		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
-			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker pool config"})
-			models.StepLogger.Printf("Step %d: invalid docker pool config: %v\n", step.StepID, err)
+		var configHolder models.StepConfigHolder
+		if err := json.Unmarshal([]byte(step.Settings), &configHolder); err != nil {
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid step config"})
+			models.StepLogger.Printf("Step %d: invalid step config: %v\n", step.StepID, err)
+			continue
+		}
+
+		config := configHolder.DockerPool
+		if config == nil {
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "docker_pool config not found"})
+			models.StepLogger.Printf("Step %d: docker_pool config not found in step settings\n", step.StepID)
 			continue
 		}
 
@@ -95,7 +102,8 @@ func processDockerPoolSteps(db *sql.DB) error {
 		if config.ImageID != imageIDToUse {
 			models.StepLogger.Printf("Step %d: Stored image_id ('%s') is outdated. Updating to '%s' and skipping this run.\n", step.StepID, config.ImageID, imageIDToUse)
 			config.ImageID = imageIDToUse
-			updatedSettings, _ := json.Marshal(config)
+			configHolder.DockerPool = config // Update the configHolder with the modified config
+			updatedSettings, _ := json.Marshal(configHolder) // Marshal the entire configHolder
 			_, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = now() WHERE id = $2`, string(updatedSettings), step.StepID)
 			if err != nil {
 				models.StepLogger.Printf("Step %d: Failed to update settings with new image_id: %v\n", step.StepID, err)
@@ -191,7 +199,8 @@ func processDockerPoolSteps(db *sql.DB) error {
 
 		config.Containers = runningContainers
 		config.ImageID = imageIDToUse
-		newSettingsJSON, _ := json.Marshal(config)
+		configHolder.DockerPool = config // Update the configHolder with the modified config
+		newSettingsJSON, _ := json.Marshal(configHolder) // Marshal the entire configHolder
 
 		models.StoreStepResult(db, step.StepID, map[string]interface{}{
 			"result":     "success",

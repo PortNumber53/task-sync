@@ -29,10 +29,17 @@ func processDockerShellSteps(db *sql.DB) {
 			continue
 		}
 
-		var config models.DockerShellConfig
-		if err := json.Unmarshal([]byte(settings), &config); err != nil {
-			models.StoreStepResult(db, stepID, map[string]interface{}{"result": "failure", "message": "invalid docker shell config"})
-			models.StepLogger.Printf("Step %d: invalid docker shell config: %v\n", stepID, err)
+		var configHolder models.StepConfigHolder
+		if err := json.Unmarshal([]byte(settings), &configHolder); err != nil {
+			models.StoreStepResult(db, stepID, map[string]interface{}{"result": "failure", "message": "invalid step config"})
+			models.StepLogger.Printf("Step %d: invalid step config: %v\n", stepID, err)
+			continue
+		}
+
+		config := configHolder.DockerShell
+		if config == nil {
+			models.StoreStepResult(db, stepID, map[string]interface{}{"result": "failure", "message": "docker_shell config not found"})
+			models.StepLogger.Printf("Step %d: docker_shell config not found in step settings\n", stepID)
 			continue
 		}
 
@@ -51,7 +58,7 @@ func processDockerShellSteps(db *sql.DB) {
 			var imageID, imageTag string
 			// Search through direct dependencies
 			for _, dep := range config.DependsOn {
-				id, tag, err := findImageDetailsRecursive(db, dep.ID, make(map[int]bool))
+				id, tag, err := models.FindImageDetailsRecursive(db, dep.ID, make(map[int]bool), models.StepLogger)
 				if err != nil {
 					models.StepLogger.Printf("Step %d: error searching for image details in dependency %d: %v", stepID, dep.ID, err)
 					continue // Try next dependency
@@ -123,112 +130,6 @@ func processDockerShellSteps(db *sql.DB) {
 			models.StoreStepResult(db, stepID, map[string]interface{}{"result": "success", "message": "all shell commands executed successfully", "outputs": results})
 		}
 	}
-}
-
-// findImageDetailsRecursive searches for image details (ID and Tag) by recursively checking step dependencies.
-// It returns the image ID and image Tag, or an error if a circular dependency is detected or an issue occurs.
-func findImageDetailsRecursive(db *sql.DB, stepID int, visited map[int]bool) (string, string, error) {
-	models.StepLogger.Printf("Entering findImageDetailsRecursive for step %d\n", stepID)
-
-	if visited[stepID] {
-		models.StepLogger.Printf("Circular dependency detected for step %d. Returning.\n", stepID)
-		return "", "", fmt.Errorf("circular dependency detected at step %d", stepID)
-	}
-	visited[stepID] = true
-
-	stepInfoStr, err := models.GetStepInfo(db, stepID)
-	if err != nil {
-		models.StepLogger.Printf("Failed to get info for step %d: %v\n", stepID, err)
-		return "", "", fmt.Errorf("failed to get info for step %d: %w", stepID, err)
-	}
-
-	// Unmarshal settings into a StepConfigHolder to check for image details or dependencies
-	var holder models.StepConfigHolder
-	if err := json.Unmarshal([]byte(stepInfoStr), &holder); err != nil {
-		models.StepLogger.Printf("Failed to unmarshal settings for step %d: %v (continuing)\n", stepID, err)
-
-		// Not an error, might just not have relevant settings for image details
-		// or dependencies, so we continue to check dependencies recursively.
-		// Or it could be a step type that doesn't have image details.
-	}
-
-	// Check current step's settings for image details. Only return if we find BOTH id and tag.
-	if holder.DockerBuild != nil && holder.DockerBuild.ImageID != "" && holder.DockerBuild.ImageTag != "" {
-		models.StepLogger.Printf("Found DockerBuild image details for step %d: %s:%s\n", stepID, holder.DockerBuild.ImageID, holder.DockerBuild.ImageTag)
-		return holder.DockerBuild.ImageID, holder.DockerBuild.ImageTag, nil
-	}
-	if holder.DockerRun != nil && holder.DockerRun.ImageID != "" && holder.DockerRun.ImageTag != "" {
-		models.StepLogger.Printf("Found DockerRun image details for step %d: %s:%s\n", stepID, holder.DockerRun.ImageID, holder.DockerRun.ImageTag)
-		return holder.DockerRun.ImageID, holder.DockerRun.ImageTag, nil
-	}
-	if holder.DockerPull != nil && holder.DockerPull.ImageID != "" && holder.DockerPull.ImageTag != "" {
-		models.StepLogger.Printf("Found DockerPull image details for step %d: %s:%s\n", stepID, holder.DockerPull.ImageID, holder.DockerPull.ImageTag)
-		return holder.DockerPull.ImageID, holder.DockerPull.ImageTag, nil
-	}
-	if holder.DockerShell != nil && holder.DockerShell.Docker.ImageID != "" && holder.DockerShell.Docker.ImageTag != "" {
-		models.StepLogger.Printf("Found DockerShell image details for step %d: %s:%s\n", stepID, holder.DockerShell.Docker.ImageID, holder.DockerShell.Docker.ImageTag)
-		return holder.DockerShell.Docker.ImageID, holder.DockerShell.Docker.ImageTag, nil
-	}
-	if holder.DockerPool != nil && holder.DockerPool.ImageID != "" && holder.DockerPool.ImageTag != "" {
-		models.StepLogger.Printf("Found DockerPool image details for step %d: %s:%s\n", stepID, holder.DockerPool.ImageID, holder.DockerPool.ImageTag)
-		return holder.DockerPool.ImageID, holder.DockerPool.ImageTag, nil
-	}
-	if holder.DynamicRubric != nil && holder.DynamicRubric.DynamicRubric.Environment.Docker && holder.DynamicRubric.DynamicRubric.Environment.ImageID != "" && holder.DynamicRubric.DynamicRubric.Environment.ImageTag != "" {
-		models.StepLogger.Printf("Found DynamicRubric image details for step %d: %s:%s\n", stepID, holder.DynamicRubric.DynamicRubric.Environment.ImageID, holder.DynamicRubric.DynamicRubric.Environment.ImageTag)
-		return holder.DynamicRubric.DynamicRubric.Environment.ImageID, holder.DynamicRubric.DynamicRubric.Environment.ImageTag, nil
-	}
-	// Removed direct ImageID/ImageTag check for DynamicLab as it does not have an Environment struct
-	// DynamicLab steps are expected to get their image from dependencies.
-	if holder.DockerRubrics != nil && holder.DockerRubrics.DockerRubrics.ImageID != "" && holder.DockerRubrics.DockerRubrics.ImageTag != "" {
-		models.StepLogger.Printf("Found DockerRubrics image details for step %d: %s:%s\n", stepID, holder.DockerRubrics.DockerRubrics.ImageID, holder.DockerRubrics.DockerRubrics.ImageTag)
-		return holder.DockerRubrics.DockerRubrics.ImageID, holder.DockerRubrics.DockerRubrics.ImageTag, nil
-	}
-
-	// If not found in current step, recurse through this step's dependencies
-	var dependencies []models.Dependency
-	if holder.DockerBuild != nil {
-		dependencies = holder.DockerBuild.DependsOn
-	} else if holder.DockerRun != nil {
-		dependencies = holder.DockerRun.DependsOn
-	} else if holder.DockerPull != nil {
-		dependencies = holder.DockerPull.DependsOn
-	} else if holder.DockerShell != nil {
-		dependencies = holder.DockerShell.DependsOn
-	} else if holder.DockerPool != nil {
-		dependencies = holder.DockerPool.DependsOn
-	} else if holder.DynamicRubric != nil && holder.DynamicRubric.DynamicRubric.DependsOn != nil {
-		dependencies = holder.DynamicRubric.DynamicRubric.DependsOn
-	} else if holder.DynamicLab != nil && holder.DynamicLab.DynamicLab.DependsOn != nil {
-		dependencies = holder.DynamicLab.DynamicLab.DependsOn
-	} else if holder.FileExists != nil {
-		// FileExists steps don't have image dependencies
-		return "", "", nil
-	} else if holder.DockerRubrics != nil && holder.DockerRubrics.DockerRubrics.DependsOn != nil {
-		dependencies = holder.DockerRubrics.DockerRubrics.DependsOn
-	}
-
-	// If no dependencies found or unmarshaling failed for a specific type, return
-	if len(dependencies) == 0 {
-		models.StepLogger.Printf("No dependencies found for step %d. Returning empty image details.\n", stepID)
-		return "", "", nil
-	}
-
-	models.StepLogger.Printf("Recursing through dependencies for step %d: %v\n", stepID, dependencies)
-	for _, dep := range dependencies {
-		models.StepLogger.Printf("Checking dependency step %d for step %d\n", dep.ID, stepID)
-		imageID, imageTag, err := findImageDetailsRecursive(db, dep.ID, visited)
-		if err != nil {
-			models.StepLogger.Printf("Error in sub-dependency branch of step %d (from step %d): %v\n", dep.ID, stepID, err)
-			continue
-		}
-		if imageID != "" && imageTag != "" {
-			models.StepLogger.Printf("Found image details in dependency step %d: %s:%s (from step %d). Returning.\n", dep.ID, imageID, imageTag, stepID)
-			return imageID, imageTag, nil // Found it!
-		}
-	}
-
-	models.StepLogger.Printf("Image details not found in step %d or its dependencies. Returning empty.\n", stepID)
-	return "", "", nil // Not found in this branch
 }
 
 func findContainerByImageTag(imageTag string) (string, string, error) {

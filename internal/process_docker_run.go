@@ -34,12 +34,20 @@ func processDockerRunSteps(db *sql.DB) error {
 			continue
 		}
 
-		var config models.DockerRunConfig
-		if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
-			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid docker run config"})
-			models.StepLogger.Printf("Step %d: invalid docker run config: %v\n", step.StepID, err)
+		var configHolder models.StepConfigHolder
+		if err := json.Unmarshal([]byte(step.Settings), &configHolder); err != nil {
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid step config"})
+			models.StepLogger.Printf("Step %d: invalid step config: %v\n", step.StepID, err)
 			continue
 		}
+
+		config := configHolder.DockerRun
+		if config == nil {
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "docker_run config not found"})
+			models.StepLogger.Printf("Step %d: docker_run config not found in step settings\n", step.StepID)
+			continue
+		}
+		models.StepLogger.Printf("Step %d: Unmarshaled DockerRunConfig Parameters: %+v\n", step.StepID, config.Parameters)
 
 		ok, err := models.CheckDependencies(db, &step)
 		if err != nil {
@@ -51,45 +59,22 @@ func processDockerRunSteps(db *sql.DB) error {
 			continue
 		}
 
-		var imageIDToUse string
-		var buildStepImageID string
-
-		for _, dep := range config.DependsOn {
-			depInfoStr, err := models.GetStepInfo(db, dep.ID)
-			var depInfo map[string]interface{}
-			if err == nil {
-				err = json.Unmarshal([]byte(depInfoStr), &depInfo)
-			}
-			if err != nil {
-				models.StepLogger.Printf("Step %d: Error getting info for dependency step %d: %v\n", step.StepID, dep.ID, err)
-				continue
-			}
-			if depSettings, ok := depInfo["docker_build"].(map[string]interface{}); ok {
-				if id, ok := depSettings["image_id"].(string); ok && id != "" && id != "sha256:" {
-					buildStepImageID = id
-					models.StepLogger.Printf("Step %d: Found image_id '%s' from build dependency step %d\n", step.StepID, buildStepImageID, dep.ID)
-					break
-				}
-			}
+		imageIDToUse, imageTagToUse, err := models.FindImageDetailsRecursive(db, step.StepID, make(map[int]bool), models.StepLogger)
+		if err != nil {
+			models.StepLogger.Printf("Step %d: Error finding image details recursively: %v\n", step.StepID, err)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("Error finding image details: %v", err)})
+			continue
 		}
 
-		if buildStepImageID != "" {
-			imageIDToUse = buildStepImageID
-			models.StepLogger.Printf("Step %d: Prioritizing image_id '%s' from build dependency.\n", step.StepID, imageIDToUse)
-		} else {
-			models.StepLogger.Printf("Step %d: No build dependency with a valid image_id found. Falling back to inspecting tag '%s'.\n", step.StepID, config.ImageTag)
-			currentImageID, _, err := models.GetDockerImageID(db, step.StepID, models.StepLogger)
-			if err != nil {
-				models.StepLogger.Printf("Step %d: error getting current image ID by tag: %v\n", step.StepID, err)
-				continue
-			}
-			if currentImageID == "" {
-				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "no image found with tag: " + config.ImageTag})
-				models.StepLogger.Printf("Step %d: no image found with tag %s\n", step.StepID, config.ImageTag)
-				continue
-			}
-			imageIDToUse = currentImageID
+		if imageIDToUse == "" || imageTagToUse == "" {
+			models.StepLogger.Printf("Step %d: No valid image_id or image_tag found from dependencies.\n", step.StepID)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "no valid image_id or image_tag found from dependencies"})
+			continue
 		}
+
+		// Update config with the found image details
+		config.ImageID = imageIDToUse
+		config.ImageTag = imageTagToUse
 
 		if config.ImageID != imageIDToUse {
 			models.StepLogger.Printf("Step %d: Stored image_id ('%s') is outdated. Updating to '%s' and skipping this run.\n", step.StepID, config.ImageID, imageIDToUse)
@@ -184,7 +169,11 @@ func processDockerRunSteps(db *sql.DB) error {
 
 		processedDockerRunParams := []string{}
 		for _, param := range dockerRunParams {
-			replacedParam := strings.Replace(param, "%%IMAGETAG%%", imageIDToUse, -1)
+			// If KeepForever is true, and the parameter is "--rm", skip it.
+			if config.KeepForever && param == "--rm" {
+				continue
+			}
+			replacedParam := strings.Replace(param, "%%IMAGETAG%%", imageTagToUse, -1)
 			processedDockerRunParams = append(processedDockerRunParams, strings.Fields(replacedParam)...)
 		}
 
@@ -229,7 +218,8 @@ func processDockerRunSteps(db *sql.DB) error {
 			models.StepLogger.Printf("Step %d: command 'docker run %v' succeeded. Container ID: %s, Name: %s\n", step.StepID, detachedParams, newContainerID, containerName)
 			config.ContainerID = newContainerID
 			config.ContainerName = containerName
-			config.ImageID = imageIDToUse // Ensure the used ImageID is saved
+			config.ImageID = imageIDToUse
+			config.ImageTag = imageTagToUse // Ensure the used ImageTag is saved
 
 			newSettingsJSON, marshalErr := json.Marshal(config)
 			if marshalErr != nil {

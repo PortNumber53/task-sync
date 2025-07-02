@@ -142,7 +142,9 @@ func processDockerPoolSteps(db *sql.DB) error {
 		if len(runningContainers) == numContainers {
 			models.StepLogger.Printf("Step %d: All %d containers are already running with the correct image.\n", step.StepID, numContainers)
 			config.Containers = runningContainers
-			updatedSettingsJSON, _ := json.Marshal(config)
+			// Update the config in the holder to maintain proper structure
+			configHolder.DockerPool = config
+			updatedSettingsJSON, _ := json.Marshal(configHolder)
 			models.StoreStepResult(db, step.StepID, map[string]interface{}{
 				"result":     "success",
 				"message":    "All containers already running and DB state confirmed.",

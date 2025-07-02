@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PortNumber53/task-sync/pkg/models"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -56,6 +57,9 @@ func RunAPIServer(listenAddr string) error {
 	doneChan := make(chan struct{})
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	// Initialize the models package logger
+	models.InitStepLogger(os.Stdout)
 
 	// Start step executor in a goroutine
 	go func(db *sql.DB) {

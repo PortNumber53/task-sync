@@ -3,6 +3,7 @@ repo.tar.gz
 Dockerfile
 held_out_tests.patch
 solution*.patch
+rubrics.mhtml
 
 tmp/
 

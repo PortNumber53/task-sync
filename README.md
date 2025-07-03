@@ -301,6 +301,35 @@ Monitors specified files for changes by comparing their content hashes. This ste
 }'
 ```
 
+### 8. `rubrics_import`
+
+Parses an MHTML file containing rubric criteria and generates a Markdown file (`TASK_DATA.md`) with the extracted information. This is useful for automating the creation of structured task data from external rubric definitions.
+
+**Settings:**
+
+```json
+{
+  "rubrics_import": {
+    "mhtml_file": "rubrics.mhtml",
+    "md_file": "TASK_DATA.md"
+  }
+}
+```
+
+- `mhtml_file`: The path to the MHTML file containing the rubric.
+- `md_file`: The desired name for the output Markdown file (`TASK_DATA.md`).
+
+**Example CLI Command:**
+
+```bash
+./task-sync step create --task-id 1 --title "Import Rubric" --settings '{
+  "rubrics_import": {
+    "mhtml_file": "path/to/your/rubrics.mhtml",
+    "md_file": "TASK_DATA.md"
+  }
+}'
+```
+
 ### 7. `dynamic_rubric`
 
 Parses a rubric file (in Markdown format) and generates child steps based on its content. This is highly useful for automated grading and dynamic task generation.

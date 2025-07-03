@@ -190,7 +190,7 @@ Available Commands:
   edit       Edit a step's settings
   info       Show detailed information about a step
   list       List all steps
-
+  run        Run a specific step by ID
 
 Use "task-sync step <command> --help" for more information about a command.
 `
@@ -313,4 +313,11 @@ Examples:
   # Start server on all network interfaces
   task-sync serve --remote`
 	fmt.Println(helpText)
+}
+
+// PrintStepRunIDHelp prints help for the step run command
+func PrintStepRunIDHelp() {
+	fmt.Println("step run command help:")
+	fmt.Println("  Usage: task-sync step run <step_id>")
+	fmt.Println("  Description: Run a specific step by providing its ID.")
 }

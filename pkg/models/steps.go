@@ -12,11 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
+	"sort"
 	"strings"
 
-	"github.com/lib/pq"
 )
 
 // StepExec holds the necessary information for executing a step.
@@ -82,6 +81,7 @@ type Criterion struct {
 	Required    bool
 	Rubric      string
 	HeldOutTest string
+	Counter     string
 }
 
 func ParseRubric(filePath string) ([]Criterion, error) {
@@ -167,6 +167,13 @@ type FileExistsConfig struct {
 	FileExists []string `json:"file_exists"`
 }
 
+// RubricsImportConfig represents the configuration for a rubrics_import step.
+type RubricsImportConfig struct {
+	MHTMLFile string `json:"mhtml_file"`
+	MDFile    string `json:"md_file"`
+	DependsOn []Dependency `json:"depends_on,omitempty"`
+}
+
 // DockerRubricsConfig represents the configuration for a docker_rubrics step.
 type DockerRubricsConfig struct {
 	DockerRubrics struct {
@@ -210,6 +217,7 @@ type StepConfigHolder struct {
 	DynamicRubric *DynamicRubricConfig `json:"dynamic_rubric,omitempty"`
 	DynamicLab    *DynamicLabConfig    `json:"dynamic_lab,omitempty"`
 	FileExists    *FileExistsConfig    `json:"file_exists,omitempty"`
+	RubricsImport *RubricsImportConfig `json:"rubrics_import,omitempty"`
 	DockerRubrics *DockerRubricsConfig `json:"docker_rubrics,omitempty"`
 }
 
@@ -424,7 +432,7 @@ func ClearStepResults(db *sql.DB, stepID int) error {
 // StoreStepResult stores the execution result of a step
 func StoreStepResult(db *sql.DB, stepID int, result map[string]interface{}) error {
 	resJson, _ := json.Marshal(result)
-	resultExec, err := db.Exec(`UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2`, string(resJson), stepID)
+	resultExec, err := db.Exec(`UPDATE steps SET results = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, string(resJson), stepID)
 	if err != nil {
 		return fmt.Errorf("failed to update results for step %d: %w", stepID, err)
 	}
@@ -441,11 +449,18 @@ func StoreStepResult(db *sql.DB, stepID int, result map[string]interface{}) erro
 // CheckDependencies checks if all dependencies for a given step are met.
 func CheckDependencies(db *sql.DB, stepExec *StepExec) (bool, error) {
 	// Query to get the 'depends_on' array from the step's settings
-	var dependsOnJSON string
-	query := `SELECT COALESCE((SELECT value FROM jsonb_each(settings) WHERE key = 'depends_on'), '[]'::jsonb)::text FROM steps WHERE id = $1`
-	err := db.QueryRow(query, stepExec.StepID).Scan(&dependsOnJSON)
+	var dependsOnSQL sql.NullString
+	query := `SELECT settings->'depends_on' FROM steps WHERE id = $1`
+	err := db.QueryRow(query, stepExec.StepID).Scan(&dependsOnSQL)
 	if err != nil {
 		return false, fmt.Errorf("failed to query depends_on for step %d: %w", stepExec.StepID, err)
+	}
+
+	var dependsOnJSON string
+	if dependsOnSQL.Valid {
+		dependsOnJSON = dependsOnSQL.String
+	} else {
+		dependsOnJSON = "[]" // Default to empty array if depends_on is NULL
 	}
 
 	var dependencies []Dependency
@@ -467,12 +482,22 @@ func CheckDependencies(db *sql.DB, stepExec *StepExec) (bool, error) {
 	// This includes steps with NULL results or results where 'result' is not 'success'
 	checkQuery := `SELECT NOT EXISTS(
 		SELECT 1 FROM steps s
-		WHERE s.id = ANY($1::int[])
+		WHERE s.id IN (?)
 		AND (s.results->>'result' IS NULL OR s.results->>'result' != 'success')
 	)`
 
+	// Build the IN clause dynamically
+	placeholders := make([]string, len(depIDs))
+	args := make([]interface{}, len(depIDs))
+	for i, id := range depIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	
+	checkQuery = strings.Replace(checkQuery, "IN (?)", "IN ("+strings.Join(placeholders, ",")+ ")", 1)
+
 	var allDependenciesMet bool
-	err = db.QueryRow(checkQuery, pq.Array(depIDs)).Scan(&allDependenciesMet)
+	err = db.QueryRow(checkQuery, args...).Scan(&allDependenciesMet)
 	if err != nil {
 		return false, fmt.Errorf("failed to check status of dependent steps for step %d: %w", stepExec.StepID, err)
 	}
@@ -537,15 +562,21 @@ func GeneratedStepsExist(db *sql.DB, generatedByStepID int) (bool, error) {
 // CreateStep inserts a new step for a task and returns the new step's ID.
 func CreateStep(db *sql.DB, taskRef, title, settings string) (int, error) {
 	var taskID int
-	err := db.QueryRow("SELECT id FROM tasks WHERE ref = $1", taskRef).Scan(&taskID)
+	// Convert taskRef (string) to int for querying by ID
+	id, err := strconv.Atoi(taskRef)
 	if err != nil {
-		return 0, fmt.Errorf("error finding task by ref: %w", err)
+		return 0, fmt.Errorf("invalid task ID: %w", err)
+	}
+
+	err = db.QueryRow("SELECT id FROM tasks WHERE id = $1", id).Scan(&taskID)
+	if err != nil {
+		return 0, fmt.Errorf("error finding task by ID: %w", err)
 	}
 
 	var stepID int
 	err = db.QueryRow(
 		`INSERT INTO steps (task_id, title, settings, created_at, updated_at)
-		 VALUES ($1, $2, $3::jsonb, now(), now())
+		 VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		 RETURNING id`,
 		taskID, title, settings,
 	).Scan(&stepID)

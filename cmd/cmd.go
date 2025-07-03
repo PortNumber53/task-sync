@@ -93,6 +93,8 @@ func HandleStep() {
 			helpPkg.PrintStepEditHelp()
 		case "info":
 			helpPkg.PrintStepInfoHelp()
+		case "run":
+			helpPkg.PrintStepRunIDHelp()
 		default:
 			helpPkg.PrintStepHelp()
 		}
@@ -129,6 +131,8 @@ func HandleStep() {
 		HandleStepInfo(db)
 	case "copy":
 		HandleStepCopy(db)
+	case "run":
+		HandleStepRunID(db)
 	default:
 		fmt.Printf("Unknown step subcommand: %s\n", subcommand)
 		helpPkg.PrintStepHelp()
@@ -457,4 +461,26 @@ func HandleMigrate() {
 		fmt.Printf("Error running migration command '%s': %v\n", subcommand, err)
 		os.Exit(1)
 	}
+}
+
+func HandleStepRunID(db *sql.DB) {
+	if len(os.Args) < 4 {
+		fmt.Println("Error: run subcommand requires a step ID.")
+		helpPkg.PrintStepRunIDHelp()
+		os.Exit(1)
+	}
+
+	stepIDStr := os.Args[3]
+	stepID, err := strconv.Atoi(stepIDStr)
+	if err != nil {
+		fmt.Printf("Error: invalid step ID '%s'. Must be an integer.\n", stepIDStr)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Running step ID %d...\n", stepID)
+	if err := internal.ProcessSpecificStep(db, stepID); err != nil {
+		fmt.Printf("Error processing step: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Step processed successfully.")
 }

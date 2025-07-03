@@ -232,8 +232,14 @@ type RubricShellConfig struct {
 
 // RubricSetConfig represents the configuration for a rubric_set step.
 type RubricSetConfig struct {
-	MarkdownFile string       `json:"file"`  // Updated to match the 'file' key in step settings for correct unmarshaling
-	DependsOn    []Dependency `json:"depends_on,omitempty"`
+	File        string            `json:"file"`
+	HeldOutTest string            `json:"held_out_test,omitempty"`
+	Solution1   string            `json:"solution_1,omitempty"`
+	Solution2   string            `json:"solution_2,omitempty"`
+	Solution3   string            `json:"solution_3,omitempty"`
+	Solution4   string            `json:"solution_4,omitempty"`
+	Hashes      map[string]string `json:"hashes,omitempty"`
+	DependsOn   []Dependency      `json:"depends_on,omitempty"`
 }
 
 // DependencyHolder is a helper struct for unmarshaling nested dependencies

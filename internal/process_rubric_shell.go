@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/PortNumber53/task-sync/pkg/models"
 )
@@ -69,8 +70,65 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		return fmt.Errorf("no container found in docker_pool for rubric_shell step %d", stepExec.StepID)
 	}
 
+	// Get the rubric_set configuration from dependencies
+	rubricSetConfig, err := models.GetRubricSetFromDependencies(db, stepExec.StepID, stepLogger)
+	if err != nil {
+		return fmt.Errorf("failed to get rubric_set from dependencies: %w", err)
+	}
+
+	// If a rubric_set is found, clean the repo and apply patches
+	if rubricSetConfig != nil {
+		stepLogger.Println("Found rubric_set config, preparing to clean repo and apply patches.")
+
+		// Helper function to execute shell commands
+		executeCommand := func(command, description string) error {
+			stepLogger.Printf("Executing command for '%s': %s", description, command)
+			cmd := exec.Command("sh", "-c", command)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				stepLogger.Printf("Error %s: %v, Output: %s", description, err, output)
+				return fmt.Errorf("failed to %s: %w. Output: %s", description, err, output)
+			}
+			stepLogger.Printf("Successfully executed: %s. Output: %s", description, output)
+			return nil
+		}
+
+		// Clean the git repository
+		cleanCmd := fmt.Sprintf(`docker exec -w /app/ansible %s sh -c "pwd && git reset --hard HEAD && git clean -fdx"`, containerName)
+		if err := executeCommand(cleanCmd, "clean git repo"); err != nil {
+			return err
+		}
+
+		// Apply patches
+		patchFiles := []string{rubricSetConfig.Solution1, rubricSetConfig.HeldOutTest}
+		for _, patchFile := range patchFiles {
+			if patchFile == "" {
+				continue
+			}
+			localPatchPath := filepath.Join(stepExec.LocalPath, patchFile)
+			if _, err := os.Stat(localPatchPath); os.IsNotExist(err) {
+				stepLogger.Printf("Patch file not found, skipping: %s", localPatchPath)
+				continue
+			}
+
+			// Copy patch to container
+			dockerCpCmd := fmt.Sprintf("docker cp %s %s:/tmp/%s", localPatchPath, containerName, patchFile)
+			if err := executeCommand(dockerCpCmd, fmt.Sprintf("copy patch %s", patchFile)); err != nil {
+				return err
+			}
+
+			// Apply patch in container
+			gitApplyCmd := fmt.Sprintf("docker exec -w /app/ansible %s git apply /tmp/%s", containerName, patchFile)
+			if err := executeCommand(gitApplyCmd, fmt.Sprintf("apply patch %s", patchFile)); err != nil {
+				return err
+			}
+		}
+	} else {
+		stepLogger.Println("No rubric_set config found, skipping patch application.")
+	}
+
 	// Construct the Docker exec command
-	commandLine := fmt.Sprintf("docker exec %s %s", containerName, config.Command)
+	commandLine := fmt.Sprintf("docker exec -w /app/ansible %s %s", containerName, config.Command)
 	stepLogger.Printf("Executing command: %s\n", commandLine)
 
 	// Run the command using os/exec to capture output and errors

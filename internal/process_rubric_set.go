@@ -81,6 +81,10 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 
 		currentHash, err := models.GetSHA256(filePath)
 		if err != nil {
+			if err == models.ErrEmptyFile {
+				stepLogger.Printf("Warning: %s file is empty, skipping: %s", key, filePath)
+				continue // Skip this file
+			}
 			return fmt.Errorf("failed to calculate hash for %s: %w", filePath, err)
 		}
 

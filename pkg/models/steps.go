@@ -16,7 +16,11 @@ import (
 	"sort"
 	"strings"
 
+	"errors"
 )
+
+// ErrEmptyFile is returned when a file is empty.
+var ErrEmptyFile = errors.New("file is empty")
 
 // StepExec holds the necessary information for executing a step.
 // It's populated from a database query joining steps and tasks.
@@ -260,7 +264,6 @@ type DynamicLabConfig struct {
 		Command       []string     `json:"command"`
 		ContainerID   string       `json:"container_id"`
 		ContainerName string       `json:"container_name"`
-		Parameters    []string     `json:"parameters"`
 		DependsOn     []Dependency `json:"depends_on,omitempty"`
 	} `json:"dynamic_lab"`
 }
@@ -278,6 +281,45 @@ type StepConfigHolder struct {
 	DockerRubrics *DockerRubricsConfig `json:"docker_rubrics,omitempty"`
 	RubricShell   *RubricShellConfig   `json:"rubric_shell,omitempty"`
 	RubricSet     *RubricSetConfig     `json:"rubric_set,omitempty"`
+}
+
+// AllDependencies collects and returns all `depends_on` entries from the held configurations.
+func (h *StepConfigHolder) AllDependencies() []Dependency {
+	var deps []Dependency
+	if h.DockerBuild != nil {
+		deps = append(deps, h.DockerBuild.DependsOn...)
+	}
+	if h.DockerPull != nil {
+		deps = append(deps, h.DockerPull.DependsOn...)
+	}
+	if h.DockerRun != nil {
+		deps = append(deps, h.DockerRun.DependsOn...)
+	}
+	if h.DockerPool != nil {
+		deps = append(deps, h.DockerPool.DependsOn...)
+	}
+	if h.DockerShell != nil {
+		deps = append(deps, h.DockerShell.DependsOn...)
+	}
+	if h.DynamicRubric != nil {
+		deps = append(deps, h.DynamicRubric.DynamicRubric.DependsOn...)
+	}
+	if h.DynamicLab != nil {
+		deps = append(deps, h.DynamicLab.DynamicLab.DependsOn...)
+	}
+	if h.RubricsImport != nil {
+		deps = append(deps, h.RubricsImport.DependsOn...)
+	}
+	if h.DockerRubrics != nil {
+		deps = append(deps, h.DockerRubrics.DockerRubrics.DependsOn...)
+	}
+	if h.RubricShell != nil {
+		deps = append(deps, h.RubricShell.DependsOn...)
+	}
+	if h.RubricSet != nil {
+		deps = append(deps, h.RubricSet.DependsOn...)
+	}
+	return deps
 }
 
 // --- Detail Structs ---
@@ -876,6 +918,41 @@ func GetContainerID(db *sql.DB, stepID int, stepLogger *log.Logger) (containerID
 	return contID, nil
 }
 
+// GetRubricSetFromDependencies recursively searches for a rubric_set step in the dependency tree.
+func GetRubricSetFromDependencies(db *sql.DB, stepID int, stepLogger *log.Logger) (*RubricSetConfig, error) {
+	var settings string
+	err := db.QueryRow("SELECT settings FROM steps WHERE id = $1", stepID).Scan(&settings)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // Step not found, not an error
+		}
+		return nil, fmt.Errorf("failed to query step %d: %w", stepID, err)
+	}
+
+	var holder StepConfigHolder
+	if err := json.Unmarshal([]byte(settings), &holder); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal settings for step %d: %w", stepID, err)
+	}
+
+	if holder.RubricSet != nil {
+		return holder.RubricSet, nil
+	}
+
+	// If not found, recurse through dependencies
+	for _, dep := range holder.AllDependencies() {
+		rubricSet, err := GetRubricSetFromDependencies(db, dep.ID, stepLogger)
+		if err != nil {
+			stepLogger.Printf("Error searching for rubric_set in dependency %d: %v", dep.ID, err)
+			continue // Log error and continue searching other branches
+		}
+		if rubricSet != nil {
+			return rubricSet, nil // Found in a dependency branch
+		}
+	}
+
+	return nil, nil // Not found in this branch
+}
+
 // GetContainerName is a helper function to extract container_name from a step's settings.
 // It recursively checks dependencies if not found in the current step.
 func GetContainerName(db *sql.DB, stepID int, stepLogger *log.Logger) (containerName string, err error) {
@@ -886,13 +963,22 @@ func GetContainerName(db *sql.DB, stepID int, stepLogger *log.Logger) (container
 	return contName, nil
 }
 
-// getSHA256 calculates the SHA256 hash of a file.
+// GetSHA256 calculates the SHA256 hash of a file, returning ErrEmptyFile if it's empty.
 func GetSHA256(filePath string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open file %s: %w", filePath, err)
 	}
 	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("failed to get file info for %s: %w", filePath, err)
+	}
+
+	if info.Size() == 0 {
+		return "", ErrEmptyFile
+	}
 
 	h := sha256.New()
 	if _, err := io.Copy(h, file); err != nil {

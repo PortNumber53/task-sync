@@ -119,7 +119,7 @@ func processDockerRubricsSteps(db *sql.DB) {
 		for _, dep := range config.DockerRubrics.DependsOn {
 			depInfo, err := models.GetStepInfo(db, dep.ID)
 			if err != nil {
-				models.StepLogger.Printf("Step %d: Error getting info for dependency step %d: %v\n", step.StepID, dep.ID, err)
+				models.StepLogger.Printf("Step %d: Error getting info for step %d: %v\n", step.StepID, dep.ID, err)
 				continue
 			}
 			var depConfig models.StepConfigHolder
@@ -129,7 +129,7 @@ func processDockerRubricsSteps(db *sql.DB) {
 			}
 			if depConfig.DockerBuild != nil && depConfig.DockerBuild.ImageID != "" {
 				buildStepImageID = depConfig.DockerBuild.ImageID
-				models.StepLogger.Printf("Step %d: Found image_id '%s' from build dependency step %d\n", step.StepID, buildStepImageID, dep.ID)
+				models.StepLogger.Printf("Step %d: Found image_id '%s' from build step %d\n", step.StepID, buildStepImageID, dep.ID)
 				break
 			}
 		}
@@ -137,9 +137,9 @@ func processDockerRubricsSteps(db *sql.DB) {
 		// 2. Decide which image ID to use
 		if buildStepImageID != "" {
 			imageIDToUse = buildStepImageID
-			models.StepLogger.Printf("Step %d: Prioritizing image_id '%s' from build dependency.\n", step.StepID, imageIDToUse)
+			models.StepLogger.Printf("Step %d: Prioritizing image_id '%s' from build step.\n", step.StepID, imageIDToUse)
 		} else {
-			models.StepLogger.Printf("Step %d: No build dependency with a valid image_id found. Falling back to inspecting tag '%s'.\n", step.StepID, config.DockerRubrics.ImageTag)
+			models.StepLogger.Printf("Step %d: No build step with a valid image_id found. Falling back to inspecting tag '%s'.\n", step.StepID, config.DockerRubrics.ImageTag)
 			currentImageID, err := getDockerImageID(config.DockerRubrics.ImageTag)
 			if err != nil {
 				models.StepLogger.Printf("Step %d: error getting current image ID by tag: %v\n", step.StepID, err)
@@ -161,7 +161,7 @@ func processDockerRubricsSteps(db *sql.DB) {
 			if err != nil {
 				models.StepLogger.Printf("Step %d: Failed to update settings with new image_id: %v\n", step.StepID, err)
 			}
-			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "pending", "message": "Image ID updated from dependency, will run next cycle."})
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "pending", "message": "Image ID updated from build step, will run next cycle."})
 			continue // Skip to next step, will run correctly on next execution cycle
 		}
 		// --- End of new Image ID logic ---

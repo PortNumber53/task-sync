@@ -65,8 +65,8 @@ func (d *defaultRubricParser) RunRubric(localPath, file, hash string) ([]models.
 
 // Default implementations
 var (
-	fileSystemImpl    fileSystem    = &defaultFileSystem{}
-	rubricParserImpl  rubricParser  = &defaultRubricParser{}
+	fileSystemImpl   fileSystem   = &defaultFileSystem{}
+	rubricParserImpl rubricParser = &defaultRubricParser{}
 )
 
 // Run is a convenience function that uses the default file system implementation

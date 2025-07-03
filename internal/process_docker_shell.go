@@ -53,33 +53,23 @@ func processDockerShellSteps(db *sql.DB) {
 			continue
 		}
 
-		// Inherit image_id and image_tag from dependencies if not specified
-		if config.Docker.ImageID == "" || config.Docker.ImageTag == "" {
-			var imageID, imageTag string
-			// Search through direct dependencies
-			for _, dep := range config.DependsOn {
-				id, tag, err := models.FindImageDetailsRecursive(db, dep.ID, make(map[int]bool), models.StepLogger)
-				if err != nil {
-					models.StepLogger.Printf("Step %d: error searching for image details in dependency %d: %v", stepID, dep.ID, err)
-					continue // Try next dependency
-				}
-				if id != "" {
-					imageID = id
-					imageTag = tag
-					models.StepLogger.Printf("Step %d: Found ImageID '%s' and ImageTag '%s' from dependency step %d\n", stepID, imageID, imageTag, dep.ID)
-					break // Found it, stop searching
-				}
-			}
-
-			if imageID != "" {
-				config.Docker.ImageID = imageID
-				config.Docker.ImageTag = imageTag
-				models.StepLogger.Printf("Step %d: Inherited ImageID '%s' and ImageTag '%s' from dependency chain\n", stepID, imageID, imageTag)
-			}
+		// Remove dependency loop and directly use task settings for the current step
+		imageHash, imageTag, err := models.FindImageDetailsRecursive(db, stepID, models.StepLogger)
+		if err != nil {
+			models.StepLogger.Printf("Step %d: Error finding image details: %v\n", stepID, err)
+			models.StoreStepResult(db, stepID, map[string]interface{}{"result": "failure", "message": "Error retrieving image details"})
+			continue
 		}
+		if imageHash == "" || imageTag == "" {
+			models.StepLogger.Printf("Step %d: No image details found in task settings\n", stepID)
+			models.StoreStepResult(db, stepID, map[string]interface{}{"result": "failure", "message": "Missing image details in task settings"})
+			continue
+		}
+		// Use imageHash and imageTag directly for the step
+		models.StepLogger.Printf("Step %d: Using image_hash '%s' and image_tag '%s' from task settings\n", stepID, imageHash, imageTag)
 
-		targetImageTag := config.Docker.ImageTag
-		expectedImageHash := config.Docker.ImageID
+		targetImageTag := imageTag
+		expectedImageHash := imageHash
 
 		if targetImageTag == "" || expectedImageHash == "" {
 			msg := "docker_shell settings must include both an image_tag and an image_id"
@@ -96,8 +86,11 @@ func processDockerShellSteps(db *sql.DB) {
 			continue
 		}
 
-		if !strings.HasPrefix(actualImageHash, expectedImageHash) {
-			msg := fmt.Sprintf("image hash mismatch for %s. Expected prefix '%s', got '%s'", targetImageTag, expectedImageHash, actualImageHash)
+		expectedTrimmed := strings.TrimPrefix(strings.TrimSpace(expectedImageHash), "sha256:")
+		actualTrimmed := strings.TrimPrefix(strings.TrimSpace(actualImageHash), "sha256:")
+		models.StepLogger.Printf("Step %d: Debugging hash comparison for %s - Expected (trimmed): '%s', Actual (trimmed): '%s'\n", stepID, targetImageTag, expectedTrimmed, actualTrimmed)
+		if expectedTrimmed != actualTrimmed {
+			msg := fmt.Sprintf("image hash mismatch for %s. Expected '%s', got '%s' after trimming", targetImageTag, expectedTrimmed, actualTrimmed)
 			models.StoreStepResult(db, stepID, map[string]interface{}{"result": "failure", "message": msg})
 			models.StepLogger.Printf("Step %d: %s\n", stepID, msg)
 			continue

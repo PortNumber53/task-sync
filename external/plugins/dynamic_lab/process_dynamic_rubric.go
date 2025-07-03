@@ -84,14 +84,14 @@ func processDynamicRubricSteps(db *sql.DB) error {
 			var rawResults sql.NullString
 			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", dep.ID).Scan(&rawResults)
 			if err != nil {
-				log.Printf("Step %d: Error getting info for dependency step %d: %v", step.StepID, dep.ID, err)
+				log.Printf("Step %d: Error getting info for step %d: %v", step.StepID, dep.ID, err)
 				continue
 			}
 
 			if rawResults.Valid {
 				var results map[string]interface{}
 				if err := json.Unmarshal([]byte(rawResults.String), &results); err != nil {
-					log.Printf("Error unmarshalling results for dependency step %d: %v", dep.ID, err)
+					log.Printf("Error unmarshalling results for step %d: %v", dep.ID, err)
 					continue
 				}
 

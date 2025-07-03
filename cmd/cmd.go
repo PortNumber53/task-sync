@@ -323,6 +323,9 @@ func HandleTaskInfo() {
 		fmt.Printf("Local Path: %s\n", *info.LocalPath)
 	}
 	fmt.Printf("Created At: %s\nUpdated At: %s\n", info.CreatedAt, info.UpdatedAt)
+	if info.Settings.Valid {
+		fmt.Printf("Settings: %s\n", info.Settings.String)
+	}
 }
 
 func HandleTaskCreate() {

@@ -25,8 +25,6 @@ func executeDockerBuild(workDir string, config *models.DockerBuildConfig, stepID
 	// Add build parameters
 	buildParams = append(buildParams, "-t", config.ImageTag)
 
-
-
 	// Defensive check for empty params
 	if len(buildParams) == 0 {
 		return fmt.Errorf("step %d: docker build params are empty", stepID)

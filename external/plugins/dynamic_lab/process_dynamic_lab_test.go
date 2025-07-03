@@ -72,7 +72,7 @@ func TestProcessDynamicLabSteps_ContainerIdInheritance(t *testing.T) {
 	mock.ExpectQuery("SELECT s.id, s.task_id, s.title, s.settings, COALESCE").WillReturnRows(rows)
 	mock.ExpectQuery("SELECT results FROM steps WHERE id").WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"results"}).AddRow(sql.NullString{String: string(dependencyResults), Valid: true}))
 	mock.ExpectExec(`DELETE FROM steps WHERE settings->'generated_by' \? \$1`).WithArgs("1").WillReturnResult(sqlmock.NewResult(1, 1)) // deleteGeneratedSteps
-	mock.ExpectQuery("SELECT id FROM tasks WHERE").WithArgs("1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1)) // getTaskByID
+	mock.ExpectQuery("SELECT id FROM tasks WHERE").WithArgs("1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))             // getTaskByID
 
 	// This is an INSERT ... RETURNING id, so it's a query
 	mock.ExpectQuery("INSERT INTO steps").WithArgs(1, "crit-1", sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(100))

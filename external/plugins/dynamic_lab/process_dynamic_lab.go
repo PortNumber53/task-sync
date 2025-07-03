@@ -109,7 +109,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 			var rawResults sql.NullString
 			err := db.QueryRow("SELECT results FROM steps WHERE id = $1", currentStepID).Scan(&rawResults)
 			if err != nil {
-				log.Printf("Step %d: Error getting results for dependency step %d: %v", step.StepID, currentStepID, err)
+				log.Printf("Step %d: Error getting results for step %d: %v", step.StepID, currentStepID, err)
 				continue
 			}
 			if rawResults.Valid {
@@ -118,7 +118,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 					if cID, ok := results["container_id"].(string); ok && cID != "" {
 						containerID = cID
 						runStepDependencyID = currentStepID
-						log.Printf("Found container_id '%s' from dependency step %d", containerID, runStepDependencyID)
+						log.Printf("Found container_id '%s' from step %d", containerID, runStepDependencyID)
 						break
 					}
 				}
@@ -127,7 +127,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 			var settingsStr string
 			err = db.QueryRow("SELECT settings FROM steps WHERE id = $1", currentStepID).Scan(&settingsStr)
 			if err != nil {
-				log.Printf("Step %d: Error getting settings for dependency step %d: %v", step.StepID, currentStepID, err)
+				log.Printf("Step %d: Error getting settings for step %d: %v", step.StepID, currentStepID, err)
 				continue
 			}
 

@@ -240,8 +240,6 @@ func TestExecutePendingSteps(t *testing.T) {
 	// Use a channel to record the order of function calls
 	callOrder := make(chan string, 10) // Increased buffer size
 
-
-
 	// Create a map of mock step processors
 	mockStepProcessors := map[string]func(*sql.DB) error{
 		"dynamic_lab": func(db *sql.DB) error {

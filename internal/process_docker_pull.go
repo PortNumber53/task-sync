@@ -40,6 +40,42 @@ func processDockerPullSteps(db *sql.DB) {
 			continue
 		}
 
+		// Debug log for original image_id from step settings
+		models.StepLogger.Printf("Step %d: Original image_id from step settings: '%s'\n", step.StepID, config.ImageID)
+
+		// Fetch and use image details from task settings
+		var imageIDToUse, imageTagToUse string
+		var taskSettingsJSON sql.NullString
+		err = db.QueryRow(`SELECT settings FROM tasks WHERE id = $1`, step.TaskID).Scan(&taskSettingsJSON)
+		if err != nil && err != sql.ErrNoRows {
+			models.StepLogger.Printf("Step %d: failed to get task settings: %v\n", step.StepID, err)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "Error retrieving task settings"})
+			continue
+		} else if taskSettingsJSON.Valid {
+			var taskSettings map[string]interface{}
+			if err := json.Unmarshal([]byte(taskSettingsJSON.String), &taskSettings); err == nil {
+				if dockerInfo, ok := taskSettings["docker"].(map[string]interface{}); ok {
+					if tag, ok := dockerInfo["image_tag"].(string); ok && tag != "" {
+						imageTagToUse = tag
+					} else {
+						models.StepLogger.Printf("Step %d: image_tag not found in task settings\n", step.StepID)
+					}
+					if id, ok := dockerInfo["image_hash"].(string); ok && id != "" {
+						imageIDToUse = id
+					}
+				}
+			}
+		}
+		if imageTagToUse == "" {
+			models.StepLogger.Printf("Step %d: No image_tag found in task settings\n", step.StepID)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "Missing image_tag in task settings"})
+			continue
+		}
+		// Override config with task settings values
+		config.ImageTag = imageTagToUse
+		config.ImageID = imageIDToUse // Set if available, or keep as is if not present
+		models.StepLogger.Printf("Step %d: Overridden image_id to '%s' from task settings\n", step.StepID, config.ImageID)
+
 		// Check dependencies
 		depsMet, err := models.CheckDependencies(db, &step)
 		if err != nil {

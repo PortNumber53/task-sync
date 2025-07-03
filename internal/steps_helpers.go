@@ -36,7 +36,7 @@ type DynamicRubricConfig struct {
 		Hash        string                   `json:"hash,omitempty"`
 		Files       map[string]string        `json:"files,omitempty"`
 		Hashes      map[string]string        `json:"hashes,omitempty"`
-		DependsOn   []models.Dependency     `json:"depends_on,omitempty"`
+		DependsOn   []models.Dependency      `json:"depends_on,omitempty"`
 		Environment DynamicRubricEnvironment `json:"environment,omitempty"`
 	} `json:"dynamic_rubric"`
 }

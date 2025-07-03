@@ -2,6 +2,7 @@ package internal
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,7 @@ type Task struct {
 	LocalPath *string
 	CreatedAt string
 	UpdatedAt string
+	Settings  sql.NullString
 }
 
 // GetTaskInfo fetches a task by ID. Returns (*Task, error). If not found, error is returned.
@@ -77,8 +79,8 @@ func GetTaskInfo(taskID int) (*Task, error) {
 
 	var t Task
 	var localPath sql.NullString
-	err = db.QueryRow(`SELECT id, name, status, local_path, created_at, updated_at FROM tasks WHERE id = $1`, taskID).Scan(
-		&t.ID, &t.Name, &t.Status, &localPath, &t.CreatedAt, &t.UpdatedAt,
+	err = db.QueryRow(`SELECT id, name, status, local_path, created_at, updated_at, settings FROM tasks WHERE id = $1`, taskID).Scan(
+		&t.ID, &t.Name, &t.Status, &localPath, &t.CreatedAt, &t.UpdatedAt, &t.Settings,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("no task found with ID %d", taskID)
@@ -142,94 +144,103 @@ func DeleteTask(taskID int) error {
 }
 
 // EditTask updates specified fields of an existing task.
-// Allowed fields to update are "name", "status", and "localpath".
+// Allowed fields to update are "name", "status", "localpath", "image_tag", and "image_hash".
 func EditTask(db *sql.DB, taskID int, updates map[string]string) error {
-
 	if len(updates) == 0 {
 		return fmt.Errorf("no updates provided")
+	}
+
+	allowedFields := map[string]bool{
+		"name":       true,
+		"status":     true,
+		"localpath":  true,
+		"image_tag":  true,
+		"image_hash": true,
+	}
+
+	// Fetch and update settings JSON for image_tag and image_hash
+	var currentSettingsJSON sql.NullString
+	err := db.QueryRow("SELECT settings FROM tasks WHERE id = $1", taskID).Scan(&currentSettingsJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("task with ID %d not found", taskID)
+		}
+		return fmt.Errorf("failed to fetch settings: %w", err)
+	}
+
+	var taskSettings map[string]interface{}
+	if currentSettingsJSON.Valid {
+		if err := json.Unmarshal([]byte(currentSettingsJSON.String), &taskSettings); err != nil {
+			return fmt.Errorf("failed to unmarshal settings: %w", err)
+		}
+	} else {
+		taskSettings = make(map[string]interface{})
 	}
 
 	var setClauses []string
 	var args []interface{}
 	argCounter := 1
 
-	allowedFields := map[string]bool{
-		"name":      true,
-		"status":    true,
-		"localpath": true,
-	}
-
 	for key, value := range updates {
 		if !allowedFields[key] {
-			return fmt.Errorf("invalid field to update: %s", key)
+			return fmt.Errorf("invalid field: %s", key)
 		}
 
 		switch key {
-		case "name":
-			setClauses = append(setClauses, fmt.Sprintf("name = $%d", argCounter))
+		case "name", "status", "localpath":
+			// Handle direct fields as before
+			setClauses = append(setClauses, fmt.Sprintf("%s = $%d", key, argCounter))
 			args = append(args, value)
 			argCounter++
-		case "status":
-			if !isValidTaskStatus(value) {
-				return fmt.Errorf("invalid status: %s (must be one of active|inactive|disabled|running)", value)
+		case "image_tag", "image_hash":
+			if taskSettings["docker"] == nil {
+				taskSettings["docker"] = make(map[string]interface{})
 			}
-			setClauses = append(setClauses, fmt.Sprintf("status = $%d", argCounter))
-			args = append(args, value)
-			argCounter++
-		case "localpath":
-			if value == "" {
-				setClauses = append(setClauses, fmt.Sprintf("local_path = $%d", argCounter))
-				args = append(args, nil) // Use sql.NullString or pass nil directly for NULL
-			} else {
-				absPath, err := filepath.Abs(value)
-				if err != nil {
-					return fmt.Errorf("invalid local path '%s': %v", value, err)
-				}
-				setClauses = append(setClauses, fmt.Sprintf("local_path = $%d", argCounter))
-				args = append(args, absPath)
+			dockerMap, ok := taskSettings["docker"].(map[string]interface{})
+			if !ok {
+				dockerMap = make(map[string]interface{})
 			}
-			argCounter++
+			dockerMap[key] = value
+			taskSettings["docker"] = dockerMap
 		}
 	}
 
-	if len(setClauses) == 0 {
-		// Should not happen if initial len(updates) > 0 and keys are valid, but as a safeguard.
-		return fmt.Errorf("no valid fields to update provided")
+	// Marshal updated settings
+	updatedSettingsJSON, err := json.Marshal(taskSettings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
+	setClauses = append(setClauses, fmt.Sprintf("settings = $%d", argCounter))
+	args = append(args, string(updatedSettingsJSON))
+	argCounter++
 
-	// Add updated_at to the SET clauses
+	// Add updated_at and WHERE clause
 	setClauses = append(setClauses, "updated_at = now()")
-
 	query := fmt.Sprintf("UPDATE tasks SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argCounter)
 	args = append(args, taskID)
 
+	// Execute update in transaction
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-
-	result, err := tx.Exec(query, args...)
+	res, err := tx.Exec(query, args...)
 	if err != nil {
-		tx.Rollback() // Rollback on exec error
+		tx.Rollback()
 		return fmt.Errorf("failed to update task: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
+	rowsAffected, err := res.RowsAffected()
 	if err != nil {
-		tx.Rollback() // Rollback on error getting rows affected
+		tx.Rollback()
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rowsAffected == 0 {
-		tx.Rollback() // Rollback if no rows affected
-		return fmt.Errorf("task with ID %d not found or no changes made", taskID)
+		tx.Rollback()
+		return fmt.Errorf("task not found or no changes made")
 	}
 
-	if err := tx.Commit(); err != nil {
-		// If commit fails, the transaction is effectively rolled back by the DB.
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	return nil
+	return tx.Commit()
 }
 
 func ListTasks() error {

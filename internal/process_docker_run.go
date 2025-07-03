@@ -59,35 +59,58 @@ func processDockerRunSteps(db *sql.DB) error {
 			continue
 		}
 
-		imageIDToUse, imageTagToUse, err := models.FindImageDetailsRecursive(db, step.StepID, make(map[int]bool), models.StepLogger)
-		if err != nil {
-			models.StepLogger.Printf("Step %d: Error finding image details recursively: %v\n", step.StepID, err)
-			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("Error finding image details: %v", err)})
+		// First check if task settings has Docker image information
+		var imageIDToUse, imageTagToUse string
+		var taskSettingsJSON sql.NullString
+		err = db.QueryRow(`SELECT settings FROM tasks WHERE id = $1`, step.TaskID).Scan(&taskSettingsJSON)
+		if err != nil && err != sql.ErrNoRows {
+			models.StepLogger.Printf("Step %d: failed to get task settings: %v\n", step.StepID, err)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("Failed to get task settings: %v", err)})
 			continue
+		} else if taskSettingsJSON.Valid && taskSettingsJSON.String != "" {
+			var taskSettings map[string]interface{}
+			if err := json.Unmarshal([]byte(taskSettingsJSON.String), &taskSettings); err == nil {
+				if dockerInfo, ok := taskSettings["docker"].(map[string]interface{}); ok {
+					if imageHash, ok := dockerInfo["image_hash"].(string); ok && imageHash != "" {
+						imageIDToUse = imageHash
+						models.StepLogger.Printf("Step %d: Found image_hash '%s' in task settings\n", step.StepID, imageIDToUse)
+					}
+					if imageTag, ok := dockerInfo["image_tag"].(string); ok && imageTag != "" {
+						imageTagToUse = imageTag
+						models.StepLogger.Printf("Step %d: Found image_tag '%s' in task settings\n", step.StepID, imageTagToUse)
+					}
+				}
+			}
 		}
 
+		// No fallback to recursion; check if image details are set
 		if imageIDToUse == "" || imageTagToUse == "" {
-			models.StepLogger.Printf("Step %d: No valid image_id or image_tag found from dependencies.\n", step.StepID)
-			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "no valid image_id or image_tag found from dependencies"})
+			models.StepLogger.Printf("Step %d: No valid image_id or image_tag found in task settings. Cannot proceed.\n", step.StepID)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "no valid image_id or image_tag found in task settings"})
 			continue
 		}
 
-		// Update config with the found image details
+		// Set config with image details from task settings
 		config.ImageID = imageIDToUse
 		config.ImageTag = imageTagToUse
 
-		if config.ImageID != imageIDToUse {
-			models.StepLogger.Printf("Step %d: Stored image_id ('%s') is outdated. Updating to '%s' and skipping this run.\n", step.StepID, config.ImageID, imageIDToUse)
-			config.ImageID = imageIDToUse
-			// Update the config in the holder to maintain proper structure
-			configHolder.DockerRun = config
-			updatedSettings, _ := json.Marshal(configHolder)
-			_, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = now() WHERE id = $2`, string(updatedSettings), step.StepID)
+		// Check if image exists locally using docker image inspect
+		cmdInspect := exec.Command("docker", "image", "inspect", config.ImageTag)
+		errInspect := cmdInspect.Run()
+		if errInspect == nil {
+			models.StepLogger.Printf("Step %d: Image %s found locally via inspect, no pull needed\n", step.StepID, config.ImageTag)
+			// Proceed with run
+		} else {
+			models.StepLogger.Printf("Step %d: Image %s not found locally, attempting to pull\n", step.StepID, config.ImageTag)
+			cmdPull := exec.Command("docker", "pull", config.ImageTag)
+			outputPull, err := cmdPull.CombinedOutput()
 			if err != nil {
-				models.StepLogger.Printf("Step %d: Failed to update settings with new image_id: %v\n", step.StepID, err)
+				errorMsg := string(outputPull)
+				models.StepLogger.Printf("Step %d: Failed to pull image %s: %v, Output: %s\n", step.StepID, config.ImageTag, err, errorMsg)
+				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("Failed to pull image: %v, Details: %s", err, errorMsg)})
+				continue
 			}
-			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "pending", "message": "Image ID updated from dependency, will run next cycle."})
-			continue
+			models.StepLogger.Printf("Step %d: Successfully pulled image %s\n", step.StepID, config.ImageTag)
 		}
 
 		// First check if there's any running container with the correct image tag
@@ -98,7 +121,7 @@ func processDockerRunSteps(db *sql.DB) error {
 			if len(containerIDs) > 0 && containerIDs[0] != "" {
 				// Found at least one running container with the correct image tag
 				containerID := containerIDs[0]
-				
+
 				// Get the container name
 				nameCmd := exec.Command("docker", "inspect", "--format", "{{.Name}}", containerID)
 				nameOutput, nameErr := nameCmd.CombinedOutput()
@@ -106,36 +129,36 @@ func processDockerRunSteps(db *sql.DB) error {
 				if nameErr == nil {
 					containerName = strings.TrimPrefix(strings.TrimSpace(string(nameOutput)), "/")
 				}
-				
-				models.StepLogger.Printf("Step %d: Found existing container %s (%s) running with image %s. Using this container.", 
+
+				models.StepLogger.Printf("Step %d: Found existing container %s (%s) running with image %s. Using this container.",
 					step.StepID, containerName, containerID, imageTagToUse)
-				
+
 				// Update the config with the found container
 				config.ContainerID = containerID
 				config.ContainerName = containerName
 				config.ImageID = imageIDToUse
 				config.ImageTag = imageTagToUse
-				
+
 				// Update the config in the holder to maintain proper structure
 				configHolder.DockerRun = config
 				updatedSettingsJSON, _ := json.Marshal(configHolder)
-				
+
 				models.StoreStepResult(db, step.StepID, map[string]interface{}{
 					"result":         "success",
 					"message":        "Found existing container running with correct image. Using this container.",
 					"container_id":   containerID,
 					"container_name": containerName,
 				})
-				
+
 				_, dbErr := db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(updatedSettingsJSON), step.StepID)
 				if dbErr != nil {
 					models.StepLogger.Printf("Step %d: Failed to update step settings for found container: %v\n", step.StepID, dbErr)
 				}
-				
+
 				continue
 			}
 		}
-		
+
 		// If we didn't find an existing container, check if the one in our config is still running
 		if config.ContainerID != "" {
 			inspectCmd := exec.Command("docker", "inspect", config.ContainerID)

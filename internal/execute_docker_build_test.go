@@ -13,6 +13,8 @@ import (
 
 // TestExecuteDockerBuild tests the executeDockerBuild function.
 func TestExecuteDockerBuild(t *testing.T) {
+	// Initialize models.StepLogger
+	models.InitStepLogger(log.Writer())
 	// Initialize the stepLogger to avoid a nil pointer dereference in the function under test.
 	// A testWriter is used to discard log output, keeping test results clean.
 	stepLogger = log.New(testWriter{}, "", 0)
@@ -37,9 +39,9 @@ func TestExecuteDockerBuild(t *testing.T) {
 		{
 			name: "success",
 			config: &models.DockerBuildConfig{
-					ImageTag: "test-image:latest",
-					ImageID:  "",
-				},
+				ImageTag: "test-image:latest",
+				ImageID:  "",
+			},
 			stepID:    1,
 			db:        nil,
 			expectErr: false,
@@ -47,9 +49,9 @@ func TestExecuteDockerBuild(t *testing.T) {
 		{
 			name: "build failure",
 			config: &models.DockerBuildConfig{
-					ImageTag: "fail-image:latest",
-					ImageID:  "",
-				},
+				ImageTag: "fail-image:latest",
+				ImageID:  "",
+			},
 			stepID:      1,
 			db:          nil,
 			expectErr:   true,

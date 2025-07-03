@@ -33,23 +33,23 @@ type StepExec struct {
 
 // DockerBuildConfig represents the configuration for a docker_build step.
 type DockerBuildConfig struct {
-	ImageID   string            `json:"image_id,omitempty"`
-	ImageTag  string            `json:"image_tag,omitempty"`
-	DependsOn []Dependency      `json:"depends_on,omitempty"`
-	Files     map[string]string `json:"files,omitempty"`
-	Parameters []string `json:"parameters,omitempty"`
+	ImageID    string            `json:"image_id,omitempty"`
+	ImageTag   string            `json:"image_tag,omitempty"`
+	DependsOn  []Dependency      `json:"depends_on,omitempty"`
+	Files      map[string]string `json:"files,omitempty"`
+	Parameters []string          `json:"parameters,omitempty"`
 }
 
 type DockerPullConfig struct {
-	ImageID   string       `json:"image_id,omitempty"`
-	ImageTag  string       `json:"image_tag,omitempty"`
-	DependsOn []Dependency `json:"depends_on,omitempty"`
-	PreventRunBefore string `json:"prevent_run_before,omitempty"`
+	ImageID          string       `json:"image_id,omitempty"`
+	ImageTag         string       `json:"image_tag,omitempty"`
+	DependsOn        []Dependency `json:"depends_on,omitempty"`
+	PreventRunBefore string       `json:"prevent_run_before,omitempty"`
 }
 
 type DockerRunConfig struct {
-	ImageID       string       `json:"image_id,omitempty"`
-	ImageTag      string       `json:"image_tag,omitempty"`
+	ImageID       string       `json:"-"`
+	ImageTag      string       `json:"-"`
 	DependsOn     []Dependency `json:"depends_on,omitempty"`
 	ContainerID   string       `json:"container_id,omitempty"`
 	ContainerName string       `json:"container_name,omitempty"`
@@ -58,21 +58,21 @@ type DockerRunConfig struct {
 }
 
 type DockerPoolConfig struct {
-	ImageID      string         `json:"image_id,omitempty"`
-	ImageTag     string         `json:"image_tag,omitempty"`
-	DependsOn    []Dependency   `json:"depends_on,omitempty"`
-	PoolSize     int            `json:"pool_size,omitempty"`
-	Containers   []ContainerInfo `json:"containers,omitempty"`
-	Parameters   []string       `json:"parameters,omitempty"`
-	KeepForever  bool           `json:"keep_forever,omitempty"`
+	ImageID     string          `json:"-"`
+	ImageTag    string          `json:"-"`
+	DependsOn   []Dependency    `json:"depends_on,omitempty"`
+	PoolSize    int             `json:"pool_size,omitempty"`
+	Containers  []ContainerInfo `json:"containers,omitempty"`
+	Parameters  []string        `json:"parameters,omitempty"`
+	KeepForever bool            `json:"keep_forever,omitempty"`
 }
 
 type DockerShellConfig struct {
 	Docker struct {
-		ImageID  string `json:"image_id,omitempty"`
-		ImageTag string `json:"image_tag,omitempty"`
+		ImageID  string `json:"-"`
+		ImageTag string `json:"-"`
 	} `json:"docker,omitempty"`
-	DependsOn []Dependency `json:"depends_on,omitempty"`
+	DependsOn []Dependency        `json:"depends_on,omitempty"`
 	Command   []map[string]string `json:"command,omitempty"`
 }
 
@@ -504,7 +504,8 @@ func GetStepsByType(db *sql.DB, stepType string) ([]StepExec, error) {
 	var steps []StepExec
 	for rows.Next() {
 		var s StepExec
-		var localPath sql.NullString
+		var localPath sql.NullString // Use NullString to handle potential NULL settings
+
 		if err := rows.Scan(&s.StepID, &s.TaskID, &s.Title, &s.Settings, &localPath); err != nil {
 			return nil, fmt.Errorf("error scanning step: %w", err)
 		}
@@ -591,109 +592,62 @@ func ListSteps(db *sql.DB, full bool) error {
 	return nil
 }
 
-// findImageDetailsRecursive is a helper function to recursively find image_id and image_tag
-// in the dependency chain of a step.
-func FindImageDetailsRecursive(db *sql.DB, stepID int, visited map[int]bool, stepLogger *log.Logger) (imageID, imageTag string, err error) {
-	if visited[stepID] {
-		return "", "", nil // Already visited this step, break recursion
-	}
-	visited[stepID] = true
-
-	stepLogger.Printf("Searching for image details in step %d\n", stepID)
-
-	settingsStr, err := GetStepInfo(db, stepID)
+// FindImageDetailsRecursive retrieves image_hash and image_tag directly from task settings.
+func FindImageDetailsRecursive(db *sql.DB, stepID int, stepLogger *log.Logger) (string, string, error) {
+	var taskID int
+	err := db.QueryRow(`SELECT task_id FROM steps WHERE id = $1`, stepID).Scan(&taskID)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get step info for %d: %w", stepID, err)
-	}
-	stepLogger.Printf("Step %d: Raw settings: %s\n", stepID, settingsStr)
-
-	// First, try to unmarshal into a generic struct to capture top-level image_id and image_tag
-	var topLevelConfig struct {
-		ImageID  string `json:"image_id,omitempty"`
-		ImageTag string `json:"image_tag,omitempty"`
+		if err == sql.ErrNoRows {
+			stepLogger.Printf("Step %d: no step found\n", stepID)
+			return "", "", nil
+		}
+		stepLogger.Printf("Step %d: failed to get task_id: %v\n", stepID, err)
+		return "", "", fmt.Errorf("failed to get task_id for step %d: %w", stepID, err)
 	}
 
-	if err := json.Unmarshal([]byte(settingsStr), &topLevelConfig); err == nil {
-		if topLevelConfig.ImageID != "" && topLevelConfig.ImageTag != "" {
-			stepLogger.Printf("Found image_id '%s' and image_tag '%s' at top level of current step %d\n", topLevelConfig.ImageID, topLevelConfig.ImageTag, stepID)
-			return topLevelConfig.ImageID, topLevelConfig.ImageTag, nil
+	var taskSettingsJSON sql.NullString
+	err = db.QueryRow(`SELECT settings FROM tasks WHERE id = $1`, taskID).Scan(&taskSettingsJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			stepLogger.Printf("Task %d: no settings found\n", taskID)
+			return "", "", nil
+		}
+		stepLogger.Printf("Task %d: failed to get settings: %v\n", taskID, err)
+		return "", "", fmt.Errorf("failed to get task settings for task %d: %w", taskID, err)
+	}
+
+	if !taskSettingsJSON.Valid || taskSettingsJSON.String == "" {
+		stepLogger.Printf("Task %d: settings are empty or invalid\n", taskID)
+		return "", "", nil
+	}
+
+	var taskSettings map[string]interface{}
+	if err := json.Unmarshal([]byte(taskSettingsJSON.String), &taskSettings); err != nil {
+		stepLogger.Printf("Task %d: failed to unmarshal settings: %v\n", taskID, err)
+		return "", "", fmt.Errorf("failed to unmarshal task settings for task %d: %w", taskID, err)
+	}
+
+	if dockerInfo, ok := taskSettings["docker"].(map[string]interface{}); ok {
+		if imageHash, ok := dockerInfo["image_hash"].(string); ok {
+			if imageTag, ok := dockerInfo["image_tag"].(string); ok {
+				stepLogger.Printf("Found image_hash '%s' and image_tag '%s' from task settings for step %d\n", imageHash, imageTag, stepID)
+				return imageHash, imageTag, nil
+			}
 		}
 	}
 
-	var configHolder StepConfigHolder
-	if err := json.Unmarshal([]byte(settingsStr), &configHolder); err != nil {
-		stepLogger.Printf("Step %d: Failed to unmarshal settings into configHolder: %v\n", stepID, err)
-		return "", "", fmt.Errorf("failed to unmarshal settings for step %d: %w", stepID, err)
-	}
-	stepLogger.Printf("Step %d: Unmarshaled configHolder: %+v\n", stepID, configHolder)
-
-	// Recursively check dependencies first
-	var dependencies []Dependency
-
-	// Extract dependencies based on the step type from the unmarshaled configHolder
-	if configHolder.DockerBuild != nil {
-		dependencies = configHolder.DockerBuild.DependsOn
-	} else if configHolder.DockerPull != nil {
-		dependencies = configHolder.DockerPull.DependsOn
-	} else if configHolder.DockerRun != nil {
-		dependencies = configHolder.DockerRun.DependsOn
-	} else if configHolder.DockerPool != nil {
-		dependencies = configHolder.DockerPool.DependsOn
-	} else if configHolder.DockerShell != nil {
-		dependencies = configHolder.DockerShell.DependsOn
-	} else if configHolder.DynamicRubric != nil {
-		dependencies = configHolder.DynamicRubric.DynamicRubric.DependsOn
-	} else if configHolder.DynamicLab != nil {
-		dependencies = configHolder.DynamicLab.DynamicLab.DependsOn
-	} else if configHolder.DockerRubrics != nil {
-		dependencies = configHolder.DockerRubrics.DockerRubrics.DependsOn
-	}
-
-	for _, dep := range dependencies {
-		imgID, imgTag, err := FindImageDetailsRecursive(db, dep.ID, visited, stepLogger)
-		if err != nil {
-			return "", "", err
-		}
-		if imgID != "" && imgTag != "" {
-			stepLogger.Printf("Found ImageID '%s' and ImageTag '%s' from dependency step %d\n", imgID, imgTag, dep.ID)
-			return imgID, imgTag, nil
-		}
-	}
-
-	// If no image details found in dependencies, check current step
-	if configHolder.DockerBuild != nil && configHolder.DockerBuild.ImageID != "" && configHolder.DockerBuild.ImageTag != "" {
-		stepLogger.Printf("Found image_id '%s' and image_tag '%s' from build config of current step %d\n", configHolder.DockerBuild.ImageID, configHolder.DockerBuild.ImageTag, stepID)
-		return configHolder.DockerBuild.ImageID, configHolder.DockerBuild.ImageTag, nil
-	} else if configHolder.DockerPull != nil && configHolder.DockerPull.ImageID != "" && configHolder.DockerPull.ImageTag != "" {
-		stepLogger.Printf("Found image_id '%s' and image_tag '%s' from pull config of current step %d\n", configHolder.DockerPull.ImageID, configHolder.DockerPull.ImageTag, stepID)
-		return configHolder.DockerPull.ImageID, configHolder.DockerPull.ImageTag, nil
-	} else if configHolder.DockerRun != nil && configHolder.DockerRun.ImageID != "" && configHolder.DockerRun.ImageTag != "" {
-		stepLogger.Printf("Found image_id '%s' and image_tag '%s' from run config of current step %d\n", configHolder.DockerRun.ImageID, configHolder.DockerRun.ImageTag, stepID)
-		return configHolder.DockerRun.ImageID, configHolder.DockerRun.ImageTag, nil
-	} else if configHolder.DockerPool != nil && configHolder.DockerPool.ImageID != "" && configHolder.DockerPool.ImageTag != "" {
-		stepLogger.Printf("Found image_id '%s' and image_tag '%s' from pool config of current step %d\n", configHolder.DockerPool.ImageID, configHolder.DockerPool.ImageTag, stepID)
-		return configHolder.DockerPool.ImageID, configHolder.DockerPool.ImageTag, nil
-	} else if configHolder.DockerShell != nil && configHolder.DockerShell.Docker.ImageID != "" && configHolder.DockerShell.Docker.ImageTag != "" {
-		stepLogger.Printf("Found image_id '%s' and image_tag '%s' from shell config of current step %d\n", configHolder.DockerShell.Docker.ImageID, configHolder.DockerShell.Docker.ImageTag, stepID)
-		return configHolder.DockerShell.Docker.ImageID, configHolder.DockerShell.Docker.ImageTag, nil
-	} else if configHolder.DynamicRubric != nil && configHolder.DynamicRubric.DynamicRubric.Environment.ImageID != "" && configHolder.DynamicRubric.DynamicRubric.Environment.ImageTag != "" {
-		stepLogger.Printf("Found image_id '%s' and image_tag '%s' from dynamic rubric config of current step %d\n", configHolder.DynamicRubric.DynamicRubric.Environment.ImageID, configHolder.DynamicRubric.DynamicRubric.Environment.ImageTag, stepID)
-		return configHolder.DynamicRubric.DynamicRubric.Environment.ImageID, configHolder.DynamicRubric.DynamicRubric.Environment.ImageTag, nil
-	}
-
+	stepLogger.Printf("No image_hash or image_tag found in task settings for step %d\n", stepID)
 	return "", "", nil
 }
 
-// getDockerImageID is a helper function to extract image_id and image_tag from a step's settings.
-// It recursively checks dependencies if not found in the current step.
+// GetDockerImageID retrieves image_id and image_tag from the task settings for the given step ID.
 func GetDockerImageID(db *sql.DB, stepID int, stepLogger *log.Logger) (imageID, imageTag string, err error) {
-	visited := make(map[int]bool)
-	imgID, imgTag, err := FindImageDetailsRecursive(db, stepID, visited, stepLogger)
+	imgID, imgTag, err := FindImageDetailsRecursive(db, stepID, stepLogger)
 	if err != nil {
 		return "", "", err
 	}
 	if imgID != "" && imgTag != "" {
-		stepLogger.Printf("Prioritizing image_id '%s' and image_tag '%s' from build dependency.\n", imgID, imgTag)
+		stepLogger.Printf("Using image_id '%s' and image_tag '%s' from task settings.\n", imgID, imgTag)
 		return imgID, imgTag, nil
 	}
 
@@ -761,7 +715,7 @@ func GetContainerDetails(db *sql.DB, stepID int, stepLogger *log.Logger) (contai
 			return "", "", err
 		}
 		if contID != "" && contName != "" {
-			stepLogger.Printf("Found container_id '%s' and container_name '%s' from dependency step %d\n", contID, contName, dep.ID)
+			stepLogger.Printf("Found container_id '%s' and container_name '%s' from step %d\n", contID, contName, dep.ID)
 			return contID, contName, nil
 		}
 	}

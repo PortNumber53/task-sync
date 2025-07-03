@@ -14,6 +14,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/PortNumber53/task-sync/pkg/models"
+	"log"
 )
 
 // sqlOpen is a package-level variable to allow mocking of sql.Open in tests.
@@ -241,35 +242,14 @@ func TestExecutePendingSteps(t *testing.T) {
 	callOrder := make(chan string, 10) // Increased buffer size
 
 	// Create a map of mock step processors
-	mockStepProcessors := map[string]func(*sql.DB) error{
-		"dynamic_lab": func(db *sql.DB) error {
-			callOrder <- "dynamic_lab"
-			return nil
-		},
-		"docker_pull": func(db *sql.DB) error {
-			callOrder <- "docker_pull"
-			return nil
-		},
-		"docker_build": func(db *sql.DB) error {
-			callOrder <- "docker_build"
-			return nil
-		},
-		"docker_run": func(db *sql.DB) error {
-			callOrder <- "docker_run"
-			return nil
-		},
-		"docker_shell": func(db *sql.DB) error {
-			callOrder <- "docker_shell"
-			return nil
-		},
-		"docker_rubrics": func(db *sql.DB) error {
-			callOrder <- "docker_rubrics"
-			return nil
-		},
-		"file_exists": func(db *sql.DB) error {
-			callOrder <- "file_exists"
-			return nil
-		},
+	mockStepProcessors := map[string]func(*sql.DB, *models.StepExec, *log.Logger) error{
+		"dynamic_lab": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { callOrder <- "dynamic_lab"; return nil },
+		"docker_pull": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { callOrder <- "docker_pull"; return nil },
+		"docker_build": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { callOrder <- "docker_build"; return nil },
+		"docker_run": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { callOrder <- "docker_run"; return nil },
+		"docker_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { callOrder <- "docker_shell"; return nil },
+		"docker_rubrics": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { callOrder <- "docker_rubrics"; return nil },
+		"file_exists": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { callOrder <- "file_exists"; return nil },
 	}
 
 	// Call the function to be tested

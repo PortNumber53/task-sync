@@ -84,6 +84,12 @@ type Criterion struct {
 	Counter     string
 }
 
+// ParseRubric extracts rubric criteria from a markdown file.
+// Each criterion is expected to be in a section that starts with a header like:
+// ### #1: d0aba505-cc93-489c-bc8b-da566a1f0af5
+// ParseRubric extracts rubric criteria from a markdown file.
+// Each criterion is expected to be in a section that starts with a header like:
+// ### #1: d0aba505-cc93-489c-bc8b-da566a1f0af5
 func ParseRubric(filePath string) ([]Criterion, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -97,51 +103,77 @@ func ParseRubric(filePath string) ([]Criterion, error) {
 	}
 
 	text := string(content)
-	// Split the text by criteria sections, which start with "### crit-"
-	critSections := regexp.MustCompile(`(?m)^###\\s*(crit-\\d+.*)`).Split(text, -1)
-	if len(critSections) < 2 {
+	// Go's regexp engine doesn't support lookaheads. Instead, we find the start
+	// index of each delimiter and slice the text into sections manually.
+	re := regexp.MustCompile(`(?m)^\s*###\s*#\d+:\s*[a-fA-F0-9-]{36}`)
+	matches := re.FindAllStringIndex(text, -1)
+
+	if len(matches) == 0 {
 		return nil, fmt.Errorf("no criteria sections found in %s", filePath)
 	}
 
-	criteria := []Criterion{}
-	for _, section := range critSections[1:] { // Skip the part before the first criterion
-		// Extract title: first line after ### crit-X
-		titleMatch := regexp.MustCompile(`(?m)^\\s*([^\\n]+)`).FindStringSubmatch(section)
-		if len(titleMatch) < 2 {
+	var sections []string
+	for i := 0; i < len(matches); i++ {
+		start := matches[i][0]
+		var end int
+		if i+1 < len(matches) {
+			end = matches[i+1][0]
+		} else {
+			end = len(text)
+		}
+		sections = append(sections, text[start:end])
+	}
+
+	var criteria []Criterion
+
+	// Regexes to parse components of a rubric section.
+	headerRe := regexp.MustCompile(`(?m)^\s*###\s*#(\d+):\s*([a-fA-F0-9-]{36})`)
+	scoreRe := regexp.MustCompile(`\*\*Score\*\*:\s*(\d+)`)
+	requiredRe := regexp.MustCompile(`\*\*Required\*\*:\s*(true|false)`)
+	criterionRe := regexp.MustCompile(`(?s)\*\*Criterion\*\*:\s*(.*?)(?:\n\n|$)`)
+	heldOutTestRe := regexp.MustCompile("(?s)\\*\\*Held-out tests\\*\\*:\\n```(?:bash)?\\n(.*?)\\n```")
+
+	for _, section := range sections {
+		if strings.TrimSpace(section) == "" {
 			continue
 		}
-		crit := Criterion{Title: strings.TrimSpace(titleMatch[1])}
 
-		// Extract score: looks for "**Score:** X"
-		scoreMatch := regexp.MustCompile(`\\*\\*Score:\\*\\*\\s*(\\d+)`).FindStringSubmatch(section)
+		headerMatch := headerRe.FindStringSubmatch(section)
+		if len(headerMatch) < 3 {
+			continue // Not a valid criterion section
+		}
+
+		crit := Criterion{
+			Counter: strings.TrimSpace(headerMatch[1]),
+			Title:   strings.TrimSpace(headerMatch[2]),
+		}
+
+		scoreMatch := scoreRe.FindStringSubmatch(section)
 		if len(scoreMatch) > 1 {
-			score, err := strconv.Atoi(scoreMatch[1])
-			if err == nil {
+			if score, err := strconv.Atoi(scoreMatch[1]); err == nil {
 				crit.Score = score
 			}
 		}
 
-		// Extract required: looks for "**Required:** (Yes|No)"
-		requiredMatch := regexp.MustCompile(`\\*\\*Required:\\*\\*\\s*(Yes|No)`).FindStringSubmatch(section)
-		if len(requiredMatch) > 1 && requiredMatch[1] == "Yes" {
-			crit.Required = true
+		requiredMatch := requiredRe.FindStringSubmatch(section)
+		if len(requiredMatch) > 1 {
+			crit.Required = (requiredMatch[1] == "true")
 		}
 
-		// Extract rubric: looks for "**Rubric:**\n` + "```bash\n...```"
-		rubricRegex := regexp.MustCompile("(?s)\\\\*\\\\*Rubric:\\\\*\\\\*:\\\\n```(?:bash)?\\\\n(.*?)\\\\n```")
-		rubricMatch := rubricRegex.FindStringSubmatch(section)
-		if len(rubricMatch) > 1 {
-			crit.Rubric = strings.TrimSpace(rubricMatch[1])
+		criterionMatch := criterionRe.FindStringSubmatch(section)
+		if len(criterionMatch) > 1 {
+			crit.Rubric = strings.TrimSpace(criterionMatch[1])
 		}
 
-		// Parse held-out test: looks for "**Held-out tests**:\n` + "```bash\n...```"
-		testRegex := regexp.MustCompile("(?s)\\\\*\\\\*Held-out tests\\\\*\\\\*:\\\\n```(?:bash)?\\\\n(.*?)\\\\n```")
-		testMatch := testRegex.FindStringSubmatch(section)
-		if len(testMatch) > 1 {
-			crit.HeldOutTest = strings.TrimSpace(testMatch[1])
+		heldOutTestMatch := heldOutTestRe.FindStringSubmatch(section)
+		if len(heldOutTestMatch) > 1 {
+			crit.HeldOutTest = strings.TrimSpace(heldOutTestMatch[1])
 		}
 
-		criteria = append(criteria, crit)
+		// Only add if we have the essential parts
+		if crit.Title != "" && crit.HeldOutTest != "" {
+			criteria = append(criteria, crit)
+		}
 	}
 
 	return criteria, nil
@@ -185,6 +217,25 @@ type DockerRubricsConfig struct {
 	} `json:"docker_rubrics"`
 }
 
+// RubricShellConfig represents the configuration for a rubric_shell step.
+type RubricShellConfig struct {
+	ImageID     string       `json:"image_id,omitempty"`
+	ImageTag    string       `json:"image_tag,omitempty"`
+	Command     string       `json:"command"` // The held-out test command to run
+	CriterionID string       `json:"criterion_id,omitempty"` // The ID of the criterion this step relates to
+	Counter     string       `json:"counter,omitempty"`     // The counter of the criterion
+	Score       int          `json:"score,omitempty"`
+	Required    bool         `json:"required,omitempty"`
+	DependsOn   []Dependency `json:"depends_on,omitempty"`
+	GeneratedBy string       `json:"generated_by,omitempty"` // The ID of the rubric_set step that generated this step
+}
+
+// RubricSetConfig represents the configuration for a rubric_set step.
+type RubricSetConfig struct {
+	MarkdownFile string       `json:"file"`  // Updated to match the 'file' key in step settings for correct unmarshaling
+	DependsOn    []Dependency `json:"depends_on,omitempty"`
+}
+
 // DependencyHolder is a helper struct for unmarshaling nested dependencies
 type DependencyHolder struct {
 	DependsOn []Dependency `json:"depends_on,omitempty"`
@@ -219,6 +270,8 @@ type StepConfigHolder struct {
 	FileExists    *FileExistsConfig    `json:"file_exists,omitempty"`
 	RubricsImport *RubricsImportConfig `json:"rubrics_import,omitempty"`
 	DockerRubrics *DockerRubricsConfig `json:"docker_rubrics,omitempty"`
+	RubricShell   *RubricShellConfig   `json:"rubric_shell,omitempty"`
+	RubricSet     *RubricSetConfig     `json:"rubric_set,omitempty"`
 }
 
 // --- Detail Structs ---
@@ -388,9 +441,38 @@ func printChildren(nodes []*StepNode, prefix string) {
 	}
 }
 
+// UpdateStep updates a step's title and settings.
+func UpdateStep(db *sql.DB, stepID int, title, settings string) error {
+	query := `UPDATE steps SET title = $1, settings = $2 WHERE id = $3`
+	_, err := db.Exec(query, title, settings, stepID)
+	if err != nil {
+		return fmt.Errorf("failed to update step %d: %w", stepID, err)
+	}
+	return nil
+}
+
 // DeleteStep removes a step from the database by its ID.
 func DeleteStep(db *sql.DB, stepID int) error {
 	result, err := db.Exec("DELETE FROM steps WHERE id = $1", stepID)
+	if err != nil {
+		return fmt.Errorf("failed to delete step %d: %w", stepID, err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected for step %d: %w", stepID, err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("no step found with ID %d", stepID)
+	}
+
+	return nil
+}
+
+// DeleteStepInTx removes a step from the database by its ID within a transaction.
+func DeleteStepInTx(tx *sql.Tx, stepID int) error {
+	result, err := tx.Exec("DELETE FROM steps WHERE id = $1", stepID)
 	if err != nil {
 		return fmt.Errorf("failed to delete step %d: %w", stepID, err)
 	}
@@ -559,6 +641,33 @@ func GeneratedStepsExist(db *sql.DB, generatedByStepID int) (bool, error) {
 	return exists, nil
 }
 
+// GetGeneratedSteps retrieves generated rubric_shell steps for a given parent step.
+func GetGeneratedSteps(db *sql.DB, parentStepID int) ([]StepExec, error) {
+	query := `
+		SELECT s.id, s.task_id, s.title, s.settings, t.local_path
+		FROM steps s
+		JOIN tasks t ON s.task_id = t.id
+		WHERE s.settings -> 'rubric_shell' ->> 'generated_by' = $1
+		ORDER BY s.id ASC`
+
+	rows, err := db.Query(query, strconv.Itoa(parentStepID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query for generated steps: %w", err)
+	}
+	defer rows.Close()
+
+	var steps []StepExec
+	for rows.Next() {
+		var step StepExec
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Title, &step.Settings, &step.LocalPath); err != nil {
+			return nil, fmt.Errorf("failed to scan step: %w", err)
+		}
+		steps = append(steps, step)
+	}
+
+	return steps, nil
+}
+
 // CreateStep inserts a new step for a task and returns the new step's ID.
 func CreateStep(db *sql.DB, taskRef, title, settings string) (int, error) {
 	var taskID int
@@ -703,16 +812,13 @@ func GetContainerDetails(db *sql.DB, stepID int, stepLogger *log.Logger) (contai
 		// We'll need to check dependencies instead
 		stepLogger.Printf("DockerRun step %d doesn't have container info in config, checking dependencies\n", stepID)
 	case configHolder.DockerPool != nil:
-		// For DockerPool steps, we need to unmarshal into DockerPool struct to get container info
-		var pool DockerPool
-		if err := json.Unmarshal([]byte(settingsStr), &pool); err == nil {
-			if len(pool.Containers) > 0 {
-				// Return the first container in the pool
-				container := pool.Containers[0]
-				stepLogger.Printf("Found container_id '%s' and container_name '%s' in pool step %d\n",
-					container.ContainerID, container.ContainerName, stepID)
-				return container.ContainerID, container.ContainerName, nil
-			}
+		// For DockerPool steps, we can directly access the container info
+		if len(configHolder.DockerPool.Containers) > 0 {
+			// Return the first available container
+			container := configHolder.DockerPool.Containers[0]
+			stepLogger.Printf("Found container_id '%s' and container_name '%s' in pool step %d\n",
+				container.ContainerID, container.ContainerName, stepID)
+			return container.ContainerID, container.ContainerName, nil
 		}
 	}
 

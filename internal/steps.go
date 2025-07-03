@@ -4,21 +4,39 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"sort"
 	"time"
 
 	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
-// stepProcessors maps step types to their respective processor functions.
-var stepProcessors = map[string]func(*sql.DB) error{
-	"docker_pull":  func(db *sql.DB) error { processDockerPullSteps(db); return nil },
-	"docker_build": func(db *sql.DB) error { processDockerBuildSteps(db, models.StepLogger); return nil },
-	"docker_run":   processDockerRunSteps,
-	"docker_pool":  processDockerPoolSteps,
-	"docker_shell": func(db *sql.DB) error { processDockerShellSteps(db); return nil },
-	"file_exists":  func(db *sql.DB) error { processFileExistsSteps(db); return nil },
-	"rubrics_import": processRubricsImportSteps,
+// stepProcessors maps step types to their respective processor functions with consistent signature using wrappers.
+var stepProcessors = map[string]func(*sql.DB, *models.StepExec, *log.Logger) error{
+	"docker_pull":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerPullSteps(db); return nil },
+	"docker_build": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerBuildSteps(db, logger); return nil },
+	"docker_run":   func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerRunSteps(db); return nil },
+	"docker_pool":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerPoolSteps(db); return nil },
+	"docker_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerShellSteps(db); return nil },
+	"file_exists":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processFileExistsSteps(db); return nil },
+	"rubrics_import": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processRubricsImportSteps(db); return nil },
+	"rubric_set": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+		// If a specific step is provided (from ProcessSpecificStep), run only that.
+		if se != nil && se.StepID != 0 {
+			return ProcessRubricSetStep(db, se, logger)
+		}
+		// Otherwise (from executePendingSteps), run all rubric_set steps.
+		return processAllRubricSetSteps(db, logger)
+	},
+	"rubric_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+		// If a specific step is provided (from ProcessSpecificStep), run only that.
+		if se != nil && se.StepID != 0 {
+			return ProcessRubricShellStep(db, se, logger)
+		}
+		// Otherwise (from executePendingSteps), run all rubric_shell steps.
+		return processAllRubricShellSteps(db, logger)
+	},
 }
 
 // ProcessSteps is the main entry point for processing all pending steps.
@@ -26,10 +44,10 @@ func ProcessSteps(db *sql.DB) error {
 	return executePendingSteps(db, stepProcessors)
 }
 
-func executePendingSteps(db *sql.DB, stepProcessors map[string]func(*sql.DB) error) error {
+func executePendingSteps(db *sql.DB, stepProcessors map[string]func(*sql.DB, *models.StepExec, *log.Logger) error) error {
 	// Iterate over the map and call each function
 	for stepType, processorFunc := range stepProcessors {
-		if err := processorFunc(db); err != nil {
+		if err := processorFunc(db, &models.StepExec{}, log.New(os.Stdout, fmt.Sprintf("STEP [%s]: ", stepType), log.Ldate|log.Ltime|log.Lshortfile)); err != nil {
 			fmt.Printf("Error processing %s steps: %v", stepType, err)
 			// Decide if you want to continue or return on error
 		}
@@ -265,43 +283,47 @@ func printChildren(nodes []*StepNode, prefix string) {
 
 // ProcessSpecificStep processes a single step by its ID.
 func ProcessSpecificStep(db *sql.DB, stepID int) error {
-	// Fetch the step settings to determine the type
-	var settingsJSON string
-	err := db.QueryRow("SELECT settings FROM steps WHERE id = $1", stepID).Scan(&settingsJSON)
+	// Fetch the full step details including task_id
+	var stepExec models.StepExec
+	err := db.QueryRow("SELECT id, task_id, title, settings FROM steps WHERE id = $1", stepID).Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings)
 	if err != nil {
 		return fmt.Errorf("failed to fetch step %d: %w", stepID, err)
 	}
 
-	// Unmarshal settings to find the step type
+	// Fetch the LocalPath from the tasks table using taskID
+	var localPath string
+	err = db.QueryRow("SELECT local_path FROM tasks WHERE id = $1", stepExec.TaskID).Scan(&localPath)
+	if err != nil {
+		return fmt.Errorf("failed to fetch task local path for task ID %d: %w", stepExec.TaskID, err)
+	}
+	stepExec.LocalPath = localPath
+
+	// Determine the step type from settings
 	var settings map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
+	err = json.Unmarshal([]byte(stepExec.Settings), &settings)
+	if err != nil {
 		return fmt.Errorf("failed to unmarshal settings for step %d: %w", stepID, err)
 	}
 
-	// Determine the step type by finding the first key that matches a processor
 	var stepType string
 	for key := range settings {
-		if processor, exists := stepProcessors[key]; exists {
+		if _, exists := stepProcessors[key]; exists {
 			stepType = key
-			// Call the processor with the db, but it needs the step ID or more context
-			// Since processors expect to query all steps, this might need adjustment.
-			// For simplicity, call the processor and let it handle the specific step if possible.
-			// But most processors query based on type, so we may need to pass the step ID or modify them.
-			return processor(db) // This is incorrect as it processes all steps; need to fix logic.
+			break
 		}
 	}
+
 	if stepType == "" {
 		return fmt.Errorf("unknown or no matching step type found for step %d", stepID)
 	}
 
-	processor, exists := stepProcessors[stepType]
-	if !exists {
+	stepLogger := log.New(os.Stdout, fmt.Sprintf("STEP %d [%s]: ", stepID, stepType), log.Ldate|log.Ltime|log.Lshortfile)
+
+	if processor, exists := stepProcessors[stepType]; exists {
+		return processor(db, &stepExec, stepLogger)
+	} else {
 		return fmt.Errorf("no processor found for step type %s of step %d", stepType, stepID)
 	}
-	// The processor functions are designed to process all steps of a type, not a specific ID.
-	// To handle a specific step, I should call the processor, but it might not be efficient.
-	// For now, call it and rely on the processor to handle the step if queried correctly.
-	return processor(db)
 }
 
 // DeleteStep removes a step from the database by its ID.

@@ -160,6 +160,13 @@ func ProcessRubricsMHTML(mhtmlFilePath, mdFilePath string) error {
 		heldOutTestsElem := s.Find("textarea[aria-label*='Held-out test']")
 		heldOutTests := strings.TrimSpace(heldOutTestsElem.Text()) // Target textarea with aria-label containing 'Held-out test'
 		fmt.Printf("DEBUG: Criterion %d - ID: %s, Score: %s, Required: %s, Text: %s, RubricText: %s, HeldOutTests: %s\n", i, id, scoreStr, requiredStr, idText, rubricTextStr, heldOutTests)
+
+		// Add filtering for empty or malformed criteria
+		if strings.TrimSpace(id) == "" || strings.TrimSpace(heldOutTests) == "" {
+			fmt.Printf("DEBUG: Skipping empty or malformed criterion for index %d: Title='%s', HeldOutTest='%s'\n", i, id, heldOutTests)
+			return // Skip this criterion
+		}
+
 		score, err := strconv.Atoi(scoreStr)
 		if err != nil {
 			score = 0

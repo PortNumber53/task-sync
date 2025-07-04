@@ -48,126 +48,134 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 }
 
 // ProcessRubricShellStep handles the execution of a rubric_shell step.
-// It runs the held-out test command inside a Docker container and captures output and errors.
+// It iterates through a set of solution patches, applies each one in its assigned container,
+// runs the held-out test command, and captures the results.
 func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
 	var wrappedSettings struct {
 		RubricShell models.RubricShellConfig `json:"rubric_shell"`
 	}
 
-	// Unmarshal the step settings
 	if err := json.Unmarshal([]byte(stepExec.Settings), &wrappedSettings); err != nil {
 		return fmt.Errorf("failed to unmarshal rubric_shell settings: %w", err)
 	}
 	config := wrappedSettings.RubricShell
 
-	// Find a container from a docker_pool in the dependency tree
-	containerName, err := models.GetContainerName(db, stepExec.StepID, stepLogger)
-	if err != nil {
-		return fmt.Errorf("failed to find a container: %w", err)
+	if len(config.AssignContainers) == 0 {
+		return fmt.Errorf("no assigned containers for rubric_shell step %d", stepExec.StepID)
 	}
 
-	if containerName == "" {
-		return fmt.Errorf("no container found in docker_pool for rubric_shell step %d", stepExec.StepID)
-	}
+	// TODO: This should be passed in from the dynamic_rubric step.
+	heldOutTestPatch := "held_out_tests.patch"
+	allResults := make(map[string]map[string]string)
+	var overallErr error
 
-	// Get the rubric_set configuration from dependencies
-	rubricSetConfig, err := models.GetRubricSetFromDependencies(db, stepExec.StepID, stepLogger)
-	if err != nil {
-		return fmt.Errorf("failed to get rubric_set from dependencies: %w", err)
-	}
+	for solutionPatch, containerName := range config.AssignContainers {
+		stepLogger.Printf("--- Processing solution '%s' in container '%s' ---", solutionPatch, containerName)
+		solutionResult := make(map[string]string)
 
-	// If a rubric_set is found, clean the repo and apply patches
-	if rubricSetConfig != nil {
-		stepLogger.Println("Found rubric_set config, preparing to clean repo and apply patches.")
-
-		// Helper function to execute shell commands
-		executeCommand := func(command, description string) error {
-			stepLogger.Printf("Executing command for '%s': %s", description, command)
-			cmd := exec.Command("sh", "-c", command)
+		// Helper to run a command and log/store results
+		runCmd := func(cmd *exec.Cmd, description string) (string, error) {
+			stepLogger.Printf("Executing: %s", cmd.String())
 			output, err := cmd.CombinedOutput()
 			if err != nil {
-				stepLogger.Printf("Error %s: %v, Output: %s", description, err, output)
-				return fmt.Errorf("failed to %s: %w. Output: %s", description, err, output)
+				stepLogger.Printf("Error %s: %v, Output: %s", description, err, string(output))
+				return string(output), fmt.Errorf("failed to %s: %w", description, err)
 			}
-			stepLogger.Printf("Successfully executed: %s. Output: %s", description, output)
-			return nil
+			stepLogger.Printf("Success: %s", description)
+			return string(output), nil
 		}
 
-		// Clean the git repository
-		cleanCmd := fmt.Sprintf(`docker exec -w /app/ansible %s sh -c "pwd && git reset --hard HEAD && git clean -fdx"`, containerName)
-		if err := executeCommand(cleanCmd, "clean git repo"); err != nil {
-			return err
+		// 1. Reset the repo status inside the container
+		cmdReset := exec.Command("docker", "exec", containerName, "git", "reset", "--hard")
+		if output, err := runCmd(cmdReset, "reset repo"); err != nil {
+			solutionResult["error"] = err.Error()
+			solutionResult["output"] = output
+			allResults[solutionPatch] = solutionResult
+			overallErr = err // Store first error
+			continue        // Move to next solution
 		}
 
-		// Apply patches
-		patchFiles := []string{rubricSetConfig.Solution1, rubricSetConfig.HeldOutTest}
-		for _, patchFile := range patchFiles {
-			if patchFile == "" {
-				continue
+		// 2. Apply solution patch
+		solutionPatchPath := filepath.Join(stepExec.LocalPath, solutionPatch)
+		destSolutionPath := filepath.Join("/app", solutionPatch)
+		cmdCpSolution := exec.Command("docker", "cp", solutionPatchPath, fmt.Sprintf("%s:%s", containerName, destSolutionPath))
+		if output, err := runCmd(cmdCpSolution, "copy solution patch"); err != nil {
+			solutionResult["error"] = err.Error()
+			solutionResult["output"] = output
+			allResults[solutionPatch] = solutionResult
+			if overallErr == nil {
+				overallErr = err
 			}
-			localPatchPath := filepath.Join(stepExec.LocalPath, patchFile)
-			if _, err := os.Stat(localPatchPath); os.IsNotExist(err) {
-				stepLogger.Printf("Patch file not found, skipping: %s", localPatchPath)
-				continue
-			}
+			continue
+		}
 
-			// Copy patch to container
-			dockerCpCmd := fmt.Sprintf("docker cp %s %s:/tmp/%s", localPatchPath, containerName, patchFile)
-			if err := executeCommand(dockerCpCmd, fmt.Sprintf("copy patch %s", patchFile)); err != nil {
-				return err
+		cmdApplySolution := exec.Command("docker", "exec", containerName, "git", "apply", destSolutionPath)
+		if output, err := runCmd(cmdApplySolution, "apply solution patch"); err != nil {
+			solutionResult["error"] = err.Error()
+			solutionResult["output"] = output
+			allResults[solutionPatch] = solutionResult
+			if overallErr == nil {
+				overallErr = err
 			}
+			continue
+		}
 
-			// Apply patch in container
-			gitApplyCmd := fmt.Sprintf("docker exec -w /app/ansible %s git apply /tmp/%s", containerName, patchFile)
-			if err := executeCommand(gitApplyCmd, fmt.Sprintf("apply patch %s", patchFile)); err != nil {
-				return err
+		// 3. Apply held-out test patch
+		heldOutTestPatchPath := filepath.Join(stepExec.LocalPath, heldOutTestPatch)
+		destTestPath := filepath.Join("/app", heldOutTestPatch)
+		cmdCpTest := exec.Command("docker", "cp", heldOutTestPatchPath, fmt.Sprintf("%s:%s", containerName, destTestPath))
+		if output, err := runCmd(cmdCpTest, "copy held-out test patch"); err != nil {
+			solutionResult["error"] = err.Error()
+			solutionResult["output"] = output
+			allResults[solutionPatch] = solutionResult
+			if overallErr == nil {
+				overallErr = err
+			}
+			continue
+		}
+
+		cmdApplyTest := exec.Command("docker", "exec", containerName, "git", "apply", destTestPath)
+		if output, err := runCmd(cmdApplyTest, "apply held-out test patch"); err != nil {
+			solutionResult["error"] = err.Error()
+			solutionResult["output"] = output
+			allResults[solutionPatch] = solutionResult
+			if overallErr == nil {
+				overallErr = err
+			}
+			continue
+		}
+
+		// 4. Run the rubric command
+		commandLine := fmt.Sprintf("docker exec -w /app/ansible %s %s", containerName, config.Command)
+		cmdRun := exec.Command("sh", "-c", commandLine)
+		output, err := runCmd(cmdRun, "run rubric command")
+
+		solutionResult["output"] = output
+		if err != nil {
+			solutionResult["error"] = err.Error()
+			if overallErr == nil {
+				overallErr = err
 			}
 		}
-	} else {
-		stepLogger.Println("No rubric_set config found, skipping patch application.")
+		allResults[solutionPatch] = solutionResult
 	}
 
-	// Construct the Docker exec command
-	commandLine := fmt.Sprintf("docker exec -w /app/ansible %s %s", containerName, config.Command)
-	stepLogger.Printf("Executing command: %s\n", commandLine)
-
-	// Run the command using os/exec to capture output and errors
-	cmd := exec.Command("sh", "-c", commandLine)
-	cmd.Dir = stepExec.LocalPath // Set working directory if needed
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		stepLogger.Printf("Error executing Docker command: %v, Output: %s\n", err, output)
-		// Update step result with error and output
-		errorResult := map[string]string{
-			"error":  err.Error(),
-			"output": string(output),
-		}
-		jsonResult, jsonErr := json.Marshal(errorResult)
-		if jsonErr != nil {
-			stepLogger.Printf("Failed to marshal error result: %v\n", jsonErr)
-			return err // Return original error
-		}
-		_, errUpdate := db.Exec("UPDATE steps SET results = $1 WHERE id = $2", jsonResult, stepExec.StepID)
-		if errUpdate != nil {
-			stepLogger.Printf("Failed to update step result with error: %v\n", errUpdate)
-		}
-		return err
-	}
-
-	// Update step result with successful output
-	stepLogger.Printf("Command output: %s\n", output)
-	successResult := map[string]string{"output": string(output)}
-	jsonResult, jsonErr := json.Marshal(successResult)
+	// 5. Marshal and save the aggregated results
+	stepLogger.Printf("--- Aggregated Results ---")
+	resultsBytes, jsonErr := json.MarshalIndent(allResults, "", "  ")
 	if jsonErr != nil {
-		stepLogger.Printf("Failed to marshal success result: %v\n", jsonErr)
+		stepLogger.Printf("Failed to marshal results: %v", jsonErr)
 		return jsonErr
 	}
-	_, err = db.Exec("UPDATE steps SET results = $1 WHERE id = $2", jsonResult, stepExec.StepID)
-	if err != nil {
-		stepLogger.Printf("Failed to update step result: %v\n", err)
-		return err
+
+	stepLogger.Printf("Results:\n%s", string(resultsBytes))
+
+	_, errUpdate := db.Exec("UPDATE steps SET results = $1 WHERE id = $2", string(resultsBytes), stepExec.StepID)
+	if errUpdate != nil {
+		stepLogger.Printf("Failed to update step results: %v", errUpdate)
+		return errUpdate
 	}
 
-	stepLogger.Printf("Rubric shell step executed successfully for criterion ID %s\n", config.CriterionID)
-	return nil
+	stepLogger.Printf("Rubric shell step executed for criterion ID %s", config.CriterionID)
+	return overallErr // Return the first error encountered, or nil if all successful
 }

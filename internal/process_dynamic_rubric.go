@@ -78,23 +78,35 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 			stepLogger.Printf("Rubric or associated files changed for step %d. Updating generated steps.", stepExec.StepID)
 		}
 
-		if err := models.DeleteGeneratedSteps(db, stepExec.StepID); err != nil {
-			return fmt.Errorf("error deleting generated steps for step %d: %w", stepExec.StepID, err)
+		// Fetch existing generated steps to perform an upsert/delete logic
+		existingSteps, err := models.GetGeneratedSteps(db, stepExec.StepID)
+		if err != nil {
+			return fmt.Errorf("failed to get existing generated steps for step %d: %w", stepExec.StepID, err)
+		}
+
+		existingStepsMap := make(map[string]models.Step)
+		for _, s := range existingSteps {
+			var settingsWrapper struct {
+				RubricShell models.RubricShellConfig `json:"rubric_shell"`
+			}
+			if err := json.Unmarshal([]byte(s.Settings), &settingsWrapper); err == nil {
+				existingStepsMap[settingsWrapper.RubricShell.CriterionID] = s
+			}
 		}
 
 		dependencyOnParent := models.Dependency{ID: stepExec.StepID}
 
 		for _, crit := range criteria {
 			title := fmt.Sprintf("Rubric %s: %s", crit.Counter, crit.Title)
-
 			rubricShellSettings := models.RubricShellConfig{
-				Command:     crit.HeldOutTest,
-				CriterionID: crit.Title,
-				Counter:     crit.Counter,
-				Score:       crit.Score,
-				Required:    crit.Required,
-				DependsOn:   []models.Dependency{dependencyOnParent},
-				GeneratedBy: strconv.Itoa(stepExec.StepID),
+				AssignContainers: config.DynamicRubric.AssignContainers,
+				Command:          crit.HeldOutTest,
+				CriterionID:      crit.Title,
+				Counter:          crit.Counter,
+				Score:            crit.Score,
+				Required:         crit.Required,
+				DependsOn:        []models.Dependency{dependencyOnParent},
+				GeneratedBy:      strconv.Itoa(stepExec.StepID),
 			}
 
 			wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": rubricShellSettings}
@@ -104,10 +116,32 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 				continue
 			}
 
-			if _, err := models.CreateStep(db, strconv.Itoa(stepExec.TaskID), title, string(settingsBytes)); err != nil {
-				stepLogger.Printf("Error creating step for criterion '%s' from step %d: %v", crit.Title, stepExec.StepID, err)
+			if existingStep, ok := existingStepsMap[crit.Title]; ok {
+				// Update existing step if settings have changed
+				if string(settingsBytes) != existingStep.Settings {
+					if err := models.UpdateStepSettings(db, existingStep.ID, string(settingsBytes)); err != nil {
+						stepLogger.Printf("Error updating step %d for criterion '%s': %v", existingStep.ID, crit.Title, err)
+					} else {
+						stepLogger.Printf("Successfully updated step %d for criterion '%s'", existingStep.ID, crit.Title)
+					}
+				}
+				delete(existingStepsMap, crit.Title) // Mark as processed
 			} else {
-				stepLogger.Printf("Successfully created step for criterion '%s'", crit.Title)
+				// Create new step
+				if _, err := models.CreateStep(db, strconv.Itoa(stepExec.TaskID), title, string(settingsBytes)); err != nil {
+					stepLogger.Printf("Error creating step for criterion '%s': %v", crit.Title, err)
+				} else {
+					stepLogger.Printf("Successfully created step for criterion '%s'", crit.Title)
+				}
+			}
+		}
+
+		// Delete orphaned steps
+		for _, orphanedStep := range existingStepsMap {
+			if err := models.DeleteStep(db, orphanedStep.ID); err != nil {
+				stepLogger.Printf("Error deleting orphaned step %d: %v", orphanedStep.ID, err)
+			} else {
+				stepLogger.Printf("Successfully deleted orphaned step %d", orphanedStep.ID)
 			}
 		}
 

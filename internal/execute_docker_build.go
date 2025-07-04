@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -13,7 +14,7 @@ import (
 )
 
 // executeDockerBuild executes the docker build command and captures the image ID
-func executeDockerBuild(workDir string, config *models.DockerBuildConfig, stepID int, db *sql.DB) error {
+func executeDockerBuild(workDir string, config *models.DockerBuildConfig, stepID int, db *sql.DB, stepLogger *log.Logger) error {
 	// Process docker build parameters, replacing the image tag placeholder
 	var buildParams []string
 	// Convert DependsOn to a map for easier access
@@ -49,10 +50,10 @@ func executeDockerBuild(workDir string, config *models.DockerBuildConfig, stepID
 		stdoutOutput := stdoutBuf.String()
 		stderrOutput := stderrBuf.String()
 		if len(stdoutOutput) > 0 {
-			models.StepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
+			stepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
 		}
 		if len(stderrOutput) > 0 {
-			models.StepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
+			stepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
 		}
 		return fmt.Errorf("docker build failed: %w", err)
 	}
@@ -62,10 +63,10 @@ func executeDockerBuild(workDir string, config *models.DockerBuildConfig, stepID
 	stderrOutput := stderrBuf.String()
 
 	if len(stdoutOutput) > 0 {
-		models.StepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
+		stepLogger.Printf("Step %d: Docker build stdout:\n%s\n", stepID, stdoutOutput)
 	}
 	if len(stderrOutput) > 0 {
-		models.StepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
+		stepLogger.Printf("Step %d: Docker build stderr:\n%s\n", stepID, stderrOutput)
 	}
 
 	// Get the image ID

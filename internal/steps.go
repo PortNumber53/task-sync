@@ -14,13 +14,18 @@ import (
 
 // stepProcessors maps step types to their respective processor functions with consistent signature using wrappers.
 var stepProcessors = map[string]func(*sql.DB, *models.StepExec, *log.Logger) error{
-	"docker_pull":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerPullSteps(db); return nil },
-	"docker_build": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerBuildSteps(db, logger); return nil },
-	"docker_run":   func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerRunSteps(db); return nil },
-	"docker_pool":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerPoolSteps(db); return nil },
-	"docker_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerShellSteps(db); return nil },
-	"file_exists":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processFileExistsSteps(db); return nil },
-	"rubrics_import": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processRubricsImportSteps(db); return nil },
+	"docker_pull":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerPullSteps(db, se.StepID); return nil },
+		"docker_build":   func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerBuildSteps(db, logger, se.StepID); return nil },
+	"docker_run":   func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { return processDockerRunSteps(db, se.StepID) },
+	"docker_pool":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { return processDockerPoolSteps(db, se.StepID) },
+	"docker_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerShellSteps(db, se.StepID); return nil },
+		"file_exists": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+		if se != nil && se.StepID != 0 {
+			return ProcessFileExistsStep(db, se, logger)
+		}
+		return processAllFileExistsSteps(db, logger)
+	},
+	"rubrics_import": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { return processRubricsImportSteps(db, se.StepID) },
 	"rubric_set": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 		// If a specific step is provided (from ProcessSpecificStep), run only that.
 		if se != nil && se.StepID != 0 {
@@ -252,23 +257,22 @@ func TreeSteps(db *sql.DB) error {
 	// 5. Print the tree, grouped by task
 	sort.Ints(taskIDs) // Sort tasks by ID for consistent output
 	for _, taskID := range taskIDs {
+		taskName := taskNames[taskID]
+		fmt.Printf("%d-%s\n", taskID, taskName)
+
 		if steps, ok := taskSteps[taskID]; ok {
-			if taskName, ok := taskNames[taskID]; ok {
-				fmt.Printf("%d-%s\n", taskID, taskName)
-
-				var rootNodes []*StepNode
-				for _, node := range steps {
-					if !isChild[node.ID] {
-						rootNodes = append(rootNodes, node)
-					}
+			var rootNodes []*StepNode
+			for _, node := range steps {
+				if !isChild[node.ID] {
+					rootNodes = append(rootNodes, node)
 				}
-
-				sort.Slice(rootNodes, func(i, j int) bool {
-					return rootNodes[i].ID < rootNodes[j].ID
-				})
-
-				printChildren(rootNodes, "")
 			}
+
+			sort.Slice(rootNodes, func(i, j int) bool {
+				return rootNodes[i].ID < rootNodes[j].ID
+			})
+
+			printChildren(rootNodes, "")
 		}
 	}
 

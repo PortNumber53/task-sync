@@ -11,10 +11,19 @@ import (
 )
 
 // processDockerShellSteps processes docker shell steps for active tasks.
-func processDockerShellSteps(db *sql.DB) {
-	query := `SELECT s.id, s.task_id, s.settings FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND s.settings::text LIKE '%docker_shell%'`
+func processDockerShellSteps(db *sql.DB, targetStepID int) {
+	var query string
+	var rows *sql.Rows
+	var err error
 
-	rows, err := db.Query(query)
+	if targetStepID != 0 {
+		query = `SELECT s.id, s.task_id, s.settings FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1 AND s.settings ? 'docker_shell'`
+		rows, err = db.Query(query, targetStepID)
+	} else {
+		query = `SELECT s.id, s.task_id, s.settings FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND s.settings ? 'docker_shell'`
+		rows, err = db.Query(query)
+	}
+
 	if err != nil {
 		models.StepLogger.Println("Docker shell query error:", err)
 		return

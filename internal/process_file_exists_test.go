@@ -2,6 +2,7 @@ package internal
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -9,18 +10,15 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
-func TestProcessFileExistsSteps(t *testing.T) {
-	// Initialize logger to avoid nil pointer issues
-	stepLogger = log.New(testWriter{}, "", 0)
+func TestProcessFileExistsStep(t *testing.T) {
 	tempDir := t.TempDir()
 	testFile1 := filepath.Join(tempDir, "testfile1.txt")
 	if err := os.WriteFile(testFile1, []byte("content1"), 0644); err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
-
-	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND t.local_path IS NOT NULL AND t.local_path <> '' AND s.settings ? 'file_exists'`
 
 	testCases := []struct {
 		name                 string
@@ -90,10 +88,12 @@ func TestProcessFileExistsSteps(t *testing.T) {
 			defer db.Close()
 
 			settingsBytes, _ := json.Marshal(tc.settings)
-			rows := sqlmock.NewRows([]string{"id", "task_id", "settings", "local_path"}).
-				AddRow(tc.stepID, 1, string(settingsBytes), tempDir)
-
-			mock.ExpectQuery(regexp.QuoteMeta(query)).WillReturnRows(rows)
+			step := &models.StepExec{
+				StepID:    tc.stepID,
+				TaskID:    1,
+				Settings:  string(settingsBytes),
+				LocalPath: tempDir,
+			}
 
 			if tc.expectSettingsUpdate {
 				mock.ExpectExec(regexp.QuoteMeta(`UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2`)).
@@ -113,7 +113,8 @@ func TestProcessFileExistsSteps(t *testing.T) {
 				WithArgs(expectedResultArg, tc.stepID).
 				WillReturnResult(sqlmock.NewResult(1, 1))
 
-			processFileExistsSteps(db)
+			logger := log.New(io.Discard, "", 0)
+			ProcessFileExistsStep(db, step, logger)
 
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Errorf("there were unfulfilled expectations: %s", err)

@@ -279,8 +279,18 @@ func HandleTask() {
 	}
 
 	if showHelp || subcommand == "--help" || subcommand == "-h" {
-		// Specific help for task subcommands can be added here
-		helpPkg.PrintTaskHelp()
+		switch subcommand {
+		case "create":
+			helpPkg.PrintTaskCreateHelp()
+		case "delete":
+			helpPkg.PrintTaskDeleteHelp()
+		case "edit":
+			helpPkg.PrintTaskEditHelp()
+		case "list":
+			helpPkg.PrintTasksListHelp()
+		default:
+			helpPkg.PrintTaskHelp()
+		}
 		os.Exit(0)
 	}
 

@@ -239,22 +239,36 @@ Examples:
 
 // PrintTaskEditHelp prints help for the task edit command
 func PrintTaskEditHelp() {
-	fmt.Println("Edit a task's details.")
-	fmt.Println()
-	fmt.Println("Usage:")
-	fmt.Println("  task edit <TASK_ID> [FIELD=VALUE] ...")
-	fmt.Println()
-	fmt.Println("Examples:")
-	fmt.Println("  task edit 123 name=new_task_name")
-	fmt.Println("  task edit 123 image_tag=my_custom_tag image_hash=abc123def456")
-	fmt.Println()
-	fmt.Println("Editable fields:")
-	fmt.Println("  - name: Task name")
-	fmt.Println("  - description: Task description")
-	fmt.Println("  - image_tag: Docker image tag (e.g., 'my_image:latest')")
-	fmt.Println("  - image_hash: Docker image hash (e.g., 'sha256:abc123')")
-	fmt.Println("  - status: Task status")
-	fmt.Println("  - localpath: Local filesystem path for the task")
+	helpText := `Edit a task's details.
+
+Usage:
+  task-sync task edit TASK_ID --set KEY=VALUE [--set KEY2=VALUE2 ...]
+
+Arguments:
+  TASK_ID    ID of the task to edit
+
+Options:
+  --set KEY=VALUE    Set a field on the task. This can be used multiple times.
+  -h, --help         Show this help message and exit
+
+Editable Fields:
+  - name:        Task name
+  - description: Task description
+  - image_tag:   Docker image tag (e.g., 'my_image:latest')
+  - image_hash:  Docker image hash (e.g., 'sha256:abc123')
+  - status:      Task status (e.g., 'pending', 'active', 'completed')
+  - localpath:   Local filesystem path for the task
+
+Examples:
+  # Edit the name of task with ID 123
+  task-sync task edit 123 --set name="My New Task Name"
+
+  # Update the status and local path for task 45
+  task-sync task edit 45 --set status=active --set localpath=/path/to/new/location
+
+  # Show this help message
+  task-sync task edit --help`
+	fmt.Println(helpText)
 }
 
 // PrintTaskHelp prints help for the root task command

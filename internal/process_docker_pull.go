@@ -13,10 +13,19 @@ import (
 	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
-func processDockerPullSteps(db *sql.DB) {
-	query := `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND s.settings ? 'docker_pull'`
+func processDockerPullSteps(db *sql.DB, stepID int) {
+	var query string
+	var rows *sql.Rows
+	var err error
 
-	rows, err := db.Query(query)
+	if stepID != 0 {
+		query = `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1 AND s.settings ? 'docker_pull'`
+		rows, err = db.Query(query, stepID)
+	} else {
+		query = `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND s.settings ? 'docker_pull'`
+		rows, err = db.Query(query)
+	}
+
 	if err != nil {
 		models.StepLogger.Printf("Error querying for docker_pull steps: %v\n", err)
 		return

@@ -65,39 +65,198 @@ The value for `file_exists` can be a single string for one file, or an array of 
 }
 ```
 
-**Example CLI Command (Multiple Files):**
+### 2. `docker_pull`
 
-```bash
-./task-sync step create --task-id 1 --title "Check for source files" --settings '{
-  "file_exists": [
-    "main.go",
-    "go.mod"
-  ]
-}'
+Pulls a Docker image from a registry.
+
+**Settings:**
+
+```json
+{
+  "docker_pull": {
+    "image_id": "ubuntu",
+    "image_tag": "latest",
+    "prevent_run_before": "2024-01-01T00:00:00Z"
+  }
+}
 ```
 
-### 2. `docker_build`
+### 3. `docker_build`
 
-Builds a Docker image from a Dockerfile. This step can track file changes to avoid rebuilding if no source files have been modified.
+Builds a Docker image from a Dockerfile. It tracks file changes using hashes to avoid unnecessary rebuilds.
 
 **Settings:**
 
 ```json
 {
   "docker_build": {
-    "context": ".",
-    "image_tag": "my-app:latest",
-    "tags": ["my-app:1.0.0", "my-registry/my-app:latest"],
-    "files": ["main.go", "go.mod", "Dockerfile"],
-    "hashes": {
-      "main.go": "<hash_of_main.go>",
-      "go.mod": "<hash_of_go.mod>",
-      "Dockerfile": "<hash_of_Dockerfile>"
+    "image_id": "my-app",
+    "image_tag": "latest",
+    "files": {
+        "main.go": "<hash_of_main.go>",
+        "go.mod": "<hash_of_go.mod>",
+        "Dockerfile": "<hash_of_Dockerfile>"
     },
-    "image_id": "sha256:...",
-    "params": ["--build-arg", "VERSION=1.0"],
+    "parameters": ["--build-arg", "VERSION=1.0"],
     "depends_on": [
       { "id": 101 }
+    ]
+  }
+}
+```
+
+### 4. `docker_run`
+
+Runs a Docker container from a previously built or pulled image. The `image_id` and `image_tag` are inherited from its dependencies.
+
+**Settings:**
+
+```json
+{
+  "docker_run": {
+    "container_name": "my-running-app",
+    "parameters": ["-p", "8080:80"],
+    "keep_forever": false,
+    "depends_on": [
+      { "id": 102 }
+    ]
+  }
+}
+```
+
+### 5. `docker_pool`
+
+Creates and manages a pool of running Docker containers from a specific image. This is useful for running tests in parallel.
+
+**Settings:**
+
+```json
+{
+  "docker_pool": {
+    "pool_size": 3,
+    "parameters": ["-v", "/data:/data"],
+    "keep_forever": true,
+    "depends_on": [
+      { "id": 102 }
+    ]
+  }
+}
+```
+
+### 6. `docker_shell`
+
+Executes a series of shell commands inside a running Docker container. The container is determined by its dependencies.
+
+**Settings:**
+
+```json
+{
+    "docker_shell": {
+        "command": [
+            {
+                "bash": "echo 'hello world'"
+            },
+            {
+                "bash": "ls -la"
+            }
+        ],
+        "depends_on": [
+            {
+                "id": 103
+            }
+        ]
+    }
+}
+```
+
+### 7. `rubrics_import`
+
+Imports rubric definitions from an MHTML file and converts them to a Markdown file.
+
+**Settings:**
+
+```json
+{
+  "rubrics_import": {
+    "mhtml_file": "path/to/rubric.mhtml",
+    "md_file": "path/to/rubric.md",
+    "depends_on": []
+  }
+}
+```
+
+### 8. `rubric_set`
+
+Manages a set of rubrics and generates `rubric_shell` steps for each criterion. It assigns solution patches to specific containers for testing.
+
+**Settings:**
+
+```json
+{
+  "rubric_set": {
+    "rubrics": ["path/to/rubric.md"],
+    "hash": "<hash_of_rubric.md>",
+    "assign_containers": {
+      "solution1.patch": "container-1",
+      "solution2.patch": "container-2"
+    },
+    "depends_on": [
+      { "id": 104 }
+    ]
+  }
+}
+```
+
+### 9. `rubric_shell`
+
+Executes a test command against a specific rubric criterion inside one or more Docker containers. It iterates through the `assign_containers` map, applying each solution patch and running the command in the corresponding container.
+
+**Settings:**
+
+```json
+{
+  "rubric_shell": {
+    "assign_containers": {
+      "solution1.patch": "container-1",
+      "solution2.patch": "container-2"
+    },
+    "command": "ansible-playbook -i inventory.ini test.yml",
+    "criterion_id": "unique-criterion-uuid",
+    "counter": "1",
+    "score": 10,
+    "required": true,
+    "depends_on": [
+      { "id": 105 }
+    ]
+  }
+}
+```
+
+### 10. `dynamic_rubric`
+
+A comprehensive step that dynamically generates `rubric_shell` steps based on rubric files and associated solution patches. It monitors files for changes and assigns containers for testing.
+
+**Settings:**
+
+```json
+{
+  "dynamic_rubric": {
+    "rubrics": ["TASK_DATA.md"],
+    "hash": "<hash_of_TASK_DATA.md>",
+    "files": {
+        "file1.txt": "<hash_of_file1.txt>"
+    },
+    "assign_containers": {
+      "solution1.patch": "container-1",
+      "solution2.patch": "container-2"
+    },
+    "environment": {
+        "docker": true,
+        "image_id": "my-image",
+        "image_tag": "latest"
+    },
+    "depends_on": [
+      { "id": 106 }
     ]
   }
 }
@@ -219,89 +378,7 @@ Executes one or more shell commands inside a pre-existing, running Docker contai
 }'
 ```
 
-### 5. `docker_rubrics`
-
-Monitors specified files for changes and runs rubric evaluations inside a Docker container. This step is useful for automated grading scenarios where submissions are evaluated against a set of rules. It combines file monitoring with execution within a containerized environment.
-
-**Settings:**
-
-```json
-{
-  "docker_rubrics": {
-    "image_tag": "grader-env:v2",
-    "image_id": "sha256:...",
-    "files": [
-      "student_submission.py",
-      "tests/"
-    ],
-    "hashes": {
-      "student_submission.py": "<hash>"
-    },
-    "depends_on": [{ "id": 4 }]
-  }
-}
-```
-
-- `image_tag` (optional): The Docker image to use for the evaluation.
-- `image_id` (optional): The specific image ID to use, often inherited from a `docker_build` step.
-- `files` (required): A list of files or directories to monitor for changes. If any of these change, the rubrics will be re-evaluated.
-- `hashes` (output): A map of file paths to their SHA256 hashes, managed automatically by the system to track changes.
-- `depends_on` (optional): This step typically depends on a `docker_run` step to ensure the container environment is ready.
-
-**Example CLI Command:**
-
-```bash
-./task-sync step create --task-id 2 --title "Grade Submission" --settings '{
-  "docker_rubrics": {
-    "image_tag": "python-grader:latest",
-    "files": ["submission/"],
-    "depends_on": [{ "id": 9 }]
-  }
-}'
-```
-
-### 6. `dynamic_lab`
-
-Monitors specified files for changes by comparing their content hashes. This step is useful for triggering other steps when a file is modified.
-
-**Settings:**
-
-```json
-{
-  "dynamic_lab": {
-    "files": [
-      "path/to/your/file1.txt",
-      "path/to/another/file2.go"
-    ],
-    "hashes": {
-      "path/to/your/file1.txt": "<hash_of_file1>",
-      "path/to/another/file2.go": "<hash_of_file2>"
-    },
-    "environment": {
-      "docker": false
-    }
-  }
-}
-```
-
-- `files`: An array of file paths to monitor for changes.
-- `hashes`: A map of file paths to their corresponding SHA256 hashes. This field is managed automatically by the system to track file changes. You can initialize it with empty values.
-- `environment`: (Optional) Specifies the execution environment. If a `container_id` is found in the step's dependencies, `docker` will be automatically set to `true`.
-
-**Example CLI Command:**
-
-```bash
-./task-sync step create --task-id 1 --title "Monitor Source Code" --settings '{
-  "dynamic_lab": {
-    "files": [
-      "main.go",
-      "go.mod"
-    ]
-  }
-}'
-```
-
-### 8. `rubrics_import`
+### 5. `rubrics_import`
 
 Parses an MHTML file containing rubric criteria and generates a Markdown file (`TASK_DATA.md`) with the extracted information. This is useful for automating the creation of structured task data from external rubric definitions.
 
@@ -330,44 +407,60 @@ Parses an MHTML file containing rubric criteria and generates a Markdown file (`
 }'
 ```
 
-### 7. `dynamic_rubric`
+### 6. `dynamic_rubric`
 
-Parses a rubric file (in Markdown format) and generates child steps based on its content. This is highly useful for automated grading and dynamic task generation.
+Dynamically generates and manages a set of `rubric_shell` steps based on one or more rubric files and a set of solution patches. This step is designed to work with a `docker_pool` to test multiple solutions against rubric criteria in parallel.
 
 **Settings:**
 
 ```json
 {
   "dynamic_rubric": {
-    "rubrics": "rubric.md",
-    "environment": {
-      "docker": true,
-      "image_tag": "your-image:latest",
-      "image_id": "sha256:abcdef..."
-    }
+    "rubrics": ["NEW_TASK_DATA.md"],
+    "files": {
+      "solution1.patch": "",
+      "solution2.patch": ""
+    },
+    "hashes": {
+      "NEW_TASK_DATA.md": "<hash>",
+      "solution1.patch": "<hash>",
+      "solution2.patch": "<hash>"
+    },
+    "assign_containers": {
+      "solution1.patch": "container_name_1",
+      "solution2.patch": "container_name_2"
+    },
+    "depends_on": [{ "id": 126 }]
   }
 }
 ```
 
-- `file`: The path to the Markdown file containing the rubric criteria.
-- `environment`: If `docker` is `true`, this step will first create a `docker_run` step with the specified `image_tag` and `image_id`, and then generate `docker_shell` steps for each rubric criterion that depend on it.
+- `rubrics` (required): A list of paths to the Markdown files containing rubric criteria.
+- `files` (optional): A map of associated file paths (like solution patches) to track for changes. The value can be empty.
+- `hashes` (output): A map of file paths to their SHA256 hashes. This is used for change detection and is managed automatically by the system.
+- `assign_containers` (required): A map that pairs a file (e.g., a solution patch) with a container name from a `docker_pool` step. This tells the system which container to use for testing each solution.
+- `depends_on` (required): This step must depend on a `docker_pool` step that provides the containers specified in `assign_containers`.
 
 **Example CLI Command:**
 
 ```bash
-./task-sync step create --task-id 1 --title "Grade Project" --settings '{
+./task-sync step create --task-id 1 --title "Create Dynamic Rubrics" --settings '{
   "dynamic_rubric": {
-    "file": "rubric.md",
-    "environment": {
-      "docker": true,
-      "image_tag": "grader:v1",
-      "image_id": "sha256:123..."
-    }
+    "rubrics": ["NEW_TASK_DATA.md"],
+    "files": {
+      "solution1.patch": "",
+      "solution2.patch": ""
+    },
+    "assign_containers": {
+      "solution1.patch": "worker_pool_container_1",
+      "solution2.patch": "worker_pool_container_2"
+    },
+    "depends_on": [{ "id": 126 }]
   }
 }'
 ```
 
-### 8. `docker_pull`
+### 7. `docker_pull`
 
 Pulls a Docker image from a registry.
 
@@ -399,7 +492,7 @@ Pulls a Docker image from a registry.
   }
 }'
 
-### 9. `docker_pool`
+### 8. `docker_pool`
 
 Manages a pool of identical Docker containers, ensuring a specified number of instances are running. This is useful for creating a set of workers or services that can be used by other steps.
 
@@ -446,9 +539,9 @@ Manages a pool of identical Docker containers, ensuring a specified number of in
   }
 }'
 
-### 10. `rubric_set`
+### 9. `rubric_set`
 
-Parses a rubric Markdown file and dynamically creates `rubric_shell` steps for each criterion. This step supports extracting and orchestrating rubric items from files like TASK_DATA.md.
+Parses a rubric Markdown file and dynamically creates `rubric_shell` steps for each criterion. This step tracks the main rubric file, a held-out test, and up to four solution files for changes.
 
 **Settings:**
 
@@ -456,56 +549,66 @@ Parses a rubric Markdown file and dynamically creates `rubric_shell` steps for e
 {
   "rubric_set": {
     "file": "TASK_DATA.md",
+    "held_out_test": "held_out_test.patch",
+    "solution_1": "solution1.patch",
+    "solution_2": "solution2.patch",
+    "hashes": {
+      "file": "<hash>",
+      "held_out_test": "<hash>",
+      "solution_1": "<hash>",
+      "solution_2": "<hash>"
+    },
     "depends_on": [
-      { "id": 101 }
+      { "id": 144 }
     ]
   }
 }
 ```
 
 - `file` (required): The path to the Markdown file containing rubric criteria.
-- `depends_on` (optional): A list of other step IDs that must complete before this step runs.
+- `held_out_test` (optional): Path to a patch file for a held-out test.
+- `solution_1` to `solution_4` (optional): Paths to patch files for different solutions.
+- `hashes` (output): A map of file paths to their SHA256 hashes, used for change detection and managed automatically.
+- `depends_on` (optional): A list of other step IDs that must complete before this step runs. Typically depends on a `rubrics_import` step.
 
 **Example CLI Command:**
 
 ```bash
 ./task-sync step create --task-id 1 --title "Set Up Rubric Steps" --settings '{
   "rubric_set": {
-    "file": "TASK_DATA.md"
+    "file": "TASK_DATA.md",
+    "held_out_test": "held_out_test.patch",
+    "solution_1": "solution1.patch"
   }
 }'
 ```
 
-### 11. `rubric_shell`
+### 10. `rubric_shell`
 
-Executes a held-out test command in a Docker container for a specific rubric criterion, capturing output and errors. This step is generated by `rubric_set` and runs commands defined in the rubric.
+Executes a test command for a single rubric criterion. This step is generated automatically by a parent step (like `dynamic_rubric` or `rubric_set`) and is not typically created manually. When generated by a `dynamic_rubric` step, it runs the test against multiple solution patches, each within a dedicated container from a `docker_pool`.
 
-**Settings:**
+**Settings (Populated by Generator Step):**
 
 ```json
 {
   "rubric_shell": {
-    "command": "/app/run_test.sh",
-    "image_tag": "grader-image:latest",
-    "image_id": "sha256:abcdef...",
-    "depends_on": [
-      { "id": 102 }
-    ]
+    "command": "/app/run_criterion_test.sh",
+    "criterion_id": "d0aba505-cc93-489c-bc8b-da566a1f0af5",
+    "counter": "1",
+    "score": 10,
+    "required": true,
+    "assign_containers": {
+      "solution1.patch": "container_name_1",
+      "solution2.patch": "container_name_2"
+    },
+    "generated_by": "127",
+    "depends_on": [{ "id": 127 }]
   }
 }
 ```
 
-- `command` (required): The shell command to run inside the Docker container.
-- `image_tag` (required): The Docker image tag for the container.
-- `image_id` (optional): The specific image ID for verification.
-- `depends_on` (optional): Dependencies on other steps.
-
-**Example CLI Command:**
-
-```bash
-./task-sync step create --task-id 1 --title "Run Rubric Shell Test" --settings '{
-  "rubric_shell": {
-    "command": "/app/test_criterion.sh",
-    "image_tag": "grader:v1"
-  }
-}'
+- `command`: The shell command to execute, taken from the criterion's `held_out_test` field in the rubric file.
+- `criterion_id`, `counter`, `score`, `required`: Details about the specific rubric criterion being tested.
+- `assign_containers`: A map of solution files to container names, inherited from the parent `dynamic_rubric` step.
+- `generated_by`: The ID of the parent step that created this step.
+- `depends_on`: A dependency on the parent step.

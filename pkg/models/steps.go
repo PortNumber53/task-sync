@@ -32,10 +32,19 @@ type StepExec struct {
 	LocalPath string
 }
 
+// StepConfig is an interface that all step configurations should implement.
+type StepConfig interface {
+	GetImageTag() string
+	GetImageID() string
+	HasImage() bool
+	GetDependsOn() []Dependency
+}
+
 // --- Top-level Config Structs ---
 
 // DockerBuildConfig represents the configuration for a docker_build step.
 type DockerBuildConfig struct {
+	Dockerfile string            `json:"dockerfile,omitempty"`
 	ImageID    string            `json:"image_id,omitempty"`
 	ImageTag   string            `json:"image_tag,omitempty"`
 	DependsOn  []Dependency      `json:"depends_on,omitempty"`
@@ -43,12 +52,22 @@ type DockerBuildConfig struct {
 	Parameters []string          `json:"parameters,omitempty"`
 }
 
+func (c *DockerBuildConfig) GetImageTag() string      { return c.ImageTag }
+func (c *DockerBuildConfig) GetImageID() string       { return c.ImageID }
+func (c *DockerBuildConfig) HasImage() bool           { return c.ImageTag != "" && c.ImageID != "" }
+func (c *DockerBuildConfig) GetDependsOn() []Dependency { return c.DependsOn }
+
 type DockerPullConfig struct {
 	ImageID          string       `json:"image_id,omitempty"`
 	ImageTag         string       `json:"image_tag,omitempty"`
 	DependsOn        []Dependency `json:"depends_on,omitempty"`
 	PreventRunBefore string       `json:"prevent_run_before,omitempty"`
 }
+
+func (c *DockerPullConfig) GetImageTag() string      { return c.ImageTag }
+func (c *DockerPullConfig) GetImageID() string       { return c.ImageID }
+func (c *DockerPullConfig) HasImage() bool           { return c.ImageTag != "" && c.ImageID != "" }
+func (c *DockerPullConfig) GetDependsOn() []Dependency { return c.DependsOn }
 
 type DockerRunConfig struct {
 	ImageID       string       `json:"-"`
@@ -60,7 +79,13 @@ type DockerRunConfig struct {
 	KeepForever   bool         `json:"keep_forever,omitempty"`
 }
 
+func (c *DockerRunConfig) GetImageTag() string      { return c.ImageTag }
+func (c *DockerRunConfig) GetImageID() string       { return c.ImageID }
+func (c *DockerRunConfig) HasImage() bool           { return c.ImageTag != "" && c.ImageID != "" }
+func (c *DockerRunConfig) GetDependsOn() []Dependency { return c.DependsOn }
+
 type DockerPoolConfig struct {
+	SourceStepID int			`json:"source_step_id,omitempty"`
 	ImageID     string          `json:"-"`
 	ImageTag    string          `json:"-"`
 	DependsOn   []Dependency    `json:"depends_on,omitempty"`
@@ -70,6 +95,11 @@ type DockerPoolConfig struct {
 	KeepForever bool            `json:"keep_forever,omitempty"`
 }
 
+func (c *DockerPoolConfig) GetImageTag() string      { return c.ImageTag }
+func (c *DockerPoolConfig) GetImageID() string       { return c.ImageID }
+func (c *DockerPoolConfig) HasImage() bool           { return c.ImageTag != "" && c.ImageID != "" }
+func (c *DockerPoolConfig) GetDependsOn() []Dependency { return c.DependsOn }
+
 type DockerShellConfig struct {
 	Docker struct {
 		ImageID  string `json:"-"`
@@ -78,6 +108,11 @@ type DockerShellConfig struct {
 	DependsOn []Dependency        `json:"depends_on,omitempty"`
 	Command   []map[string]string `json:"command,omitempty"`
 }
+
+func (c *DockerShellConfig) GetImageTag() string      { return c.Docker.ImageTag }
+func (c *DockerShellConfig) GetImageID() string       { return c.Docker.ImageID }
+func (c *DockerShellConfig) HasImage() bool           { return c.Docker.ImageTag != "" && c.Docker.ImageID != "" }
+func (c *DockerShellConfig) GetDependsOn() []Dependency { return c.DependsOn }
 
 type Criterion struct {
 	Title       string
@@ -199,10 +234,28 @@ type DynamicRubricConfig struct {
 	} `json:"dynamic_rubric"`
 }
 
+func (c *DynamicRubricConfig) GetImageTag() string {
+	return c.DynamicRubric.Environment.ImageTag
+}
+func (c *DynamicRubricConfig) GetImageID() string {
+	return c.DynamicRubric.Environment.ImageID
+}
+func (c *DynamicRubricConfig) HasImage() bool {
+	return c.DynamicRubric.Environment.ImageTag != "" && c.DynamicRubric.Environment.ImageID != ""
+}
+func (c *DynamicRubricConfig) GetDependsOn() []Dependency {
+	return c.DynamicRubric.DependsOn
+}
+
 // FileExistsConfig represents the configuration for a file_exists step.
 type FileExistsConfig struct {
 	FileExists []string `json:"file_exists"`
 }
+
+func (c *FileExistsConfig) GetImageTag() string      { return "" }
+func (c *FileExistsConfig) GetImageID() string       { return "" }
+func (c *FileExistsConfig) HasImage() bool           { return false }
+func (c *FileExistsConfig) GetDependsOn() []Dependency { return nil }
 
 // RubricsImportConfig represents the configuration for a rubrics_import step.
 type RubricsImportConfig struct {
@@ -210,6 +263,11 @@ type RubricsImportConfig struct {
 	MDFile    string `json:"md_file"`
 	DependsOn []Dependency `json:"depends_on,omitempty"`
 }
+
+func (c *RubricsImportConfig) GetImageTag() string      { return "" }
+func (c *RubricsImportConfig) GetImageID() string       { return "" }
+func (c *RubricsImportConfig) HasImage() bool           { return false }
+func (c *RubricsImportConfig) GetDependsOn() []Dependency { return c.DependsOn }
 
 // DockerRubricsConfig represents the configuration for a docker_rubrics step.
 type DockerRubricsConfig struct {
@@ -222,31 +280,47 @@ type DockerRubricsConfig struct {
 	} `json:"docker_rubrics"`
 }
 
+func (c *DockerRubricsConfig) GetImageTag() string      { return c.DockerRubrics.ImageTag }
+func (c *DockerRubricsConfig) GetImageID() string       { return c.DockerRubrics.ImageID }
+func (c *DockerRubricsConfig) HasImage() bool           { return c.DockerRubrics.ImageTag != "" && c.DockerRubrics.ImageID != "" }
+func (c *DockerRubricsConfig) GetDependsOn() []Dependency { return c.DockerRubrics.DependsOn }
+
 // RubricShellConfig represents the configuration for a rubric_shell step.
 type RubricShellConfig struct {
 	ImageID          string            `json:"image_id,omitempty"`
 	ImageTag         string            `json:"image_tag,omitempty"`
 	AssignContainers map[string]string `json:"assign_containers,omitempty"`
-	Command       string       `json:"command"`
-	CriterionID   string       `json:"criterion_id,omitempty"`
-	Counter     string       `json:"counter,omitempty"`     // The counter of the criterion
-	Score       int          `json:"score,omitempty"`
-	Required    bool         `json:"required,omitempty"`
-	DependsOn   []Dependency `json:"depends_on,omitempty"`
-	GeneratedBy string       `json:"generated_by,omitempty"` // The ID of the rubric_set step that generated this step
+	Command          string            `json:"command"`
+	CriterionID      string            `json:"criterion_id,omitempty"`
+	Counter          string            `json:"counter,omitempty"`
+	Score            int               `json:"score,omitempty"`
+	Required         bool              `json:"required,omitempty"`
+	DependsOn        []Dependency      `json:"depends_on,omitempty"`
+	GeneratedBy      string            `json:"generated_by,omitempty"`
 }
+
+func (c *RubricShellConfig) GetImageTag() string      { return c.ImageTag }
+func (c *RubricShellConfig) GetImageID() string       { return c.ImageID }
+func (c *RubricShellConfig) HasImage() bool           { return c.ImageTag != "" && c.ImageID != "" }
+func (c *RubricShellConfig) GetDependsOn() []Dependency { return c.DependsOn }
 
 // RubricSetConfig represents the configuration for a rubric_set step.
 type RubricSetConfig struct {
-	File        string            `json:"file"`
-	HeldOutTest string            `json:"held_out_test,omitempty"`
-	Solution1   string            `json:"solution_1,omitempty"`
-	Solution2   string            `json:"solution_2,omitempty"`
-	Solution3   string            `json:"solution_3,omitempty"`
-	Solution4   string            `json:"solution_4,omitempty"`
-	Hashes      map[string]string `json:"hashes,omitempty"`
-	DependsOn   []Dependency      `json:"depends_on,omitempty"`
+	File             string            `json:"file"`
+	HeldOutTest      string            `json:"held_out_test,omitempty"`
+	Solution1        string            `json:"solution_1,omitempty"`
+	Solution2        string            `json:"solution_2,omitempty"`
+	Solution3        string            `json:"solution_3,omitempty"`
+	Solution4        string            `json:"solution_4,omitempty"`
+	Hashes           map[string]string `json:"hashes,omitempty"`
+	AssignContainers map[string]string `json:"assign_containers,omitempty"`
+	DependsOn        []Dependency      `json:"depends_on,omitempty"`
 }
+
+func (c *RubricSetConfig) GetImageTag() string      { return "" }
+func (c *RubricSetConfig) GetImageID() string       { return "" }
+func (c *RubricSetConfig) HasImage() bool           { return false }
+func (c *RubricSetConfig) GetDependsOn() []Dependency { return c.DependsOn }
 
 // DependencyHolder is a helper struct for unmarshaling nested dependencies
 type DependencyHolder struct {
@@ -270,6 +344,11 @@ type DynamicLabConfig struct {
 	} `json:"dynamic_lab"`
 }
 
+func (c *DynamicLabConfig) GetImageTag() string      { return "" }
+func (c *DynamicLabConfig) GetImageID() string       { return c.DynamicLab.ImageID }
+func (c *DynamicLabConfig) HasImage() bool           { return c.DynamicLab.ImageID != "" }
+func (c *DynamicLabConfig) GetDependsOn() []Dependency { return c.DynamicLab.DependsOn }
+
 type StepConfigHolder struct {
 	DockerBuild   *DockerBuildConfig   `json:"docker_build,omitempty"`
 	DockerPull    *DockerPullConfig    `json:"docker_pull,omitempty"`
@@ -283,6 +362,44 @@ type StepConfigHolder struct {
 	DockerRubrics *DockerRubricsConfig `json:"docker_rubrics,omitempty"`
 	RubricShell   *RubricShellConfig   `json:"rubric_shell,omitempty"`
 	RubricSet     *RubricSetConfig     `json:"rubric_set,omitempty"`
+}
+
+// GetConfig returns the non-nil configuration from the holder.
+func (h *StepConfigHolder) GetConfig() (StepConfig, error) {
+	if h.DockerBuild != nil {
+		return h.DockerBuild, nil
+	}
+	if h.DockerPull != nil {
+		return h.DockerPull, nil
+	}
+	if h.DockerRun != nil {
+		return h.DockerRun, nil
+	}
+	if h.DockerPool != nil {
+		return h.DockerPool, nil
+	}
+	if h.DockerShell != nil {
+		return h.DockerShell, nil
+	}
+	if h.DynamicRubric != nil {
+		return h.DynamicRubric, nil
+	}
+	if h.FileExists != nil {
+		return h.FileExists, nil
+	}
+	if h.RubricsImport != nil {
+		return h.RubricsImport, nil
+	}
+	if h.DockerRubrics != nil {
+		return h.DockerRubrics, nil
+	}
+	if h.RubricShell != nil {
+		return h.RubricShell, nil
+	}
+	if h.RubricSet != nil {
+		return h.RubricSet, nil
+	}
+	return nil, fmt.Errorf("no configuration found in StepConfigHolder")
 }
 
 // AllDependencies collects and returns all `depends_on` entries from the held configurations.
@@ -809,55 +926,138 @@ func ListSteps(db *sql.DB, full bool) error {
 	return nil
 }
 
-// FindImageDetailsRecursive retrieves image_hash and image_tag directly from task settings.
+// FindImageDetailsRecursive searches for Docker image details by traversing up the dependency chain.
 func FindImageDetailsRecursive(db *sql.DB, stepID int, stepLogger *log.Logger) (string, string, error) {
+	stepLogger.Printf("FindImageDetailsRecursive: Checking step ID: %d", stepID)
+
+	// 1. Get task_id and settings for the current step
 	var taskID int
-	err := db.QueryRow(`SELECT task_id FROM steps WHERE id = $1`, stepID).Scan(&taskID)
+	var stepSettingsJSON string
+	query := `SELECT task_id, settings FROM steps WHERE id = $1`
+	err := db.QueryRow(query, stepID).Scan(&taskID, &stepSettingsJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			stepLogger.Printf("Step %d: no step found\n", stepID)
-			return "", "", nil
+			return "", "", fmt.Errorf("step with ID %d not found", stepID)
 		}
-		stepLogger.Printf("Step %d: failed to get task_id: %v\n", stepID, err)
-		return "", "", fmt.Errorf("failed to get task_id for step %d: %w", stepID, err)
+		return "", "", err
 	}
 
+	// 2. Check the step's own config for image details first.
+	var holder StepConfigHolder
+	if err := json.Unmarshal([]byte(stepSettingsJSON), &holder); err != nil {
+		return "", "", fmt.Errorf("error unmarshalling step %d settings: %w", stepID, err)
+	}
+
+	config, err := holder.GetConfig()
+	if err != nil {
+		return "", "", fmt.Errorf("error getting config from step %d: %w", stepID, err)
+	}
+
+	if config.HasImage() {
+		stepLogger.Printf("FindImageDetailsRecursive: Found image details in step %d config", stepID)
+		return config.GetImageTag(), config.GetImageID(), nil
+	}
+
+	// Special handling for docker_pool steps which have a direct source step
+	if poolConfig, ok := config.(*DockerPoolConfig); ok {
+		if poolConfig.SourceStepID != 0 {
+			stepLogger.Printf("FindImageDetailsRecursive: Step %d is a docker_pool, recursing to source step %d", stepID, poolConfig.SourceStepID)
+			return FindImageDetailsRecursive(db, poolConfig.SourceStepID, stepLogger)
+		}
+	}
+
+	// 3. If not found, recurse through dependencies.
+	if len(config.GetDependsOn()) > 0 {
+		stepLogger.Printf("FindImageDetailsRecursive: Step %d has dependencies, recursing.", stepID)
+		for _, dep := range config.GetDependsOn() {
+			imageTag, imageID, err := FindImageDetailsRecursive(db, dep.ID, stepLogger)
+			if err != nil {
+				stepLogger.Printf("FindImageDetailsRecursive: Error traversing dependency %d for step %d: %v", dep.ID, stepID, err)
+				continue
+			}
+			if imageTag != "" || imageID != "" {
+				stepLogger.Printf("FindImageDetailsRecursive: Found image details in dependency step %d for step %d", dep.ID, stepID)
+				return imageTag, imageID, nil
+			}
+		}
+	}
+
+	// 4. If not in step config or dependencies, check the associated task's settings as a fallback.
+	stepLogger.Printf("FindImageDetailsRecursive: Checking task %d settings for image details as fallback for step %d", taskID, stepID)
 	var taskSettingsJSON sql.NullString
-	err = db.QueryRow(`SELECT settings FROM tasks WHERE id = $1`, taskID).Scan(&taskSettingsJSON)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			stepLogger.Printf("Task %d: no settings found\n", taskID)
-			return "", "", nil
-		}
-		stepLogger.Printf("Task %d: failed to get settings: %v\n", taskID, err)
-		return "", "", fmt.Errorf("failed to get task settings for task %d: %w", taskID, err)
-	}
-
-	if !taskSettingsJSON.Valid || taskSettingsJSON.String == "" {
-		stepLogger.Printf("Task %d: settings are empty or invalid\n", taskID)
+	err = db.QueryRow("SELECT settings FROM tasks WHERE id = $1", taskID).Scan(&taskSettingsJSON)
+	if err != nil || !taskSettingsJSON.Valid || taskSettingsJSON.String == "" {
 		return "", "", nil
 	}
 
 	var taskSettings map[string]interface{}
 	if err := json.Unmarshal([]byte(taskSettingsJSON.String), &taskSettings); err != nil {
-		stepLogger.Printf("Task %d: failed to unmarshal settings: %v\n", taskID, err)
 		return "", "", fmt.Errorf("failed to unmarshal task settings for task %d: %w", taskID, err)
 	}
 
 	if dockerInfo, ok := taskSettings["docker"].(map[string]interface{}); ok {
-		if imageHash, ok := dockerInfo["image_hash"].(string); ok {
-			if imageTag, ok := dockerInfo["image_tag"].(string); ok {
-				stepLogger.Printf("Found image_hash '%s' and image_tag '%s' from task settings for step %d\n", imageHash, imageTag, stepID)
-				return imageHash, imageTag, nil
-			}
+		imageTag, _ := dockerInfo["image_tag"].(string)
+		imageHash, _ := dockerInfo["image_hash"].(string)
+		if imageTag != "" || imageHash != "" {
+			stepLogger.Printf("FindImageDetailsRecursive: Found image details in task %d settings", taskID)
+			return imageTag, imageHash, nil
 		}
 	}
 
-	stepLogger.Printf("No image_hash or image_tag found in task settings for step %d\n", stepID)
+	// 5. If not found anywhere, return empty.
 	return "", "", nil
 }
 
 // GetDockerImageID retrieves image_id and image_tag from the task settings for the given step ID.
+// FindAncestorStepSettings recursively searches the dependency tree for the first ancestor
+// of a given stepType (e.g., "docker_pool") and returns its unmarshalled settings.
+func FindAncestorStepSettings(db *sql.DB, stepID int, stepType string, stepLogger *log.Logger) (json.RawMessage, error) {
+	var settingsStr string
+	err := db.QueryRow(`SELECT settings FROM steps WHERE id = $1`, stepID).Scan(&settingsStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // Step not found, end of this branch.
+		}
+		return nil, fmt.Errorf("failed to get settings for step %d: %w", stepID, err)
+	}
+
+	var settingsMap map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(settingsStr), &settingsMap); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal settings for step %d: %w", stepID, err)
+	}
+
+	// Check if the current step is of the desired type
+	if settings, ok := settingsMap[stepType]; ok {
+		return settings, nil
+	}
+
+	// If not, recurse up the dependency tree by parsing the nested depends_on field.
+	for _, stepConfigJSON := range settingsMap {
+		var holder DependencyHolder
+		// The stepConfigJSON is the value part of the map, e.g., the JSON for "rubric_shell"
+		if err := json.Unmarshal(stepConfigJSON, &holder); err != nil {
+			// This config doesn't have a depends_on field, or it's malformed. Skip it.
+			continue
+		}
+
+		// Now we have the dependencies for the current step
+		for _, dep := range holder.DependsOn {
+			ancestorSettings, err := FindAncestorStepSettings(db, dep.ID, stepType, stepLogger)
+			if err != nil {
+				stepLogger.Printf("error searching for ancestor of type '%s' in dependency %d: %v", stepType, dep.ID, err)
+				continue
+			}
+			if ancestorSettings != nil {
+				return ancestorSettings, nil
+			}
+		}
+		// We only need to check the one actual step config in the map.
+		break
+	}
+
+	return nil, nil // Not found in this branch
+}
+
 func GetDockerImageID(db *sql.DB, stepID int, stepLogger *log.Logger) (imageID, imageTag string, err error) {
 	imgID, imgTag, err := FindImageDetailsRecursive(db, stepID, stepLogger)
 	if err != nil {

@@ -110,7 +110,7 @@ Content-Transfer-Encoding: quoted-printable
 	}
 
 	// Process the step
-	err = processRubricsImportSteps(db)
+	err = processRubricsImportSteps(db, 0)
 	if err != nil {
 		t.Fatalf("processRubricsImportSteps failed: %v", err)
 	}

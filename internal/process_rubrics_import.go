@@ -10,16 +10,28 @@ import (
 )
 
 // processRubricsImportSteps processes rubrics_import steps for active tasks.
-func processRubricsImportSteps(db *sql.DB) error {
-	query := `SELECT s.id, s.task_id, s.settings, t.local_path
+func processRubricsImportSteps(db *sql.DB, stepID int) error {
+	var query string
+	var rows *sql.Rows
+	var err error
+
+	if stepID != 0 {
+		query = `SELECT s.id, s.task_id, s.settings, t.local_path
+		FROM steps s
+		JOIN tasks t ON s.task_id = t.id
+		WHERE s.id = $1 AND s.settings ? 'rubrics_import'`
+		rows, err = db.Query(query, stepID)
+	} else {
+		query = `SELECT s.id, s.task_id, s.settings, t.local_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE t.status = 'active'
 		AND t.local_path IS NOT NULL
 		AND t.local_path <> ''
 		AND s.settings ? 'rubrics_import'`
+		rows, err = db.Query(query)
+	}
 
-	rows, err := db.Query(query)
 	if err != nil {
 		models.StepLogger.Println("Rubrics import query error:", err)
 		return err

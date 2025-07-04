@@ -81,7 +81,7 @@ func TestExecuteDockerBuild(t *testing.T) {
 			// Set the mock's behavior based on the test case expectation
 			mockShouldFail = tc.expectErr
 
-			err = executeDockerBuild(tc.workDir, tc.config, tc.stepID, tc.db)
+			err = executeDockerBuild(tc.workDir, tc.config, tc.stepID, tc.db, stepLogger)
 
 			if tc.expectErr {
 				if err == nil {

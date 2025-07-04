@@ -37,6 +37,13 @@ var stepProcessors = map[string]func(*sql.DB, *models.StepExec, *log.Logger) err
 		// Otherwise (from executePendingSteps), run all rubric_shell steps.
 		return processAllRubricShellSteps(db, logger)
 	},
+	"dynamic_rubric": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+		if se != nil && se.StepID != 0 {
+			return ProcessDynamicRubricStep(db, se, logger)
+		}
+		// For now, running all dynamic_rubric steps is not supported via the general runner.
+		return fmt.Errorf("processing all dynamic_rubric steps at once is not supported")
+	},
 }
 
 // ProcessSteps is the main entry point for processing all pending steps.

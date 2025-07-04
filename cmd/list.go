@@ -10,13 +10,15 @@ import (
 
 func HandleStepList(db *sql.DB) {
 	full := false
-	for i := 3; i < len(os.Args); i++ {
-		if os.Args[i] == "--full" {
+	for _, arg := range os.Args {
+		if arg == "--full" {
 			full = true
+			break
 		}
 	}
+
 	if err := internal.ListSteps(db, full); err != nil {
-		fmt.Printf("List steps error: %v\n", err)
+		fmt.Printf("Error listing steps: %v\n", err)
 		os.Exit(1)
 	}
 }

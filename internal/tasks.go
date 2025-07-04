@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -274,4 +275,31 @@ func ListTasks() error {
 		fmt.Printf("%-4d %-20s %-10s %-30s %-25s %-25s\n", id, name, status, lp, createdAt, updatedAt)
 	}
 	return nil
+}
+
+// GetTaskID retrieves a task ID from a string, which can be either an ID or a name.
+func GetTaskID(db *sql.DB, taskRef string) (int, error) {
+	taskID, err := strconv.Atoi(taskRef)
+	if err == nil {
+		// It's a numeric ID, let's verify it exists
+		var exists bool
+		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = $1)", taskID).Scan(&exists)
+		if err != nil {
+			return 0, fmt.Errorf("failed to verify task ID: %w", err)
+		}
+		if !exists {
+			return 0, fmt.Errorf("no task found with ID %d", taskID)
+		}
+		return taskID, nil
+	}
+
+	// It's not a numeric ID, so treat it as a name
+	err = db.QueryRow("SELECT id FROM tasks WHERE name = $1", taskRef).Scan(&taskID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("no task found with name %q", taskRef)
+		}
+		return 0, fmt.Errorf("failed to find task by name: %w", err)
+	}
+	return taskID, nil
 }

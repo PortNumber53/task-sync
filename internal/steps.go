@@ -125,8 +125,21 @@ func CopyStep(db *sql.DB, fromStepID, toTaskID int) (int, error) {
 }
 
 // CreateStep inserts a new step for a task and returns the new step's ID.
-func CreateStep(db *sql.DB, taskRef, title, settings string) (int, error) {
-	return models.CreateStep(db, taskRef, title, settings)
+func CreateStep(db *sql.DB, taskRef string, title string, settings string) (int, error) {
+	taskID, err := GetTaskID(db, taskRef)
+	if err != nil {
+		return 0, err
+	}
+
+	var stepID int
+	err = db.QueryRow(
+		"INSERT INTO steps (task_id, title, settings) VALUES ($1, $2, $3) RETURNING id",
+		taskID, title, settings,
+	).Scan(&stepID)
+	if err != nil {
+		return 0, fmt.Errorf("could not create step: %w", err)
+	}
+	return stepID, nil
 }
 
 // ListSteps prints all steps in the DB. If full is true, prints settings column too.

@@ -145,40 +145,33 @@ func HandleStep() {
 
 func HandleStepCreate(db *sql.DB) {
 	var taskRef, title, settings string
-	var stepType string
-	for i := 3; i < len(os.Args); i++ {
-		switch os.Args[i] {
+
+	args := os.Args[3:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
 		case "--task":
-			if i+1 >= len(os.Args) {
+			if i+1 >= len(args) {
 				fmt.Println("Error: --task requires a value")
 				helpPkg.PrintStepCreateHelp()
 				os.Exit(1)
 			}
-			taskRef = os.Args[i+1]
+			taskRef = args[i+1]
 			i++
 		case "--title":
-			if i+1 >= len(os.Args) {
+			if i+1 >= len(args) {
 				fmt.Println("Error: --title requires a value")
 				helpPkg.PrintStepCreateHelp()
 				os.Exit(1)
 			}
-			title = os.Args[i+1]
+			title = args[i+1]
 			i++
 		case "--settings":
-			if i+1 >= len(os.Args) {
+			if i+1 >= len(args) {
 				fmt.Println("Error: --settings requires a value")
 				helpPkg.PrintStepCreateHelp()
 				os.Exit(1)
 			}
-			settings = os.Args[i+1]
-			i++
-		case "--type":
-			if i+1 >= len(os.Args) {
-				fmt.Println("Error: --type requires a value")
-				helpPkg.PrintStepCreateHelp()
-				os.Exit(1)
-			}
-			stepType = os.Args[i+1]
+			settings = args[i+1]
 			i++
 		}
 	}
@@ -189,27 +182,20 @@ func HandleStepCreate(db *sql.DB) {
 		os.Exit(1)
 	}
 
-	if stepType != "" {
-		var settingsMap map[string]interface{}
-		if err := json.Unmarshal([]byte(settings), &settingsMap); err != nil {
-			fmt.Printf("Error parsing settings JSON: %v\n", err)
-			os.Exit(1)
-		}
-		settingsMap["type"] = stepType
-		updatedSettings, err := json.Marshal(settingsMap)
-		if err != nil {
-			fmt.Printf("Error marshaling settings: %v\n", err)
-			os.Exit(1)
-		}
-		settings = string(updatedSettings)
-	}
-
-	newStepID, err := internal.CreateStep(db, taskRef, title, settings)
-	if err != nil {
-		fmt.Printf("Failed to create step: %v\n", err)
+	// Validate that settings is a valid JSON
+	var js json.RawMessage
+	if err := json.Unmarshal([]byte(settings), &js); err != nil {
+		fmt.Printf("Error: --settings value is not a valid JSON string: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Step created successfully with ID: %d\n", newStepID)
+
+	stepID, err := internal.CreateStep(db, taskRef, title, settings)
+	if err != nil {
+		fmt.Printf("Error creating step: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Step created with ID: %d\n", stepID)
 }
 
 func HandleStepCopy(db *sql.DB) {

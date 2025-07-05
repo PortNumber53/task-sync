@@ -132,7 +132,7 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 
 				if !hasKeepAliveCmd {
 					// Add a keep-alive command if one isn't present in the parameters
-					keepAliveArgs := []string{"-c", "while true; do sleep 30; done"}
+					keepAliveArgs := []string{"-c", "'while true; do sleep 30; done'"}
 					processedDockerRunParams = append(processedDockerRunParams, keepAliveArgs...)
 				}
 			}
@@ -141,6 +141,7 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 				randomSuffix, _ := models.GenerateRandomString(4)
 				containerName := fmt.Sprintf("tasksync_step%d_%s_%d", step.StepID, randomSuffix, i)
 				cmdArgs := append([]string{"run", "-d", "--name", containerName}, processedDockerRunParams...)
+				models.StepLogger.Printf("Constructed docker command: docker %s\n", strings.Join(cmdArgs, " "))
 				cmd := exec.Command("docker", cmdArgs...)
 				output, err := cmd.CombinedOutput()
 				if err == nil {

@@ -148,29 +148,20 @@ func HandleStepCreate(db *sql.DB) {
 
 	args := os.Args[3:]
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--task":
-			if i+1 >= len(args) {
-				fmt.Println("Error: --task requires a value")
-				helpPkg.PrintStepCreateHelp()
-				os.Exit(1)
-			}
+		arg := args[i]
+		if strings.HasPrefix(arg, "--task=") {
+			taskRef = strings.TrimPrefix(arg, "--task=")
+		} else if arg == "--task" && i+1 < len(args) {
 			taskRef = args[i+1]
 			i++
-		case "--title":
-			if i+1 >= len(args) {
-				fmt.Println("Error: --title requires a value")
-				helpPkg.PrintStepCreateHelp()
-				os.Exit(1)
-			}
+		} else if strings.HasPrefix(arg, "--title=") {
+			title = strings.TrimPrefix(arg, "--title=")
+		} else if arg == "--title" && i+1 < len(args) {
 			title = args[i+1]
 			i++
-		case "--settings":
-			if i+1 >= len(args) {
-				fmt.Println("Error: --settings requires a value")
-				helpPkg.PrintStepCreateHelp()
-				os.Exit(1)
-			}
+		} else if strings.HasPrefix(arg, "--settings=") {
+			settings = strings.TrimPrefix(arg, "--settings=")
+		} else if arg == "--settings" && i+1 < len(args) {
 			settings = args[i+1]
 			i++
 		}

@@ -115,7 +115,7 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 			dockerRunParams := config.Parameters
 			processedDockerRunParams := []string{}
 			for _, param := range dockerRunParams {
-				replacedParam := strings.Replace(param, "%%IMAGETAG%%", imageTag, -1)
+				replacedParam := strings.Replace(param, "%%IMAGETAG%%", imageHash, -1)
 				processedDockerRunParams = append(processedDockerRunParams, strings.Fields(replacedParam)...)
 			}
 

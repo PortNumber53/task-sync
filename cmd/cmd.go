@@ -368,12 +368,12 @@ func HandleTaskCreate() {
 				helpPkg.PrintTaskCreateHelp()
 				os.Exit(1)
 			}
-		case "--local-path":
+		case "--local_path":
 			if i+1 < len(os.Args) {
 				localPath = os.Args[i+1]
 				i++
 			} else {
-				fmt.Println("Error: --local-path requires a value")
+				fmt.Println("Error: --local_path requires a value")
 				helpPkg.PrintTaskCreateHelp()
 				os.Exit(1)
 			}

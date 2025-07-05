@@ -51,14 +51,14 @@ func PrintTaskCreateHelp() {
 	helpText := `Create a new task.
 
 Usage:
-  task-sync task create --name NAME [--status STATUS] [--local-path PATH]
+  task-sync task create --name NAME [--status STATUS] [--local_path PATH]
 
 Required Flags:
   --name string    Name of the task
 
 Options:
   --status string     Status of the task (default: "pending")
-  --local-path string Local filesystem path for the task
+  --local_path string Local filesystem path for the task
   -h, --help          Show this help message and exit
 
 Examples:
@@ -66,7 +66,7 @@ Examples:
   task-sync task create --name "My Task"
 
   # Create a task with a specific status and local path
-  task-sync task create --name "Build Project" --status active --local-path "/path/to/project"`
+  task-sync task create --name "Build Project" --status active --local_path "/path/to/project"`
 	fmt.Println(helpText)
 }
 
@@ -257,14 +257,14 @@ Editable Fields:
   - image_tag:   Docker image tag (e.g., 'my_image:latest')
   - image_hash:  Docker image hash (e.g., 'sha256:abc123')
   - status:      Task status (e.g., 'pending', 'active', 'completed')
-  - localpath:   Local filesystem path for the task
+  - local_path:  Local filesystem path for the task
 
 Examples:
   # Edit the name of task with ID 123
   task-sync task edit 123 --set name="My New Task Name"
 
   # Update the status and local path for task 45
-  task-sync task edit 45 --set status=active --set localpath=/path/to/new/location
+  task-sync task edit 45 --set status=active --set local_path=/path/to/new/location
 
   # Show this help message
   task-sync task edit --help`

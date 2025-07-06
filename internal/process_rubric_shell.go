@@ -96,12 +96,20 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		result := make(map[string]string)
 		var currentRunError error
 
-		// 1. Reset the repo status inside the container
-		cmdReset := exec.Command("docker", "exec", containerName, "git", "reset", "--hard")
-		if output, err := runCmd(cmdReset, "reset repo", false); err != nil {
-			currentRunError = err
-			result["error"] = err.Error()
-			result["output"] = output
+		// 1. Fully clean the repo status inside the container
+		cleanupCmds := [][]string{
+			{"docker", "exec", containerName, "git", "checkout", "--", "."},
+			{"docker", "exec", containerName, "git", "clean", "-fd"},
+			{"docker", "exec", containerName, "git", "reset", "--hard"},
+		}
+		for _, args := range cleanupCmds {
+			cmd := exec.Command(args[0], args[1:]...)
+			if output, err := runCmd(cmd, "cleanup repo", false); err != nil {
+				currentRunError = err
+				result["error"] = err.Error()
+				result["output"] = output
+				break
+			}
 		}
 
 		// 2. Apply solution patch if specified

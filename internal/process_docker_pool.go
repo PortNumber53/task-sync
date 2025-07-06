@@ -70,14 +70,18 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 			continue
 		}
 
-		// Remove any reference to step settings for image_id and image_tag
-		imageHash, imageTag, err := models.FindImageDetailsRecursive(db, step.StepID, models.StepLogger)
+		// Read image_tag directly from task.settings.docker.image_tag
+		taskSettings, err := models.GetTaskSettings(db, step.TaskID)
 		if err != nil {
-			models.StepLogger.Printf("Step %d: error finding image details: %v\n", step.StepID, err)
-			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "Error finding image details"})
-			continue
+			models.StepLogger.Printf("Step %d: CRITICAL: Could not load task settings for docker_pool. Error: %v\n", step.StepID, err)
+			return err
 		}
-		models.StepLogger.Printf("Step %d: Using image_hash '%s' and image_tag '%s' from task settings\n", step.StepID, imageHash, imageTag)
+		imageTag := taskSettings.Docker.ImageTag
+		if imageTag == "" {
+			models.StepLogger.Printf("Step %d: CRITICAL: No image_tag found in task settings.\n", step.StepID)
+			return fmt.Errorf("no image_tag found in task settings")
+		}
+		models.StepLogger.Printf("Step %d: Using image_tag '%s' from task settings\n", step.StepID, imageTag)
 
 		// Logic for handling a pool of containers
 		numContainers := config.PoolSize
@@ -99,9 +103,9 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 					} `json:"State"`
 				}
 				if err := json.Unmarshal(output, &inspectResult); err == nil && len(inspectResult) > 0 {
-					if inspectResult[0].State.Running && inspectResult[0].Config.Image == imageHash {
+					if inspectResult[0].State.Running && inspectResult[0].Config.Image == imageTag {
 						runningContainers = append(runningContainers, container)
-					} else if inspectResult[0].State.Running && inspectResult[0].Config.Image != imageHash {
+					} else if inspectResult[0].State.Running && inspectResult[0].Config.Image != imageTag {
 						// Stop and remove outdated container
 						exec.Command("docker", "stop", container.ContainerID).Run()
 						exec.Command("docker", "rm", container.ContainerID).Run()
@@ -115,8 +119,10 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 			dockerRunParams := config.Parameters
 			processedDockerRunParams := []string{}
 			for _, param := range dockerRunParams {
-				replacedParam := strings.Replace(param, "%%IMAGETAG%%", imageHash, -1)
-				processedDockerRunParams = append(processedDockerRunParams, strings.Fields(replacedParam)...)
+				replacedParam := strings.Replace(param, "%%IMAGETAG%%", imageTag, -1)
+				if replacedParam != "--rm" {
+					processedDockerRunParams = append(processedDockerRunParams, strings.Fields(replacedParam)...)
+				}
 			}
 
 			if config.KeepForever {
@@ -132,7 +138,7 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 
 				if !hasKeepAliveCmd {
 					// Add a keep-alive command if one isn't present in the parameters
-					keepAliveArgs := []string{"-c", "'while true; do sleep 30; done'"}
+					keepAliveArgs := []string{"-c", "while true; do sleep 30; done"}
 					processedDockerRunParams = append(processedDockerRunParams, keepAliveArgs...)
 				}
 			}
@@ -140,15 +146,21 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 			for i := len(runningContainers); i < numContainers; i++ {
 				randomSuffix, _ := models.GenerateRandomString(4)
 				containerName := fmt.Sprintf("tasksync_step%d_%s_%d", step.StepID, randomSuffix, i)
+				// Ensure processedDockerRunParams does NOT contain the image tag
+				// Append imageTag ONCE, after all Docker options, before entrypoint/command args
 				cmdArgs := append([]string{"run", "-d", "--name", containerName}, processedDockerRunParams...)
+				// cmdArgs = append(cmdArgs, imageTag)
+				// If you have entrypoint/command args, append them here (e.g., --login, -c ...)
+				// Example: cmdArgs = append(cmdArgs, "--login", "-c", "while true; do sleep 30; done")
 				models.StepLogger.Printf("Constructed docker command: docker %s\n", strings.Join(cmdArgs, " "))
 				cmd := exec.Command("docker", cmdArgs...)
 				output, err := cmd.CombinedOutput()
+				models.StepLogger.Printf("Step %d: docker run output: %s", step.StepID, string(output))
 				if err == nil {
 					newContainerID := strings.TrimSpace(string(output))
 					runningContainers = append(runningContainers, models.ContainerInfo{ContainerID: newContainerID, ContainerName: containerName})
 				} else {
-					models.StepLogger.Printf("Step %d: failed to start container: %v\n", step.StepID, err)
+					models.StepLogger.Printf("Step %d: failed to start container: %v. Output: %s\n", step.StepID, err, string(output))
 				}
 			}
 		}

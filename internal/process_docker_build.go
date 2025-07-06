@@ -88,20 +88,20 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 			stepLogger.Printf("Step %d: Corrected 'Dockefile' to 'Dockerfile' in files map\n", step.StepID)
 		}
 
-		imageTag, imageID, err := models.FindImageDetailsRecursive(db, step.StepID, stepLogger)
+		taskSettings, err := models.GetTaskSettings(db, step.TaskID)
 		if err != nil {
-			stepLogger.Printf("Step %d: Error while searching for image details: %v. Skipping build.", step.StepID, err)
+			stepLogger.Printf("Step %d: Failed to get task settings for task %d: %v. Skipping build.", step.StepID, step.TaskID, err)
 			continue
 		}
 
-		if imageTag == "" {
-			stepLogger.Printf("Step %d: CRITICAL: Could not find base image details through dependency chain. Check step dependencies. Skipping build.", step.StepID)
+		if taskSettings.Docker.ImageTag == "" {
+			stepLogger.Printf("Step %d: CRITICAL: Task settings do not contain an image_tag. Skipping build.", step.StepID)
 			continue
 		}
 
-		config.ImageTag = imageTag
-		config.ImageID = imageID
-		stepLogger.Printf("Step %d: Found image details from dependency: Tag='%s', ID='%s'\n", step.StepID, imageTag, imageID)
+		config.ImageTag = taskSettings.Docker.ImageTag
+		// config.ImageID will be set after successful build
+		stepLogger.Printf("Step %d: Using image tag '%s' from task settings.\n", step.StepID, config.ImageTag)
 
 		buildNeeded := false
 		cmdInspect := exec.Command("docker", "image", "inspect", config.ImageTag)
@@ -138,6 +138,13 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 						if err := executeDockerBuild(step.LocalPath, &config, step.StepID, db, stepLogger); err != nil {
 				stepLogger.Printf("Step %d: docker build failed: %v\n", step.StepID, err)
 				continue
+			}
+
+			// After successful build, update ImageID in task settings
+			taskSettings.Docker.ImageID = config.ImageID
+			if err := models.UpdateTaskSettings(db, step.TaskID, taskSettings); err != nil {
+				stepLogger.Printf("Step %d: Failed to update task settings with new image ID: %v\n", step.StepID, err)
+				// Continue, as the build was successful, but log the error
 			}
 		} else {
 			stepLogger.Printf("Step %d: Docker image '%s:%s' is ready. Build skipped.\n", step.StepID, config.ImageTag, config.ImageID)

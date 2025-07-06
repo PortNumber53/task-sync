@@ -33,10 +33,16 @@ type StepExec struct {
 }
 
 // TaskSettings represents the settings stored in the `tasks.settings` JSONB column.
+// DockerTaskConfig represents the 'docker' field within task settings.
+type DockerTaskConfig struct {
+	ImageTag string `json:"image_tag,omitempty"`
+	ImageID  string `json:"image_id,omitempty"`
+}
+
+// TaskSettings represents the settings stored in the `tasks.settings` JSONB column.
 type TaskSettings struct {
 	AssignContainers map[string]string `json:"assign_containers,omitempty"`
-	ImageTag         string            `json:"image_tag,omitempty"`
-	ImageID          string            `json:"image_id,omitempty"`
+	Docker           DockerTaskConfig  `json:"docker,omitempty"`
 }
 
 // StepConfig is an interface that all step configurations should implement.
@@ -1211,13 +1217,72 @@ func GetTaskSettings(db *sql.DB, taskID int) (*TaskSettings, error) {
 }
 
 // UpdateTaskSettings marshals and saves the settings for a given task.
-func UpdateTaskSettings(db *sql.DB, taskID int, settings *TaskSettings) error {
-	settingsBytes, err := json.Marshal(settings)
+func UpdateTaskSettings(db *sql.DB, taskID int, newSettings *TaskSettings) error {
+	// Get current settings from the database
+	var currentSettingsJSON sql.NullString
+	err := db.QueryRow("SELECT settings FROM tasks WHERE id = $1", taskID).Scan(&currentSettingsJSON)
 	if err != nil {
-		return fmt.Errorf("failed to marshal task settings for task %d: %w", taskID, err)
+		return fmt.Errorf("failed to query current task settings for task %d: %w", taskID, err)
 	}
 
-	_, err = db.Exec("UPDATE tasks SET settings = $1 WHERE id = $2", string(settingsBytes), taskID)
+	var currentMap map[string]json.RawMessage
+	if currentSettingsJSON.Valid && currentSettingsJSON.String != "" && currentSettingsJSON.String != "null" {
+		if err := json.Unmarshal([]byte(currentSettingsJSON.String), &currentMap); err != nil {
+			return fmt.Errorf("failed to unmarshal current task settings for task %d: %w", taskID, err)
+		}
+	}
+
+	// Marshal the new settings into a map
+	newMapBytes, err := json.Marshal(newSettings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal new task settings for task %d: %w", taskID, err)
+	}
+
+	var newMap map[string]json.RawMessage
+	if err := json.Unmarshal(newMapBytes, &newMap); err != nil {
+		return fmt.Errorf("failed to unmarshal new task settings into map for task %d: %w", taskID, err)
+	}
+
+	// Merge new settings into current settings
+	// This simple merge overwrites top-level keys. For nested structures like 'docker', we need a deeper merge.
+	for k, v := range newMap {
+		currentMap[k] = v
+	}
+
+	// Special handling for 'docker' field to merge its contents
+	if newDockerRaw, ok := newMap["docker"]; ok {
+		var newDockerMap map[string]json.RawMessage
+		if err := json.Unmarshal(newDockerRaw, &newDockerMap); err != nil {
+			return fmt.Errorf("failed to unmarshal new docker settings for task %d: %w", taskID, err)
+		}
+
+		var currentDockerMap map[string]json.RawMessage
+		if currentDockerRaw, ok := currentMap["docker"]; ok {
+			if err := json.Unmarshal(currentDockerRaw, &currentDockerMap); err != nil {
+				return fmt.Errorf("failed to unmarshal current docker settings for task %d: %w", taskID, err)
+			}
+		} else {
+			currentDockerMap = make(map[string]json.RawMessage)
+		}
+
+		for k, v := range newDockerMap {
+			currentDockerMap[k] = v
+		}
+		mergedDockerBytes, err := json.Marshal(currentDockerMap)
+		if err != nil {
+			return fmt.Errorf("failed to marshal merged docker settings for task %d: %w", taskID, err)
+		}
+		currentMap["docker"] = mergedDockerBytes
+	}
+
+	// Marshal the merged settings back to JSON
+	mergedSettingsBytes, err := json.Marshal(currentMap)
+	if err != nil {
+		return fmt.Errorf("failed to marshal merged task settings for task %d: %w", taskID, err)
+	}
+
+	// Update the database
+	_, err = db.Exec("UPDATE tasks SET settings = $1 WHERE id = $2", string(mergedSettingsBytes), taskID)
 	if err != nil {
 		return fmt.Errorf("failed to update task settings for task %d: %w", taskID, err)
 	}

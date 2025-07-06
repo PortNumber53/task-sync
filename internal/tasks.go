@@ -152,11 +152,12 @@ func EditTask(db *sql.DB, taskID int, updates map[string]string) error {
 	}
 
 	allowedFields := map[string]bool{
-		"name":       true,
-		"status":     true,
-		"localpath":  true,
-		"image_tag":  true,
-		"image_hash": true,
+		"name":        true,
+		"status":      true,
+		"localpath":   true, // legacy/compat
+		"local_path":  true, // preferred, matches DB and CLI
+		"image_tag":   true,
+		"image_hash":  true,
 	}
 
 	// Fetch and update settings JSON for image_tag and image_hash
@@ -187,10 +188,17 @@ func EditTask(db *sql.DB, taskID int, updates map[string]string) error {
 			return fmt.Errorf("invalid field: %s", key)
 		}
 
+		fieldName := key
+		if key == "local_path" {
+			fieldName = "local_path"
+		} else if key == "localpath" {
+			fieldName = "local_path"
+		}
+
 		switch key {
-		case "name", "status", "localpath":
+		case "name", "status", "localpath", "local_path":
 			// Handle direct fields as before
-			setClauses = append(setClauses, fmt.Sprintf("%s = $%d", key, argCounter))
+			setClauses = append(setClauses, fmt.Sprintf("%s = $%d", fieldName, argCounter))
 			args = append(args, value)
 			argCounter++
 		case "image_tag", "image_hash":

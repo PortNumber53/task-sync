@@ -173,7 +173,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 
 	stepLogger.Printf("Final Results:\n%s", string(resultsBytes))
 
-	_, errUpdate := db.Exec("UPDATE steps SET results = $1, state = $2 WHERE id = $3", string(resultsBytes), "completed", stepExec.StepID)
+	_, errUpdate := db.Exec("UPDATE steps SET results = $1 WHERE id = $2", string(resultsBytes), stepExec.StepID)
 	if errUpdate != nil {
 		stepLogger.Printf("Failed to update step results: %v", errUpdate)
 		return errUpdate

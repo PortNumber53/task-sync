@@ -325,10 +325,29 @@ func TreeSteps(db *sql.DB, taskID int) error {
 				}
 			}
 
+			// Helper to extract rubric number from title
+			extractRubricNum := func(title string) (int, bool) {
+				var n int
+				if _, err := fmt.Sscanf(title, "Rubric %d", &n); err == nil {
+					return n, true
+				}
+				return 0, false
+			}
+
 			sort.Slice(rootNodes, func(i, j int) bool {
+				numI, okI := extractRubricNum(rootNodes[i].Title)
+				numJ, okJ := extractRubricNum(rootNodes[j].Title)
+				if okI && okJ {
+					return numI < numJ
+				}
+				if okI {
+					return true
+				}
+				if okJ {
+					return false
+				}
 				return rootNodes[i].ID < rootNodes[j].ID
 			})
-
 			printChildren(rootNodes, "")
 		}
 	}

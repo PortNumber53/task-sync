@@ -38,10 +38,10 @@ func ReportTask(db *sql.DB, taskID int) error {
 	defer rows.Close()
 
 	type stepRow struct {
-		ID      int
-		Title   string
+		ID       int
+		Title    string
 		Settings string
-		Results sql.NullString
+		Results  sql.NullString
 	}
 	steps := make(map[int]*stepRow)
 	var stepOrder []int
@@ -73,7 +73,9 @@ func ReportTask(db *sql.DB, taskID int) error {
 		var topLevel map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(step.Settings), &topLevel); err == nil {
 			if dependsOnRaw, ok := topLevel["depends_on"]; ok {
-				var deps []struct{ ID int `json:"id"` }
+				var deps []struct {
+					ID int `json:"id"`
+				}
 				if err := json.Unmarshal(dependsOnRaw, &deps); err == nil {
 					for _, dep := range deps {
 						dependencies[id] = append(dependencies[id], dep.ID)
@@ -82,7 +84,11 @@ func ReportTask(db *sql.DB, taskID int) error {
 			}
 			// Fallback for nested depends_on
 			for _, raw := range topLevel {
-				var nested struct{ DependsOn []struct{ ID int `json:"id"` } `json:"depends_on"` }
+				var nested struct {
+					DependsOn []struct {
+						ID int `json:"id"`
+					} `json:"depends_on"`
+				}
 				if err := json.Unmarshal(raw, &nested); err == nil {
 					for _, dep := range nested.DependsOn {
 						dependencies[id] = append(dependencies[id], dep.ID)
@@ -125,14 +131,18 @@ func ReportTask(db *sql.DB, taskID int) error {
 		// Sort rubric_shell nodes by rubric number, others by ID
 		sort.Slice(nodes, func(i, j int) bool {
 			getRubricNum := func(title string) int {
-				if strings.HasPrefix(title, "#") {
-					end := strings.Index(title, ":")
-					if end > 1 {
-						numStr := title[1:end]
-						if n, err := strconv.Atoi(strings.TrimSpace(numStr)); err == nil {
-							return n
-						}
-					}
+				idx := strings.Index(title, "Rubric ")
+				if idx == -1 {
+					return -1
+				}
+				rest := title[idx+7:]
+				end := strings.Index(rest, ":")
+				if end == -1 {
+					return -1
+				}
+				numStr := strings.TrimSpace(rest[:end])
+				if n, err := strconv.Atoi(numStr); err == nil {
+					return n
 				}
 				return -1
 			}
@@ -149,33 +159,7 @@ func ReportTask(db *sql.DB, taskID int) error {
 			}
 			return nodes[i].ID < nodes[j].ID
 		})
-		// Sort rubric_shell nodes by rubric number, others by ID
-		sort.Slice(nodes, func(i, j int) bool {
-			getRubricNum := func(title string) int {
-				if strings.HasPrefix(title, "#") {
-					end := strings.Index(title, ":")
-					if end > 1 {
-						numStr := title[1:end]
-						if n, err := strconv.Atoi(strings.TrimSpace(numStr)); err == nil {
-							return n
-						}
-					}
-				}
-				return -1
-			}
-			left := getRubricNum(nodes[i].Title)
-			right := getRubricNum(nodes[j].Title)
-			if left != -1 && right != -1 {
-				return left < right
-			}
-			if left != -1 {
-				return true
-			}
-			if right != -1 {
-				return false
-			}
-			return nodes[i].ID < nodes[j].ID
-		})
+
 		for i, node := range nodes {
 			connector := "├── "
 			newPrefix := prefix + "│   "
@@ -207,40 +191,40 @@ func ReportTask(db *sql.DB, taskID int) error {
 				}
 			}
 			idStr := fmt.Sprintf("%*d", maxIDWidth, node.ID)
-// Right-align rubric numbers in titles
-rubricNumWidth := 0
-for _, n := range nodes {
-	if idx := strings.Index(n.Title, "Rubric "); idx != -1 {
-		title := n.Title[idx+7:]
-		end := strings.Index(title, ":")
-		if end > 0 {
-			numStr := strings.TrimSpace(title[:end])
-			if len(numStr) > rubricNumWidth {
-				rubricNumWidth = len(numStr)
+			// Right-align rubric numbers in titles
+			rubricNumWidth := 0
+			for _, n := range nodes {
+				if idx := strings.Index(n.Title, "Rubric "); idx != -1 {
+					title := n.Title[idx+7:]
+					end := strings.Index(title, ":")
+					if end > 0 {
+						numStr := strings.TrimSpace(title[:end])
+						if len(numStr) > rubricNumWidth {
+							rubricNumWidth = len(numStr)
+						}
+					}
+				}
 			}
-		}
-	}
-}
-formatRubricNum := func(title string) string {
-	idx := strings.Index(title, "Rubric ")
-	if idx == -1 {
-		return title
-	}
-	tail := title[idx+7:]
-	end := strings.Index(tail, ":")
-	if end <= 0 {
-		return title
-	}
-	numStr := strings.TrimSpace(tail[:end])
-	rightNum := fmt.Sprintf("%*s", rubricNumWidth, numStr)
-	return title[:idx+7] + rightNum + tail[end:]
-}
-titleOut := formatRubricNum(node.Title)
-if showIcons {
-	fmt.Printf("%s%s%s%s-%s\n", prefix, connector, icons, idStr, titleOut)
-} else {
-	fmt.Printf("%s%s%s-%s\n", prefix, connector, idStr, titleOut)
-}
+			formatRubricNum := func(title string) string {
+				idx := strings.Index(title, "Rubric ")
+				if idx == -1 {
+					return title
+				}
+				tail := title[idx+7:]
+				end := strings.Index(tail, ":")
+				if end <= 0 {
+					return title
+				}
+				numStr := strings.TrimSpace(tail[:end])
+				rightNum := fmt.Sprintf("%*s", rubricNumWidth, numStr)
+				return title[:idx+7] + rightNum + tail[end:]
+			}
+			titleOut := formatRubricNum(node.Title)
+			if showIcons {
+				fmt.Printf("%s%s%s%s-%s\n", prefix, connector, icons, idStr, titleOut)
+			} else {
+				fmt.Printf("%s%s%s-%s\n", prefix, connector, idStr, titleOut)
+			}
 			print(node.Children, newPrefix)
 		}
 	}

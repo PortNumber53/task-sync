@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/PortNumber53/task-sync/pkg/models"
 )
@@ -81,7 +82,20 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		return nil
 	}
 
+	// Load existing results from DB if present
 	allResults := make(map[string]map[string]string)
+	var prevResultsStr sql.NullString
+	err = db.QueryRow("SELECT results FROM steps WHERE id = $1", stepExec.StepID).Scan(&prevResultsStr)
+	if err != nil && err != sql.ErrNoRows {
+		stepLogger.Printf("Warning: failed to fetch previous results: %v", err)
+	} else if prevResultsStr.Valid && prevResultsStr.String != "" {
+		err = json.Unmarshal([]byte(prevResultsStr.String), &allResults)
+		if err != nil {
+			stepLogger.Printf("Warning: failed to unmarshal previous results: %v", err)
+			allResults = make(map[string]map[string]string)
+		}
+	}
+
 	var finalErr error
 
 	// Helper to run a command and log its execution and output.
@@ -113,20 +127,27 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		result := make(map[string]string)
 		var currentRunError error
 
-		// Fetch container_id and image_id for this container (stub: use containerName as id, could be improved)
-		containerID := containerName
-		imageID := ""
-		// TODO: Optionally fetch real imageID if available (for now, leave as empty string or fetch if possible)
-
-		// Compute hash of tracked fields
-		hashInput := fmt.Sprintf("command:%s|counter:%d|criterion_id:%s|required:%v|score:%f|container_id:%s|image_id:%s",
-			config.Command, config.Counter, config.CriterionID, config.Required, config.Score, containerID, imageID)
+		// Compute hash of rubric_shell fields + container image_tag/image_hash
+		imageTag := config.ImageTag
+		imageHash := config.ImageID // If you have ImageHash, use that; else use ImageID as fallback
+		hashInput := fmt.Sprintf("command:%s|counter:%d|criterion_id:%s|required:%v|score:%f|image_tag:%s|image_hash:%s",
+			config.Command, config.Counter, config.CriterionID, config.Required, config.Score, imageTag, imageHash)
 		hashVal := fmt.Sprintf("%x", sha256.Sum256([]byte(hashInput)))
 
 		// Check last_run for this solution/container
 		if prevHash, ok := config.LastRun[solutionPatch]; ok && prevHash == hashVal {
 			stepLogger.Printf("No changes detected for solution '%s' in container '%s'. Skipping execution.", solutionPatch, containerName)
-			allResults[solutionPatch] = map[string]string{"skipped": "true", "reason": "last_run hash matched"}
+			// Preserve previous results if present, else create new
+			prevResult := make(map[string]string)
+			if ar, ok := allResults[solutionPatch]; ok && ar != nil {
+				for k, v := range ar {
+					prevResult[k] = v
+				}
+			}
+			prevResult["last_run_at"] = time.Now().Format(time.RFC3339)
+			prevResult["skipped"] = "true"
+			prevResult["reason"] = "last_run hash matched"
+			allResults[solutionPatch] = prevResult
 			continue
 		}
 
@@ -203,6 +224,11 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		// Update last_run for this solution/container
 		config.LastRun[solutionPatch] = hashVal
 
+		// Add last_run_at and set skipped to false (or remove if present)
+		result["last_run_at"] = "2025-07-06T16:18:26-07:00"
+		if _, ok := result["skipped"]; ok {
+			delete(result, "skipped")
+		}
 		allResults[solutionPatch] = result
 		if currentRunError != nil && finalErr == nil {
 			finalErr = currentRunError // Capture the first error

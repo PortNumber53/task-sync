@@ -116,7 +116,17 @@ func HandleStep() {
 
 	switch subcommand {
 	case "tree":
-		if err := internal.TreeSteps(db); err != nil {
+		// Usage: step tree [TASK_ID]
+		taskID := 0
+		if len(os.Args) > 3 {
+			if id, err := strconv.Atoi(os.Args[3]); err == nil {
+				taskID = id
+			} else {
+				fmt.Printf("Invalid task ID: %s\n", os.Args[3])
+				os.Exit(1)
+			}
+		}
+		if err := internal.TreeSteps(db, taskID); err != nil {
 			fmt.Printf("Error displaying step tree: %v\n", err)
 			os.Exit(1)
 		}

@@ -173,9 +173,15 @@ type StepNode struct {
 }
 
 // TreeSteps fetches all steps and prints them as a dependency tree, grouped by task.
-func TreeSteps(db *sql.DB) error {
-	// 1. Fetch all tasks to get their names
-	taskRows, err := db.Query(`SELECT id, name FROM tasks ORDER BY id`)
+func TreeSteps(db *sql.DB, taskID int) error {
+	// 1. Fetch tasks to get their names (filtered if taskID > 0)
+	var taskRows *sql.Rows
+	var err error
+	if taskID > 0 {
+		taskRows, err = db.Query(`SELECT id, name FROM tasks WHERE id = $1`, taskID)
+	} else {
+		taskRows, err = db.Query(`SELECT id, name FROM tasks ORDER BY id`)
+	}
 	if err != nil {
 		return fmt.Errorf("querying tasks failed: %w", err)
 	}
@@ -193,8 +199,13 @@ func TreeSteps(db *sql.DB) error {
 		taskIDs = append(taskIDs, id)
 	}
 
-	// 2. Fetch all steps
-	stepRows, err := db.Query(`SELECT id, task_id, title, settings FROM steps ORDER BY id`)
+	// 2. Fetch steps (filtered if taskID > 0)
+	var stepRows *sql.Rows
+	if taskID > 0 {
+		stepRows, err = db.Query(`SELECT id, task_id, title, settings FROM steps WHERE task_id = $1 ORDER BY id`, taskID)
+	} else {
+		stepRows, err = db.Query(`SELECT id, task_id, title, settings FROM steps ORDER BY id`)
+	}
 	if err != nil {
 		return err
 	}

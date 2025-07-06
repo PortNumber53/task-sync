@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"github.com/gin-contrib/cors"
 	"database/sql"
 	"fmt"
 	"io"
@@ -52,9 +53,8 @@ func RunAPIServer(listenAddr string) error {
 	}
 	defer db.Close()
 
-	// Create channels for graceful shutdown
-	stopChan := make(chan struct{})
-	doneChan := make(chan struct{})
+	// Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 
@@ -62,10 +62,9 @@ func RunAPIServer(listenAddr string) error {
 	models.InitStepLogger(os.Stdout)
 
 	// Start step executor in a goroutine
-	go func(db *sql.DB) {
+	go func(ctx context.Context, db *sql.DB) {
 		ticker := time.NewTicker(StepExecutorInterval)
 		defer ticker.Stop()
-		defer close(doneChan)
 
 		// Initial execution
 		if err := ProcessSteps(db); err != nil {
@@ -78,12 +77,12 @@ func RunAPIServer(listenAddr string) error {
 				if err := ProcessSteps(db); err != nil {
 					stepLogger.Printf("Error during periodic step execution: %v", err)
 				}
-			case <-stopChan:
+			case <-ctx.Done():
 				stepLogger.Println("Step executor shutting down...")
 				return
 			}
 		}
-	}(db)
+	}(ctx, db)
 
 	// Print environment info
 	fmt.Println("Starting task-sync API server...")
@@ -111,7 +110,17 @@ func RunAPIServer(listenAddr string) error {
 	fmt.Println("==============================")
 	fmt.Println()
 
-	r := gin.Default()
+	r := gin.New()
+
+	// Add CORS middleware for Vite dev server
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:5173"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+	}))
+
 
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{"message": "Welcome to Task Sync"})
@@ -125,7 +134,32 @@ func RunAPIServer(listenAddr string) error {
 		c.JSON(501, gin.H{"message": "Not implemented"})
 	})
 	r.GET("/tasks", func(c *gin.Context) {
-		c.JSON(501, gin.H{"message": "Not implemented"})
+		rows, err := db.Query(`SELECT id, name, status, local_path, created_at, updated_at FROM tasks ORDER BY id`)
+		if err != nil {
+			c.JSON(500, gin.H{"error": "Failed to fetch tasks"})
+			return
+		}
+		defer rows.Close()
+		tasks := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			var id int
+			var name, status string
+			var localPath sql.NullString
+			var createdAt, updatedAt string
+			if err := rows.Scan(&id, &name, &status, &localPath, &createdAt, &updatedAt); err != nil {
+				c.JSON(500, gin.H{"error": "Failed to scan task row"})
+				return
+			}
+			tasks = append(tasks, map[string]interface{}{
+				"id": id,
+				"name": name,
+				"status": status,
+				"local_path": func() string { if localPath.Valid { return localPath.String } else { return "" } }(),
+				"created_at": createdAt,
+				"updated_at": updatedAt,
+			})
+		}
+		c.JSON(200, gin.H{"tasks": tasks})
 	})
 	r.POST("/steps", func(c *gin.Context) {
 		c.JSON(501, gin.H{"message": "Not implemented"})
@@ -151,18 +185,18 @@ func RunAPIServer(listenAddr string) error {
 	<-quit
 	log.Println("Shutting down server...")
 
-	// Notify step executor to stop
-	close(stopChan)
+	// Cancel step executor context
+	cancel()
 
-	// Wait for step executor to finish
-	<-doneChan
+	// Give a short grace period for the step executor to exit
+	time.Sleep(1 * time.Second)
 
 	// Create a deadline to wait for
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
 
 	// Doesn't block if no connections, but will otherwise wait until the timeout deadline
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatal("Server forced to shutdown:", err)
 	}
 

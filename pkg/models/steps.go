@@ -237,7 +237,7 @@ type DynamicRubricConfig struct {
 		Hashes      map[string]string `json:"hashes,omitempty"`
 		Rubrics          []string          `json:"rubrics,omitempty"`
 		Hash             string            `json:"hash,omitempty"`
-		AssignContainers map[string]string `json:"assign_containers,omitempty"`
+
 		Environment      struct {
 			Docker   bool   `json:"docker"`
 			ImageID  string `json:"image_id,omitempty"`
@@ -326,7 +326,6 @@ type RubricSetConfig struct {
 	Solution3        string            `json:"solution_3,omitempty"`
 	Solution4        string            `json:"solution_4,omitempty"`
 	Hashes           map[string]string `json:"hashes,omitempty"`
-	AssignContainers map[string]string `json:"assign_containers,omitempty"`
 	DependsOn        []Dependency      `json:"depends_on,omitempty"`
 }
 

@@ -38,6 +38,21 @@ func main() {
 	case "step":
 		cmd.HandleStep()
 	case "task":
+		if len(os.Args) > 2 && os.Args[2] == "report" {
+			pgURL, err := internal.GetPgURLFromEnv()
+			if err != nil {
+				fmt.Printf("Database configuration error: %v\n", err)
+				os.Exit(1)
+			}
+			db, err := models.OpenDB(pgURL)
+			if err != nil {
+				fmt.Printf("Database connection error: %v\n", err)
+				os.Exit(1)
+			}
+			defer db.Close()
+			cmd.HandleReport(db)
+			return
+		}
 		cmd.HandleTask()
 	case "migrate":
 		cmd.HandleMigrate()

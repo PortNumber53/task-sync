@@ -55,18 +55,6 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	}
 	config := &settings.RubricSet
 
-	// Update task-level settings with the container assignments
-	if len(config.AssignContainers) > 0 {
-		taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
-		if err != nil {
-			return fmt.Errorf("failed to get task settings: %w", err)
-		}
-		taskSettings.AssignContainers = config.AssignContainers
-		if err := models.UpdateTaskSettings(db, stepExec.TaskID, taskSettings); err != nil {
-			return fmt.Errorf("failed to update task settings: %w", err)
-		}
-		stepLogger.Printf("Updated task settings with %d container assignments.", len(config.AssignContainers))
-	}
 
 	// 1. Parse the main rubric file to get the list of criteria.
 	markdownFilePath := filepath.Join(stepExec.LocalPath, config.File)

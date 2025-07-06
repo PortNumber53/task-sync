@@ -2,6 +2,9 @@ repo.tar.gz
 Dockerfile
 held_out_tests.patch
 solution*.patch
+NEW_TASK_DATA.md
+TASK_DATA.md
+rubrics.mhtml
 
 tmp/
 

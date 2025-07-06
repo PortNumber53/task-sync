@@ -52,6 +52,15 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 // It fetches the latest container assignments from the task settings, then for each assigned container,
 // it applies the relevant patches and runs the test command, capturing the results.
 func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
+	cfg, _ := LoadConfig()
+	passMarker := cfg.PassMarker
+	failMarker := cfg.FailMarker
+	if passMarker == "" {
+		passMarker = "#__PASS__#"
+	}
+	if failMarker == "" {
+		failMarker = "#__FAIL__#"
+	}
 	var wrappedSettings struct {
 		RubricShell models.RubricShellConfig `json:"rubric_shell"`
 	}
@@ -154,7 +163,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		// 4. Run the rubric command
 		if currentRunError == nil {
 			var commandOutputBuilder strings.Builder
-			commandLine := fmt.Sprintf("docker exec -w /app/ansible %s %s", containerName, config.Command)
+			commandLine := fmt.Sprintf("docker exec %s %s", containerName, config.Command)
 			cmdRun := exec.Command("sh", "-c", commandLine)
 			output, err := runCmd(cmdRun, "run rubric command", true)
 			commandOutputBuilder.WriteString(output)

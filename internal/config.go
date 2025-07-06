@@ -9,7 +9,9 @@ import (
 
 // Config holds values parsed from ~/.config/task/task.conf
 type Config struct {
-	LogFile string
+	LogFile    string
+	PassMarker string
+	FailMarker string
 }
 
 // LoadConfig loads config from ~/.config/task/task.conf (if present)
@@ -39,6 +41,10 @@ func LoadConfig() (*Config, error) {
 			switch key {
 			case "LOG_FILE":
 				cfg.LogFile = val
+			case "PASS_MARKER":
+				cfg.PassMarker = val
+			case "FAIL_MARKER":
+				cfg.FailMarker = val
 			}
 		}
 	}

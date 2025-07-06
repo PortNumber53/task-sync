@@ -14,6 +14,15 @@ import (
 
 // ProcessDynamicRubricStep handles the execution of a single dynamic_rubric step.
 func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
+	cfg, _ := LoadConfig()
+	passMarker := cfg.PassMarker
+	failMarker := cfg.FailMarker
+	if passMarker == "" {
+		passMarker = "#__PASS__#"
+	}
+	if failMarker == "" {
+		failMarker = "#__FAIL__#"
+	}
 	stepLogger.Printf("Processing dynamic_rubric step ID %d", stepExec.StepID)
 
 	var config models.DynamicRubricConfig
@@ -21,18 +30,6 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 		return fmt.Errorf("failed to unmarshal dynamic_rubric settings for step %d: %w", stepExec.StepID, err)
 	}
 
-	// Update task-level settings with the container assignments from this step
-	if len(config.DynamicRubric.AssignContainers) > 0 {
-		taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
-		if err != nil {
-			return fmt.Errorf("failed to get task settings: %w", err)
-		}
-		taskSettings.AssignContainers = config.DynamicRubric.AssignContainers
-		if err := models.UpdateTaskSettings(db, stepExec.TaskID, taskSettings); err != nil {
-			return fmt.Errorf("failed to update task settings: %w", err)
-		}
-		stepLogger.Printf("Updated task settings with %d container assignments from dynamic_rubric step.", len(config.DynamicRubric.AssignContainers))
-	}
 
 	var overallChanged bool
 

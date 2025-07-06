@@ -49,8 +49,8 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 }
 
 // ProcessRubricShellStep handles the execution of a rubric_shell step.
-// It ensures a container is assigned, applies an optional solution patch,
-// runs the test command, and captures the results.
+// It fetches the latest container assignments from the task settings, then for each assigned container,
+// it applies the relevant patches and runs the test command, capturing the results.
 func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
 	var wrappedSettings struct {
 		RubricShell models.RubricShellConfig `json:"rubric_shell"`
@@ -60,8 +60,14 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 	}
 	config := wrappedSettings.RubricShell
 
-	if len(config.AssignContainers) == 0 {
-		stepLogger.Println("No containers assigned in 'assign_containers'. Nothing to do.")
+	// Fetch the latest container assignments from the task settings
+	taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
+	if err != nil {
+		return fmt.Errorf("failed to get task settings: %w", err)
+	}
+
+	if len(taskSettings.AssignContainers) == 0 {
+		stepLogger.Println("No containers assigned in task settings. Nothing to do.")
 		return nil
 	}
 
@@ -85,7 +91,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		return outputStr, nil
 	}
 
-	for solutionPatch, containerName := range config.AssignContainers {
+	for solutionPatch, containerName := range taskSettings.AssignContainers {
 		stepLogger.Printf("--- Processing solution '%s' in container '%s' ---", solutionPatch, containerName)
 		result := make(map[string]string)
 		var currentRunError error
@@ -167,7 +173,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 
 	stepLogger.Printf("Final Results:\n%s", string(resultsBytes))
 
-	_, errUpdate := db.Exec("UPDATE steps SET results = $1, status = $2 WHERE id = $3", string(resultsBytes), "completed", stepExec.StepID)
+	_, errUpdate := db.Exec("UPDATE steps SET results = $1, state = $2 WHERE id = $3", string(resultsBytes), "completed", stepExec.StepID)
 	if errUpdate != nil {
 		stepLogger.Printf("Failed to update step results: %v", errUpdate)
 		return errUpdate

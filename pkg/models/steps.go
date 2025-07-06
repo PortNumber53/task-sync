@@ -32,6 +32,13 @@ type StepExec struct {
 	LocalPath string
 }
 
+// TaskSettings represents the settings stored in the `tasks.settings` JSONB column.
+type TaskSettings struct {
+	AssignContainers map[string]string `json:"assign_containers,omitempty"`
+	ImageTag         string            `json:"image_tag,omitempty"`
+	ImageID          string            `json:"image_id,omitempty"`
+}
+
 // StepConfig is an interface that all step configurations should implement.
 type StepConfig interface {
 	GetImageTag() string
@@ -289,7 +296,6 @@ func (c *DockerRubricsConfig) GetDependsOn() []Dependency { return c.DockerRubri
 type RubricShellConfig struct {
 	ImageID          string            `json:"image_id,omitempty"`
 	ImageTag         string            `json:"image_tag,omitempty"`
-	AssignContainers map[string]string `json:"assign_containers,omitempty"`
 	Command          string            `json:"command"`
 	CriterionID      string            `json:"criterion_id,omitempty"`
 	Counter          string            `json:"counter,omitempty"`
@@ -297,6 +303,7 @@ type RubricShellConfig struct {
 	Required         bool              `json:"required,omitempty"`
 	DependsOn        []Dependency      `json:"depends_on,omitempty"`
 	GeneratedBy      string            `json:"generated_by,omitempty"`
+	ContainerName    string            `json:"container_name,omitempty"`
 }
 
 func (c *RubricShellConfig) GetImageTag() string      { return c.ImageTag }
@@ -1180,6 +1187,42 @@ func GetRubricSetFromDependencies(db *sql.DB, stepID int, stepLogger *log.Logger
 	}
 
 	return nil, nil // Not found in this branch
+}
+
+// GetTaskSettings retrieves and unmarshals the settings for a given task.
+func GetTaskSettings(db *sql.DB, taskID int) (*TaskSettings, error) {
+	var settingsJSON sql.NullString
+	err := db.QueryRow("SELECT settings FROM tasks WHERE id = $1", taskID).Scan(&settingsJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return &TaskSettings{}, nil // No task found, return empty settings
+		}
+		return nil, fmt.Errorf("failed to query task settings for task %d: %w", taskID, err)
+	}
+
+	var settings TaskSettings
+	if settingsJSON.Valid && settingsJSON.String != "" && settingsJSON.String != "null" {
+		if err := json.Unmarshal([]byte(settingsJSON.String), &settings); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal task settings for task %d: %w", taskID, err)
+		}
+	}
+
+	return &settings, nil
+}
+
+// UpdateTaskSettings marshals and saves the settings for a given task.
+func UpdateTaskSettings(db *sql.DB, taskID int, settings *TaskSettings) error {
+	settingsBytes, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task settings for task %d: %w", taskID, err)
+	}
+
+	_, err = db.Exec("UPDATE tasks SET settings = $1 WHERE id = $2", string(settingsBytes), taskID)
+	if err != nil {
+		return fmt.Errorf("failed to update task settings for task %d: %w", taskID, err)
+	}
+
+	return nil
 }
 
 // GetContainerName is a helper function to extract container_name from a step's settings.

@@ -23,8 +23,30 @@ func executeDockerBuild(workDir string, config *models.DockerBuildConfig, stepID
 		dependsOnMap[dep.ID] = true
 	}
 
-	// Add build parameters
-	buildParams = append(buildParams, "-t", config.ImageTag)
+	// Process parameters from the config
+	for _, param := range config.Parameters {
+		// Replace placeholder for image tag
+		processedParam := strings.Replace(param, "%%IMAGETAG%%", config.ImageTag, -1)
+		// Split the parameter string into parts to handle flags and their values
+		parts := strings.Fields(processedParam)
+		buildParams = append(buildParams, parts...)
+	}
+
+	// Ensure the -t flag is present if not already added by parameters
+	hasTagFlag := false
+	for i, param := range buildParams {
+		if param == "-t" || param == "--tag" {
+			// If -t is a parameter, ensure it has a value.
+			// The placeholder replacement should have handled this.
+			if i+1 < len(buildParams) {
+				hasTagFlag = true
+				break
+			}
+		}
+	}
+	if !hasTagFlag {
+		buildParams = append(buildParams, "-t", config.ImageTag)
+	}
 
 	// Defensive check for empty params
 	if len(buildParams) == 0 {

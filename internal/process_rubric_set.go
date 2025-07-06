@@ -44,9 +44,8 @@ func processAllRubricSetSteps(db *sql.DB, logger *log.Logger) error {
 }
 
 // ProcessRubricSetStep handles the execution of a rubric_set step.
-// It parses the main rubric file and then, for each solution patch assigned in
-// assign_containers, it creates, updates, or deletes child rubric_shell steps
-// to match the rubric criteria.
+// It parses the main rubric file, updates the task-level settings with container assignments,
+// and then creates, updates, or deletes child rubric_shell steps to match the rubric criteria.
 func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
 	var settings struct {
 		RubricSet models.RubricSetConfig `json:"rubric_set"`
@@ -55,6 +54,19 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 		return fmt.Errorf("failed to unmarshal step settings: %w", err)
 	}
 	config := &settings.RubricSet
+
+	// Update task-level settings with the container assignments
+	if len(config.AssignContainers) > 0 {
+		taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
+		if err != nil {
+			return fmt.Errorf("failed to get task settings: %w", err)
+		}
+		taskSettings.AssignContainers = config.AssignContainers
+		if err := models.UpdateTaskSettings(db, stepExec.TaskID, taskSettings); err != nil {
+			return fmt.Errorf("failed to update task settings: %w", err)
+		}
+		stepLogger.Printf("Updated task settings with %d container assignments.", len(config.AssignContainers))
+	}
 
 	// 1. Parse the main rubric file to get the list of criteria.
 	markdownFilePath := filepath.Join(stepExec.LocalPath, config.File)
@@ -87,14 +99,13 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 		title := fmt.Sprintf("Rubric %s: %s", criterion.Counter, criterion.Title)
 
 		newRubricShellSettings := models.RubricShellConfig{
-			Command:          criterion.HeldOutTest,
-			CriterionID:      criterion.Title,
-			Counter:          criterion.Counter,
-			Score:            criterion.Score,
-			Required:         criterion.Required,
-			DependsOn:        []models.Dependency{{ID: stepExec.StepID}},
-			GeneratedBy:      strconv.Itoa(stepExec.StepID),
-			AssignContainers: config.AssignContainers,
+			Command:     criterion.HeldOutTest,
+			CriterionID: criterion.Title,
+			Counter:     criterion.Counter,
+			Score:       criterion.Score,
+			Required:    criterion.Required,
+			DependsOn:   []models.Dependency{{ID: stepExec.StepID}},
+			GeneratedBy: strconv.Itoa(stepExec.StepID),
 		}
 
 		wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellSettings}

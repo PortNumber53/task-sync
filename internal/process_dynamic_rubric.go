@@ -21,6 +21,19 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 		return fmt.Errorf("failed to unmarshal dynamic_rubric settings for step %d: %w", stepExec.StepID, err)
 	}
 
+	// Update task-level settings with the container assignments from this step
+	if len(config.DynamicRubric.AssignContainers) > 0 {
+		taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
+		if err != nil {
+			return fmt.Errorf("failed to get task settings: %w", err)
+		}
+		taskSettings.AssignContainers = config.DynamicRubric.AssignContainers
+		if err := models.UpdateTaskSettings(db, stepExec.TaskID, taskSettings); err != nil {
+			return fmt.Errorf("failed to update task settings: %w", err)
+		}
+		stepLogger.Printf("Updated task settings with %d container assignments from dynamic_rubric step.", len(config.DynamicRubric.AssignContainers))
+	}
+
 	var overallChanged bool
 
 	// 1. Check hashes of associated files
@@ -90,14 +103,13 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 		for _, crit := range criteria {
 			title := fmt.Sprintf("Rubric %s: %s", crit.Counter, crit.Title)
 			rubricShellSettings := models.RubricShellConfig{
-				AssignContainers: config.DynamicRubric.AssignContainers,
-				Command:          crit.HeldOutTest,
-				CriterionID:      crit.Title,
-				Counter:          crit.Counter,
-				Score:            crit.Score,
-				Required:         crit.Required,
-				DependsOn:        []models.Dependency{dependencyOnParent},
-				GeneratedBy:      strconv.Itoa(stepExec.StepID),
+				Command:     crit.HeldOutTest,
+				CriterionID: crit.Title,
+				Counter:     crit.Counter,
+				Score:       crit.Score,
+				Required:    crit.Required,
+				DependsOn:   []models.Dependency{dependencyOnParent},
+				GeneratedBy: strconv.Itoa(stepExec.StepID),
 			}
 
 			wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": rubricShellSettings}

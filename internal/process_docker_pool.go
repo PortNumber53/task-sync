@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/PortNumber53/task-sync/pkg/models"
@@ -170,6 +171,39 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 			"docker_pool": config,
 		}
 		newSettingsJSON, _ := json.Marshal(updatedConfig)
+
+		// --- NEW: Update task.settings.assign_containers with the correct mapping ---
+		taskSettings, err = models.GetTaskSettings(db, step.TaskID)
+		if err == nil {
+			// Build mapping: solution1.patch -> first container, etc.
+			assignContainers := make(map[string]string)
+			// Try to get solution patch names from existing mapping (fallback to generic names)
+			var patchNames []string
+			if taskSettings.AssignContainers != nil && len(taskSettings.AssignContainers) > 0 {
+				for k := range taskSettings.AssignContainers {
+					patchNames = append(patchNames, k)
+				}
+				// Sort for determinism
+				sort.Strings(patchNames)
+			} else {
+				// Default: solution1.patch, solution2.patch, ...
+				for i := range runningContainers {
+					patchNames = append(patchNames, fmt.Sprintf("solution%d.patch", i+1))
+				}
+			}
+			for i, container := range runningContainers {
+				if i < len(patchNames) {
+					assignContainers[patchNames[i]] = container.ContainerName
+				}
+			}
+			taskSettings.AssignContainers = assignContainers
+			if err := models.UpdateTaskSettings(db, step.TaskID, taskSettings); err != nil {
+				models.StepLogger.Printf("Step %d: Failed to update assign_containers in task settings: %v\n", step.StepID, err)
+			} else {
+				models.StepLogger.Printf("Step %d: Updated task settings with assign_containers: %+v\n", step.StepID, assignContainers)
+			}
+		}
+		//-----------------------------------------------------------
 
 		models.StoreStepResult(db, step.StepID, map[string]interface{}{
 			"result":     "success",

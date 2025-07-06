@@ -56,6 +56,39 @@ func ProcessSteps(db *sql.DB) error {
 	return executePendingSteps(db, stepProcessors)
 }
 
+// ProcessStepsForTask processes all steps for a specific task by ID, respecting dependencies.
+func ProcessStepsForTask(db *sql.DB, taskID int) error {
+	// Fetch all steps for the given task, ordered by ID (can be improved to topological sort if needed)
+	rows, err := db.Query(`SELECT id FROM steps WHERE task_id = $1 ORDER BY id`, taskID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch steps for task %d: %w", taskID, err)
+	}
+	defer rows.Close()
+
+	var stepIDs []int
+	for rows.Next() {
+		var stepID int
+		if err := rows.Scan(&stepID); err != nil {
+			return fmt.Errorf("failed to scan step ID: %w", err)
+		}
+		stepIDs = append(stepIDs, stepID)
+	}
+
+	if len(stepIDs) == 0 {
+		return fmt.Errorf("no steps found for task %d", taskID)
+	}
+
+	for _, stepID := range stepIDs {
+		fmt.Printf("Processing step ID %d...\n", stepID)
+		if err := ProcessSpecificStep(db, stepID); err != nil {
+			fmt.Printf("Error processing step %d: %v\n", stepID, err)
+			// Continue processing other steps even if one fails
+		}
+	}
+	return nil
+}
+
+
 func executePendingSteps(db *sql.DB, stepProcessors map[string]func(*sql.DB, *models.StepExec, *log.Logger) error) error {
 	// Iterate over the map and call each function
 	for stepType, processorFunc := range stepProcessors {

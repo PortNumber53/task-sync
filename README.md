@@ -1,5 +1,31 @@
 # task-sync
 
+## Task Commands
+
+### Run All Steps for a Specific Task
+
+To execute all steps for a specific task (by its numeric ID):
+
+```bash
+./task-sync task run <task_id>
+```
+- This command will process all steps associated with the given task, in ID order.
+- Example:
+  ```bash
+  ./task-sync task run 3
+  ```
+- This is similar to the global `run-steps` command, but only processes steps for the specified task.
+
+### Run All Pending Steps Globally
+
+To process all pending steps for all tasks:
+
+```bash
+./task-sync run-steps
+```
+
+
+
 `task-sync` is a command-line tool for defining and executing multi-step tasks. It uses a PostgreSQL database to store task and step definitions, allowing for complex workflows with dependencies.
 
 ## Database Schema

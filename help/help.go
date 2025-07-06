@@ -284,10 +284,18 @@ Available Commands:
   edit       Edit a task's details
   info       Show detailed information about a task
   list       List all tasks
+  run        Run all steps for a specific task
 
 Use "task-sync task <command> --help" for more information about a command.
 `
 	fmt.Println(helpText)
+}
+
+// PrintTaskRunIDHelp prints help for the task run command
+func PrintTaskRunIDHelp() {
+	fmt.Println("task run command help:")
+	fmt.Println("  Usage: task-sync task run <task_id>")
+	fmt.Println("  Description: Run all steps for a specific task by providing its ID.")
 }
 
 // PrintTasksListHelp prints help for the task list command

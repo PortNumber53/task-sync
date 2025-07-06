@@ -303,6 +303,19 @@ func HandleTask() {
 		HandleTaskEdit(db)
 	case "list":
 		HandleTaskList()
+	case "run":
+		pgURL, err := internal.GetPgURLFromEnv()
+		if err != nil {
+			fmt.Printf("Database configuration error: %v\n", err)
+			os.Exit(1)
+		}
+		db, err := sql.Open("postgres", pgURL)
+		if err != nil {
+			fmt.Printf("Database connection error: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+		HandleTaskRunID(db)
 	default:
 		fmt.Printf("Unknown task subcommand: %s\n", subcommand)
 		helpPkg.PrintTaskHelp()

@@ -310,6 +310,7 @@ type RubricShellConfig struct {
 	DependsOn        []Dependency      `json:"depends_on,omitempty"`
 	GeneratedBy      string            `json:"generated_by,omitempty"`
 	ContainerName    string            `json:"container_name,omitempty"`
+	LastRun          map[string]string `json:"last_run,omitempty"`
 }
 
 func (c *RubricShellConfig) GetImageTag() string      { return c.ImageTag }

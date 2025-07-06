@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -100,10 +101,34 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		return outputStr, nil
 	}
 
+	// Prepare last_run map in config if not present
+	if config.LastRun == nil {
+		config.LastRun = make(map[string]string)
+	}
+
+	// For hashing (import is already at the top of the file)
+
 	for solutionPatch, containerName := range taskSettings.AssignContainers {
 		stepLogger.Printf("--- Processing solution '%s' in container '%s' ---", solutionPatch, containerName)
 		result := make(map[string]string)
 		var currentRunError error
+
+		// Fetch container_id and image_id for this container (stub: use containerName as id, could be improved)
+		containerID := containerName
+		imageID := ""
+		// TODO: Optionally fetch real imageID if available (for now, leave as empty string or fetch if possible)
+
+		// Compute hash of tracked fields
+		hashInput := fmt.Sprintf("command:%s|counter:%d|criterion_id:%s|required:%v|score:%f|container_id:%s|image_id:%s",
+			config.Command, config.Counter, config.CriterionID, config.Required, config.Score, containerID, imageID)
+		hashVal := fmt.Sprintf("%x", sha256.Sum256([]byte(hashInput)))
+
+		// Check last_run for this solution/container
+		if prevHash, ok := config.LastRun[solutionPatch]; ok && prevHash == hashVal {
+			stepLogger.Printf("No changes detected for solution '%s' in container '%s'. Skipping execution.", solutionPatch, containerName)
+			allResults[solutionPatch] = map[string]string{"skipped": "true", "reason": "last_run hash matched"}
+			continue
+		}
 
 		// 1. Fully clean the repo status inside the container
 		cleanupCmds := [][]string{
@@ -175,6 +200,9 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 			}
 		}
 
+		// Update last_run for this solution/container
+		config.LastRun[solutionPatch] = hashVal
+
 		allResults[solutionPatch] = result
 		if currentRunError != nil && finalErr == nil {
 			finalErr = currentRunError // Capture the first error
@@ -188,11 +216,16 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		return jsonErr
 	}
 
-	stepLogger.Printf("Final Results:\n%s", string(resultsBytes))
-
-	_, errUpdate := db.Exec("UPDATE steps SET results = $1 WHERE id = $2", string(resultsBytes), stepExec.StepID)
+	// Persist updated settings with last_run
+	wrappedSettings.RubricShell = config
+	settingsBytes, err := json.MarshalIndent(wrappedSettings, "", "  ")
+	if err != nil {
+		stepLogger.Printf("Failed to marshal updated settings: %v", err)
+		return err
+	}
+	_, errUpdate := db.Exec("UPDATE steps SET results = $1, settings = $2 WHERE id = $3", string(resultsBytes), string(settingsBytes), stepExec.StepID)
 	if errUpdate != nil {
-		stepLogger.Printf("Failed to update step results: %v", errUpdate)
+		stepLogger.Printf("Failed to update step results/settings: %v", errUpdate)
 		return errUpdate
 	}
 

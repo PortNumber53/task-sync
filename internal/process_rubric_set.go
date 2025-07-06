@@ -96,6 +96,18 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 			GeneratedBy: strconv.Itoa(stepExec.StepID),
 		}
 
+		// Preserve last_run if present in the existing step
+		if existingStep, ok := existingStepsMap[criterion.Title]; ok {
+			var existingStepSettings struct {
+				RubricShell models.RubricShellConfig `json:"rubric_shell"`
+			}
+			if err := json.Unmarshal([]byte(existingStep.Settings), &existingStepSettings); err == nil {
+				if existingStepSettings.RubricShell.LastRun != nil {
+					newRubricShellSettings.LastRun = existingStepSettings.RubricShell.LastRun
+				}
+			}
+		}
+
 		wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellSettings}
 		newSettingsBytes, _ := json.Marshal(wrappedSettings)
 

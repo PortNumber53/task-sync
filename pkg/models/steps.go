@@ -812,7 +812,7 @@ func GetGeneratedSteps(db *sql.DB, generatedByStepID int) ([]Step, error) {
 	query := `
 		SELECT id, task_id, title, settings, results, created_at, updated_at
 		FROM steps
-		WHERE (settings->'rubric_shell'->>'generated_by' = $1) OR (settings->>'generated_by' = $1)
+		WHERE (settings->'rubric_shell'->>'generated_by' = $1)
 	`
 	rows, err := db.Query(query, strconv.Itoa(generatedByStepID))
 	if err != nil {

@@ -15,6 +15,20 @@ import (
 )
 
 func main() {
+	// Check for --remote flag anywhere in os.Args
+	listenAddr := "127.0.0.1:8064"
+	remoteFlagIdx := -1
+	for i, arg := range os.Args {
+		if arg == "--remote" {
+			listenAddr = "0.0.0.0:8064"
+			remoteFlagIdx = i
+			break
+		}
+	}
+	// Remove --remote from os.Args so it doesn't interfere with command parsing
+	if remoteFlagIdx != -1 {
+		os.Args = append(os.Args[:remoteFlagIdx], os.Args[remoteFlagIdx+1:]...)
+	}
     // Initialize StepLogger at the start to avoid nil pointer dereference
     models.StepLogger = log.New(os.Stdout, "STEP: ", log.Ldate|log.Ltime|log.Lshortfile)
 
@@ -24,9 +38,12 @@ func main() {
 		os.Exit(0)
 	}
 
-	if len(os.Args) < 2 {
-		// Default to running the API server in local mode if no arguments are provided
-		listenAddr := "127.0.0.1:8064"
+	if len(os.Args) < 2 || os.Args[1] == "serve" {
+		// Default to running the API server in local mode if no arguments are provided, or if 'serve' is given
+		if len(os.Args) >= 2 && os.Args[1] == "serve" {
+			// Remove 'serve' from os.Args so it doesn't interfere with further parsing
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+		}
 		pgURL, err := internal.GetPgURLFromEnv()
 		if err != nil {
 			fmt.Printf("Database configuration error: %v\n", err)

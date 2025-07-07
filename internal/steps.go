@@ -46,8 +46,17 @@ var stepProcessors = map[string]func(*sql.DB, *models.StepExec, *log.Logger) err
 		if se != nil && se.StepID != 0 {
 			return ProcessDynamicRubricStep(db, se, logger)
 		}
-		// For now, running all dynamic_rubric steps is not supported via the general runner.
-		return fmt.Errorf("processing all dynamic_rubric steps at once is not supported")
+		// For now, do not process all dynamic_rubric steps at once. Only log if such steps exist.
+		rows, err := db.Query(`SELECT id FROM steps WHERE settings ? 'dynamic_rubric'`)
+		if err != nil {
+			logger.Printf("Could not check for dynamic_rubric steps: %v", err)
+			return nil
+		}
+		defer rows.Close()
+		if rows.Next() {
+			logger.Printf("Skipping bulk processing of dynamic_rubric steps (not supported). Use specific StepID.")
+		}
+		return nil
 	},
 }
 

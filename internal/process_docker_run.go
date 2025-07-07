@@ -303,10 +303,14 @@ func processDockerRunSteps(db *sql.DB, stepID int) error {
 			config.ContainerID = newContainerID
 			config.ContainerName = containerName
 			config.ImageID = imageIDToUse
-			config.ImageTag = imageTagToUse // Ensure the used ImageTag is saved
+			config.ImageTag = imageTagToUse // Used in-memory only; do not persist
 
-			// Update the config in the holder to maintain proper structure
-			configHolder.DockerRun = config
+			// Only persist allowed fields. Never persist ImageID or ImageTag to step.settings.
+			persistConfig := *config
+			persistConfig.ImageID = ""
+			persistConfig.ImageTag = ""
+			configHolder.DockerRun = &persistConfig
+			// Only docker_build may write image_id to task.settings; image_tag must never be written by any step type.
 			newSettingsJSON, marshalErr := json.Marshal(configHolder)
 			if marshalErr != nil {
 				models.StepLogger.Printf("Step %d: Failed to marshal updated settings after successful run: %v\n", step.StepID, marshalErr)

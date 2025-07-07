@@ -117,12 +117,19 @@ func processDockerPullSteps(db *sql.DB, stepID int) {
 				models.StepLogger.Printf("Failed to store error result for step %d: %v\n", step.StepID, errStore)
 			}
 		} else {
-			// Success, store updated config (if ImageID was fetched and not just verified)
-			updatedSettingsBytes, marshalErr := json.Marshal(config)
+			// Success: Only update allowed fields in step.settings (e.g., PreventRunBefore).
+			// Never persist image_id or image_tag to step.settings. Only docker_build may write image_id to task.settings.
+			// image_tag is user-supplied and must never be written by any step type.
+
+			// Create a copy of config with image_id and image_tag omitted before persisting.
+			persistConfig := config
+			persistConfig.ImageID = ""
+			persistConfig.ImageTag = ""
+
+			updatedSettingsBytes, marshalErr := json.Marshal(persistConfig)
 			if marshalErr != nil {
 				errMsg := fmt.Sprintf("Error marshalling updated docker_pull settings for step %d: %v", step.StepID, marshalErr)
 				models.StepLogger.Println(errMsg)
-				// Store original failure if this happens, or a new failure for marshalling
 				if errStore := models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": errMsg}); errStore != nil {
 					models.StepLogger.Printf("Failed to store marshalling error result for step %d: %v\n", step.StepID, errStore)
 				}
@@ -132,15 +139,13 @@ func processDockerPullSteps(db *sql.DB, stepID int) {
 			_, updateErr := db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(updatedSettingsBytes), step.StepID)
 			if updateErr != nil {
 				models.StepLogger.Printf("Error saving updated settings for step %d: %v\n", step.StepID, updateErr)
-				// Decide if this is critical enough to mark the step as failed despite successful pull
 			}
 
 			// Update PreventRunBefore for the next run
-			config.PreventRunBefore = time.Now().Add(6 * time.Hour).Format(time.RFC3339)
-			updatedSettingsBytesWithPrevent, marshalErrWithPrevent := json.Marshal(config)
+			persistConfig.PreventRunBefore = time.Now().Add(6 * time.Hour).Format(time.RFC3339)
+			updatedSettingsBytesWithPrevent, marshalErrWithPrevent := json.Marshal(persistConfig)
 			if marshalErrWithPrevent != nil {
 				models.StepLogger.Printf("Step %d: Error marshalling updated PreventRunBefore: %v\n", step.StepID, marshalErrWithPrevent)
-				// The main result is already stored, this is a secondary update failure
 			} else {
 				_, updateErrWithPrevent := db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(updatedSettingsBytesWithPrevent), step.StepID)
 				if updateErrWithPrevent != nil {
@@ -148,7 +153,7 @@ func processDockerPullSteps(db *sql.DB, stepID int) {
 				}
 			}
 
-			if errStore := models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "image_id": config.ImageID, "prevent_run_before_next": config.PreventRunBefore}); errStore != nil {
+			if errStore := models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "image_id": config.ImageID, "prevent_run_before_next": persistConfig.PreventRunBefore}); errStore != nil {
 				models.StepLogger.Printf("Failed to store success result for step %d: %v\n", step.StepID, errStore)
 			}
 			models.StepLogger.Printf("Step %d: docker_pull for image '%s' SUCCESS. Image ID: %s\n", step.StepID, config.ImageTag, config.ImageID)

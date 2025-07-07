@@ -11,10 +11,6 @@ import (
 	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
-
-
-
-
 // processDockerBuildSteps processes docker build steps for active tasks
 func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 	var steps []models.StepExec
@@ -103,18 +99,33 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 		// config.ImageID will be set after successful build
 		stepLogger.Printf("Step %d: Using image tag '%s' from task settings.\n", step.StepID, config.ImageTag)
 
+		// Ensure config.ImageID is loaded from taskSettings
+		config.ImageID = taskSettings.Docker.ImageID
+		// Log config.ImageID and config.ImageTag after loading config
+		stepLogger.Printf("Step %d: Loaded config.ImageID = '%s', config.ImageTag = '%s' before Docker inspect.", step.StepID, config.ImageID, config.ImageTag)
+
 		buildNeeded := false
 		cmdInspect := exec.Command("docker", "image", "inspect", config.ImageTag)
 		outputInspect, errInspect := cmdInspect.Output()
 		if errInspect != nil {
+			stepLogger.Printf("Step %d: Docker image inspect failed for tag %s: %v. Will trigger build.", step.StepID, config.ImageTag, errInspect)
 			buildNeeded = true
 		} else {
 			var inspectResult []map[string]interface{}
 			if json.Unmarshal(outputInspect, &inspectResult) == nil && len(inspectResult) > 0 {
-				if id, ok := inspectResult[0]["Id"].(string); !ok || strings.TrimPrefix(id, "sha256:") != config.ImageID {
+				id, ok := inspectResult[0]["Id"].(string)
+				stepLogger.Printf("Step %d: Docker inspect: image tag = %s, docker id = %s, config.ImageID = %s", step.StepID, config.ImageTag, id, config.ImageID)
+				if !ok {
+					stepLogger.Printf("Step %d: Could not extract Docker image ID from inspect. Will trigger build.", step.StepID)
 					buildNeeded = true
+				} else if strings.TrimPrefix(id, "sha256:") != strings.TrimPrefix(config.ImageID, "sha256:") {
+					stepLogger.Printf("Step %d: Docker image ID mismatch: docker inspect ID '%s', config.ImageID '%s'. Will trigger build.", step.StepID, id, config.ImageID)
+					buildNeeded = true
+				} else {
+					stepLogger.Printf("Step %d: Docker image ID matches: docker inspect ID '%s', config.ImageID '%s'. No build needed based on image ID.", step.StepID, id, config.ImageID)
 				}
 			} else {
+				stepLogger.Printf("Step %d: Docker inspect: could not parse inspect result for tag %s. Will trigger build.", step.StepID, config.ImageTag)
 				buildNeeded = true
 			}
 		}
@@ -123,19 +134,30 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 		for filePath, oldHash := range config.Files {
 			fullPath := filepath.Join(step.LocalPath, filePath)
 			currentHash, err := models.GetSHA256(fullPath)
-			if err != nil || currentHash != oldHash {
+			if err != nil {
+				stepLogger.Printf("Step %d: File %s: could not compute hash (error: %v). Marking as changed.", step.StepID, filePath, err)
 				filesChanged = true
 				break
 			}
+			if oldHash == "" {
+				stepLogger.Printf("Step %d: File %s: stored hash is empty. Marking as changed.", step.StepID, filePath)
+				filesChanged = true
+				break
+			}
+			if currentHash != oldHash {
+				stepLogger.Printf("Step %d: File %s: hash mismatch. Marking as changed.", step.StepID, filePath)
+				filesChanged = true
+				break
+			}
+			stepLogger.Printf("Step %d: File %s: stored hash = %s, current hash = %s", step.StepID, filePath, oldHash, currentHash)
 		}
-
 		if filesChanged {
 			buildNeeded = true
 		}
 
 		if buildNeeded {
 			stepLogger.Printf("Step %d: Building image %s:%s\n", step.StepID, config.ImageTag, config.ImageID)
-						if err := executeDockerBuild(step.LocalPath, &config, step.StepID, db, stepLogger); err != nil {
+			if err := executeDockerBuild(step.LocalPath, &config, step.StepID, db, stepLogger); err != nil {
 				stepLogger.Printf("Step %d: docker build failed: %v\n", step.StepID, err)
 				continue
 			}
@@ -145,6 +167,31 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 			if err := models.UpdateTaskSettings(db, step.TaskID, taskSettings); err != nil {
 				stepLogger.Printf("Step %d: Failed to update task settings with new image ID: %v\n", step.StepID, err)
 				// Continue, as the build was successful, but log the error
+			}
+
+			// After successful build, update file hashes and persist to step settings
+			for filePath := range config.Files {
+				fullPath := filepath.Join(step.LocalPath, filePath)
+				hash, err := models.GetSHA256(fullPath)
+				if err != nil {
+					stepLogger.Printf("Step %d: Warning: could not compute hash for %s: %v\n", step.StepID, filePath, err)
+					continue
+				}
+				config.Files[filePath] = hash
+			}
+			persistMap := map[string]interface{}{
+				"files":      config.Files,
+				"depends_on": config.DependsOn,
+				"parameters": config.Parameters,
+				// add any other allowed fields here
+			}
+			settingsMap["docker_build"], _ = json.Marshal(persistMap)
+			updatedSettings, _ := json.Marshal(settingsMap)
+			_, err := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), step.StepID)
+			if err != nil {
+				stepLogger.Printf("Step %d: Failed to persist updated file hashes to step settings: %v\n", step.StepID, err)
+			} else {
+				stepLogger.Printf("Step %d: Updated file hashes only in step settings (never persisting image_id or image_tag).", step.StepID)
 			}
 		} else {
 			stepLogger.Printf("Step %d: Docker image '%s:%s' is ready. Build skipped.\n", step.StepID, config.ImageTag, config.ImageID)

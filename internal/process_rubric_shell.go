@@ -255,6 +255,23 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		return errUpdate
 	}
 
+	// --- WebSocket update logic ---
+	// Send only the latest result for this rubric shell step/criterion
+	latestPayload := map[string]interface{}{
+		"step_id":      stepExec.StepID,
+		"criterion_id": config.CriterionID,
+		"result":       allResults, // You may want to filter to just the latest solutionPatch if desired
+	}
+	payloadBytes, err := json.Marshal(latestPayload)
+	if err != nil {
+		stepLogger.Printf("Failed to marshal websocket update payload: %v", err)
+	} else {
+		if wsErr := InsertWebsocketUpdate(db, "rubric_shell", &stepExec.TaskID, &stepExec.StepID, string(payloadBytes)); wsErr != nil {
+			stepLogger.Printf("Failed to insert websocket update: %v", wsErr)
+		}
+	}
+	// --- end WebSocket update logic ---
+
 	stepLogger.Printf("Rubric shell step finished for criterion ID %s. Overall status: %v", config.CriterionID, finalErr)
 	return finalErr
 }

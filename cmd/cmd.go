@@ -39,32 +39,6 @@ func HandleRunSteps() {
 	fmt.Println("Step processing finished.")
 }
 
-func HandleServe() {
-	help := false
-	for i := 2; i < len(os.Args); i++ {
-		if os.Args[i] == "--help" || os.Args[i] == "-h" {
-			help = true
-			break
-		}
-	}
-
-	if help {
-		helpPkg.PrintServeHelp()
-		os.Exit(0)
-	}
-
-	listenAddr := "127.0.0.1:8064"
-	for i := 2; i < len(os.Args); i++ {
-		if os.Args[i] == "--remote" {
-			listenAddr = "0.0.0.0:8064"
-		}
-	}
-
-	if err := internal.RunAPIServer(listenAddr); err != nil {
-		fmt.Printf("API server error: %v\n", err)
-		os.Exit(1)
-	}
-}
 
 func HandleStep() {
 	if len(os.Args) < 3 {
@@ -483,11 +457,53 @@ func HandleMigrate() {
 	case "up":
 		err = internal.RunMigrate("up")
 	case "down":
+		// Check for --help or -h after 'down'
+		for i := 3; i < len(os.Args); i++ {
+			if os.Args[i] == "--help" || os.Args[i] == "-h" {
+				helpPkg.PrintMigrateDownHelp()
+				os.Exit(0)
+			}
+		}
+		// Parse --step and --yes flags
+		yesFlag := false
+		// stepCount := 0 // Uncomment when partial downgrade is implemented
+		for i := 3; i < len(os.Args); i++ {
+			if os.Args[i] == "--yes" {
+				yesFlag = true
+			}
+			// else if os.Args[i] == "--step" && i+1 < len(os.Args) {
+			// 	if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
+			// 		stepCount = n
+			// 		i++
+			// 	}
+			// }
+		}
+		if !yesFlag {
+			fmt.Print("Are you sure you want to downgrade the database? Type \"yes\" to continue: ")
+			var resp string
+			fmt.Scanln(&resp)
+			if resp != "yes" {
+				fmt.Println("Aborted.")
+				os.Exit(1)
+			}
+		}
+		// TODO: use stepCount in migration logic
 		err = internal.RunMigrate("down")
 	case "reset":
 		err = internal.RunMigrateReset()
 	case "status":
 		err = internal.RunMigrateStatus()
+	case "force":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: task-sync migrate force <version>")
+			os.Exit(1)
+		}
+		version, convErr := strconv.Atoi(os.Args[3])
+		if convErr != nil {
+			fmt.Printf("Invalid version: %s\n", os.Args[3])
+			os.Exit(1)
+		}
+		err = internal.RunMigrateForce(version)
 	default:
 		fmt.Printf("Unknown migrate subcommand: %s\n", subcommand)
 		helpPkg.PrintMigrateHelp()

@@ -30,7 +30,7 @@ Usage:
 
 Available Commands:
   up        Apply all up migrations
-  down      Apply all down migrations (warning: will drop all tables!)
+  down      Downgrade (revert) migrations. Use --step for partial, confirmation required.
   status    Show current migration status
   reset     Reset database by applying all down then all up migrations
 
@@ -38,11 +38,19 @@ Examples:
   # Apply all pending migrations
   task-sync migrate up
 
+  # Downgrade the last migration (safe)
+  task-sync migrate down --step 1
+
+  # Downgrade all migrations (dangerous!)
+  task-sync migrate down
+
   # Show migration status
   task-sync migrate status
 
   # Reset the database
-  task-sync migrate reset`
+  task-sync migrate reset
+
+For details on 'down', run: task-sync migrate down --help`
 	fmt.Println(helpText)
 }
 
@@ -342,4 +350,35 @@ func PrintStepRunIDHelp() {
 	fmt.Println("step run command help:")
 	fmt.Println("  Usage: task-sync step run <step_id>")
 	fmt.Println("  Description: Run a specific step by providing its ID.")
+}
+
+// PrintMigrateDownHelp prints help for the migrate down command
+func PrintMigrateDownHelp() {
+	helpText := `Downgrade (revert) database migrations. By default, this will revert all migrations (dangerous!).
+
+Usage:
+  task-sync migrate down [--step COUNT] [--yes]
+
+Options:
+  --step COUNT   Revert the specified number of migrations (partial downgrade)
+  --yes          Skip the confirmation prompt (for automation)
+  -h, --help     Show this help message and exit
+
+Examples:
+  # Downgrade the last migration (safe)
+  task-sync migrate down --step 1
+
+  # Downgrade the last 3 migrations
+  task-sync migrate down --step 3
+
+  # Downgrade all migrations (dangerous!)
+  task-sync migrate down
+
+  # Downgrade without confirmation prompt
+  task-sync migrate down --step 1 --yes
+
+WARNING:
+  Running 'migrate down' without --step will revert ALL migrations and may result in DATA LOSS.
+  Always use --step unless you are sure you want to reset the entire database.`
+	fmt.Println(helpText)
 }

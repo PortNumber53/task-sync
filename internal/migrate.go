@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"github.com/gin-contrib/cors"
 	"database/sql"
 	"fmt"
 	"io"
@@ -12,7 +11,9 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"path/filepath"
 
+	"github.com/gin-contrib/cors"
 	"github.com/PortNumber53/task-sync/pkg/models"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
@@ -22,9 +23,25 @@ import (
 	_ "github.com/lib/pq"
 )
 
+
 const StepExecutorInterval = 5 * time.Second
 
 var stepLogger *log.Logger
+
+// apiErrorLogger is a logger that writes API errors to a file.
+var apiErrorLogger *log.Logger
+
+func initAPIErrorLogger() {
+	logFilePath := filepath.Join("tmp", "api-errors.log")
+	f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		// Fallback to stdout if file can't be opened
+		apiErrorLogger = log.New(os.Stdout, "[API_ERROR] ", log.LstdFlags)
+		fmt.Fprintf(os.Stderr, "[API_ERROR] Failed to open log file: %v\n", err)
+		return
+	}
+	apiErrorLogger = log.New(f, "[API_ERROR] ", log.LstdFlags)
+}
 
 // godotenvLoad allows mocking of godotenv.Load in tests.
 var godotenvLoad = godotenv.Load
@@ -38,21 +55,24 @@ func InitStepLogger(writer io.Writer) {
 // (Task and step logic is now in tasks.go and steps.go)
 // NewAPIServer creates a Gin HTTP server and returns the http.Server and quit channel for signal handling
 func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) {
+	initAPIErrorLogger()
 	// Load config and set up logging
 	cfg, err := LoadConfig()
 	if err != nil {
 		fmt.Println("[Config] Error loading config:", err)
 	}
 
-	pgURL, err := GetPgURLFromEnv()
-	if err != nil {
-		stepLogger.Fatalf("DB config error: %v", err)
+	if db == nil {
+		pgURL, err := GetPgURLFromEnv()
+		if err != nil {
+			stepLogger.Fatalf("DB config error: %v", err)
+		}
+		db, err = sql.Open("postgres", pgURL)
+		if err != nil {
+			stepLogger.Fatalf("DB open error: %v", err)
+		}
+		// Do not defer db.Close(); keep it open for server lifetime
 	}
-	db, err := sql.Open("postgres", pgURL)
-	if err != nil {
-		stepLogger.Fatalf("DB open error: %v", err)
-	}
-	defer db.Close()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
@@ -88,6 +108,9 @@ func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) 
 
 	r := gin.New()
 
+	// Register WebSocket API endpoint
+	RegisterWebsocketRoutes(r, db)
+
 	// Add CORS middleware for Vite dev server
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"http://localhost:5173"},
@@ -111,6 +134,7 @@ func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) 
 	r.GET("/tasks", func(c *gin.Context) {
 		rows, err := db.Query(`SELECT id, name, status, local_path, created_at, updated_at FROM tasks ORDER BY id`)
 		if err != nil {
+			apiErrorLogger.Printf("/tasks DB query error: %v", err)
 			c.JSON(500, gin.H{"error": "Failed to fetch tasks"})
 			return
 		}
@@ -122,14 +146,21 @@ func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) 
 			var localPath sql.NullString
 			var createdAt, updatedAt string
 			if err := rows.Scan(&id, &name, &status, &localPath, &createdAt, &updatedAt); err != nil {
+				apiErrorLogger.Printf("/tasks row scan error: %v", err)
 				c.JSON(500, gin.H{"error": "Failed to scan task row"})
 				return
 			}
 			tasks = append(tasks, map[string]interface{}{
-				"id":         id,
-				"name":       name,
-				"status":     status,
-				"local_path": func() string { if localPath.Valid { return localPath.String } else { return "" } }(),
+				"id":     id,
+				"name":   name,
+				"status": status,
+				"local_path": func() string {
+					if localPath.Valid {
+						return localPath.String
+					} else {
+						return ""
+					}
+				}(),
 				"created_at": createdAt,
 				"updated_at": updatedAt,
 			})
@@ -137,9 +168,22 @@ func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) 
 		c.JSON(200, gin.H{"tasks": tasks})
 	})
 	r.POST("/steps", func(c *gin.Context) {
+		// Log any errors in the handler
+		defer func() {
+			if rec := recover(); rec != nil {
+				errMsg := fmt.Sprintf("/steps POST panic: %v", rec)
+				apiErrorLogger.Println(errMsg)
+			}
+		}()
 		c.JSON(501, gin.H{"message": "Not implemented"})
 	})
 	r.GET("/steps", func(c *gin.Context) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				errMsg := fmt.Sprintf("/steps GET panic: %v", rec)
+				apiErrorLogger.Println(errMsg)
+			}
+		}()
 		c.JSON(501, gin.H{"message": "Not implemented"})
 	})
 
@@ -150,38 +194,6 @@ func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) 
 	}
 
 	return srv, quit
-}
-
-
-	srv, quit := NewAPIServer(listenAddr, db)
-
-	// Start server in a goroutine
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
-		}
-	}()
-
-	// Wait for interrupt signal to gracefully shut down the server
-	<-quit
-	log.Println("Shutting down server...")
-
-	// Cancel step executor context
-	cancel()
-
-	// Give a short grace period for the step executor to exit
-	time.Sleep(1 * time.Second)
-
-	// Create a deadline to wait for
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-
-	// Doesn't block if no connections, but will otherwise wait until the timeout deadline
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatal("Server forced to shutdown:", err)
-	}
-
-	log.Println("Server exiting")
 }
 
 // (Step execution logic moved to steps.go)
@@ -233,6 +245,26 @@ func GetPgURLFromEnv() (string, error) {
 		)
 	}
 	return pgURL, nil
+}
+
+func RunMigrateForce(version int) error {
+	pgURL, err := GetPgURLFromEnv()
+	if err != nil {
+		return err
+	}
+	m, err := migrate.New(
+		"file://./migrations",
+		pgURL,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to init migrate: %w", err)
+	}
+	defer m.Close()
+	if err := m.Force(version); err != nil {
+		return fmt.Errorf("failed to force migration version: %w", err)
+	}
+	fmt.Printf("Forced migration version to %d and cleared dirty flag.\n", version)
+	return nil
 }
 
 func RunMigrate(direction string) error {

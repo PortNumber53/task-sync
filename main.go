@@ -66,8 +66,6 @@ func main() {
 	switch os.Args[1] {
 	case "run-steps":
 		cmd.HandleRunSteps()
-	case "serve":
-		cmd.HandleServe()
 	case "step":
 		cmd.HandleStep()
 	case "task":

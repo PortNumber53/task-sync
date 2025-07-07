@@ -1,9 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 
 const Report = () => {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [wsUpdate, setWsUpdate] = useState(null);
+  const wsRef = useRef(null);
 
   useEffect(() => {
     fetch("http://localhost:8064/tasks")
@@ -21,12 +23,47 @@ const Report = () => {
       });
   }, []);
 
+  // WebSocket for real-time updates
+  useEffect(() => {
+    const ws = new WebSocket("ws://localhost:8064/ws/updates");
+    wsRef.current = ws;
+    ws.onopen = () => {
+      // Optionally: ws.send("hello");
+    };
+    ws.onmessage = (event) => {
+      try {
+        const update = JSON.parse(event.data);
+        setWsUpdate(update);
+        // Optionally: update tasks state here if needed
+        // For now, just log it
+        console.log("WebSocket update:", update);
+      } catch (e) {
+        console.error("WebSocket parse error", event.data);
+      }
+    };
+    ws.onerror = (err) => {
+      console.error("WebSocket error", err);
+    };
+    ws.onclose = () => {
+      // Optionally: try to reconnect
+    };
+    return () => {
+      ws.close();
+    };
+  }, []);
+
   if (loading) return <div>Loading tasks...</div>;
   if (error) return <div style={{ color: "red" }}>Error: {error}</div>;
 
   return (
     <div style={{ padding: 24 }}>
       <h1>Task Report</h1>
+      {wsUpdate && (
+        <div style={{ background: '#e0ffe0', padding: 10, marginBottom: 16, border: '1px solid #bada55' }}>
+          <strong>Live update received:</strong>
+          <pre style={{ margin: 0, fontSize: 12 }}>{JSON.stringify(wsUpdate, null, 2)}</pre>
+        </div>
+      )}
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr>

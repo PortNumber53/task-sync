@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"net/http"
+	"context"
+	"time"
 
 	cmd "github.com/PortNumber53/task-sync/cmd"
 	help "github.com/PortNumber53/task-sync/help"
@@ -22,11 +25,41 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		// Default to running the API server in remote mode if no arguments are provided
-		if err := internal.RunAPIServer("127.0.0.1:8064"); err != nil {
-			fmt.Printf("API server error: %v\n", err)
+		// Default to running the API server in local mode if no arguments are provided
+		listenAddr := "127.0.0.1:8064"
+		pgURL, err := internal.GetPgURLFromEnv()
+		if err != nil {
+			fmt.Printf("Database configuration error: %v\n", err)
 			os.Exit(1)
 		}
+		db, err := models.OpenDB(pgURL)
+		if err != nil {
+			fmt.Printf("Database connection error: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+
+		// Start API server and step executor in parallel
+		srv, quit := internal.NewAPIServer(listenAddr, db)
+		_, cancel := internal.RunStepExecutor(db)
+
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("listen: %s\n", err)
+			}
+		}()
+
+		// Wait for interrupt signal to gracefully shut down the server
+		<-quit
+		log.Println("Shutting down server...")
+		cancel()
+		time.Sleep(1 * time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Fatal("Server forced to shutdown:", err)
+		}
+		log.Println("Server exiting")
 		return
 	}
 

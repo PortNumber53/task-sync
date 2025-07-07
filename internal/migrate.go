@@ -36,7 +36,8 @@ func InitStepLogger(writer io.Writer) {
 
 // RunAPIServer starts the Gin server and prints environment/setup info
 // (Task and step logic is now in tasks.go and steps.go)
-func RunAPIServer(listenAddr string) error {
+// NewAPIServer creates a Gin HTTP server and returns the http.Server and quit channel for signal handling
+func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) {
 	// Load config and set up logging
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -53,36 +54,11 @@ func RunAPIServer(listenAddr string) error {
 	}
 	defer db.Close()
 
-	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 
 	// Initialize the models package logger
 	models.InitStepLogger(os.Stdout)
-
-	// Start step executor in a goroutine
-	go func(ctx context.Context, db *sql.DB) {
-		ticker := time.NewTicker(StepExecutorInterval)
-		defer ticker.Stop()
-
-		// Initial execution
-		if err := ProcessSteps(db); err != nil {
-			stepLogger.Printf("Error during initial step execution: %v", err)
-		}
-
-		for {
-			select {
-			case <-ticker.C:
-				if err := ProcessSteps(db); err != nil {
-					stepLogger.Printf("Error during periodic step execution: %v", err)
-				}
-			case <-ctx.Done():
-				stepLogger.Println("Step executor shutting down...")
-				return
-			}
-		}
-	}(ctx, db)
 
 	// Print environment info
 	fmt.Println("Starting task-sync API server...")
@@ -121,7 +97,6 @@ func RunAPIServer(listenAddr string) error {
 		AllowCredentials: true,
 	}))
 
-
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{"message": "Welcome to Task Sync"})
 	})
@@ -151,9 +126,9 @@ func RunAPIServer(listenAddr string) error {
 				return
 			}
 			tasks = append(tasks, map[string]interface{}{
-				"id": id,
-				"name": name,
-				"status": status,
+				"id":         id,
+				"name":       name,
+				"status":     status,
 				"local_path": func() string { if localPath.Valid { return localPath.String } else { return "" } }(),
 				"created_at": createdAt,
 				"updated_at": updatedAt,
@@ -173,6 +148,12 @@ func RunAPIServer(listenAddr string) error {
 		Addr:    listenAddr,
 		Handler: r,
 	}
+
+	return srv, quit
+}
+
+
+	srv, quit := NewAPIServer(listenAddr, db)
 
 	// Start server in a goroutine
 	go func() {
@@ -201,10 +182,36 @@ func RunAPIServer(listenAddr string) error {
 	}
 
 	log.Println("Server exiting")
-	return nil
 }
 
 // (Step execution logic moved to steps.go)
+
+// RunStepExecutor starts the step executor in a Goroutine and returns the context.CancelFunc
+func RunStepExecutor(db *sql.DB) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func(ctx context.Context, db *sql.DB) {
+		ticker := time.NewTicker(StepExecutorInterval)
+		defer ticker.Stop()
+
+		// Initial execution
+		if err := ProcessSteps(db); err != nil {
+			stepLogger.Printf("Error during initial step execution: %v", err)
+		}
+
+		for {
+			select {
+			case <-ticker.C:
+				if err := ProcessSteps(db); err != nil {
+					stepLogger.Printf("Error during periodic step execution: %v", err)
+				}
+			case <-ctx.Done():
+				stepLogger.Println("Step executor shutting down...")
+				return
+			}
+		}
+	}(ctx, db)
+	return ctx, cancel
+}
 
 // GetPgURLFromEnv loads the database connection URL from environment variables
 // It checks for DATABASE_URL first, then falls back to individual DB_* variables

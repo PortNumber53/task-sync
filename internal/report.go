@@ -167,16 +167,17 @@ func ReportTask(db *sql.DB, taskID int) error {
 				connector = "╰── "
 				newPrefix = prefix + "    "
 			}
-			// Check if this is a rubric_shell step
-			showIcons := false
+			// Always show 4 icons for rubric_shell steps
 			var icons string
-			var results map[string]map[string]interface{}
-			if node.Results.Valid && strings.Contains(node.Settings, "rubric_shell") {
-				if err := json.Unmarshal([]byte(node.Results.String), &results); err == nil {
-					showIcons = true
-					patches := []string{"solution1.patch", "solution2.patch", "solution3.patch", "solution4.patch"}
-					for _, patch := range patches {
-						icon := "❔"
+			if strings.Contains(node.Settings, "rubric_shell") {
+				var results map[string]map[string]interface{}
+				if node.Results.Valid {
+					_ = json.Unmarshal([]byte(node.Results.String), &results)
+				}
+				patches := []string{"solution1.patch", "solution2.patch", "solution3.patch", "solution4.patch"}
+				for _, patch := range patches {
+					icon := "❔"
+					if results != nil {
 						if res, ok := results[patch]; ok {
 							if out, ok := res["output"].(string); ok {
 								if strings.Contains(out, passMarker) {
@@ -186,8 +187,8 @@ func ReportTask(db *sql.DB, taskID int) error {
 								}
 							}
 						}
-						icons += icon + " "
 					}
+					icons += icon + " "
 				}
 			}
 			idStr := fmt.Sprintf("%*d", maxIDWidth, node.ID)
@@ -220,7 +221,7 @@ func ReportTask(db *sql.DB, taskID int) error {
 				return title[:idx+7] + rightNum + tail[end:]
 			}
 			titleOut := formatRubricNum(node.Title)
-			if showIcons {
+			if strings.Contains(node.Settings, "rubric_shell") {
 				fmt.Printf("%s%s%s%s-%s\n", prefix, connector, icons, idStr, titleOut)
 			} else {
 				fmt.Printf("%s%s%s-%s\n", prefix, connector, idStr, titleOut)

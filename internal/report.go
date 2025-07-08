@@ -180,7 +180,10 @@ func ReportTask(db *sql.DB, taskID int) error {
 					if results != nil {
 						if res, ok := results[patch]; ok {
 							if out, ok := res["output"].(string); ok {
-								if strings.Contains(out, passMarker) {
+								// Detect errorlevel=127 or similar (command not found)
+								if strings.Contains(out, "errorlevel=127") || strings.Contains(out, "exit status 127") || strings.Contains(out, "command not found") || strings.Contains(out, "No such file or directory") {
+									icon = "💀"
+								} else if strings.Contains(out, passMarker) {
 									icon = "✅"
 								} else if strings.Contains(out, failMarker) {
 									icon = "❌"

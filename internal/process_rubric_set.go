@@ -47,6 +47,8 @@ func processAllRubricSetSteps(db *sql.DB, logger *log.Logger) error {
 // It parses the main rubric file, updates the task-level settings with container assignments,
 // and then creates, updates, or deletes child rubric_shell steps to match the rubric criteria.
 func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
+	var rerunNeeded bool
+
 	var settings struct {
 		RubricSet models.RubricSetConfig `json:"rubric_set"`
 	}
@@ -55,6 +57,77 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	}
 	config := &settings.RubricSet
 
+	// Hash the main rubric file and store in Files map under the rubric file name
+	mainPath := config.File
+	mainFileName := filepath.Base(config.File)
+	if !filepath.IsAbs(mainPath) {
+		mainPath = filepath.Join(stepExec.LocalPath, mainPath)
+	}
+	stepLogger.Printf("DEBUG: main rubric file fullPath=%s", mainPath)
+	mainInfo, err := os.Stat(mainPath)
+	if err != nil {
+		stepLogger.Printf("Warning: could not stat main rubric file (%s): %v", mainPath, err)
+		rerunNeeded = true
+	} else if mainInfo.IsDir() {
+		stepLogger.Printf("Skipping directory for main rubric file: %s", mainPath)
+	} else {
+		hash, err := models.GetSHA256(mainPath)
+		if err != nil {
+			stepLogger.Printf("Warning: could not compute hash for main rubric file (%s): %v", mainPath, err)
+			rerunNeeded = true
+		} else {
+			if old, ok := config.Files[mainFileName]; !ok || old != hash {
+				rerunNeeded = true
+			}
+			config.Files[mainFileName] = hash
+		}
+	}
+
+	// Hash all files in config.Files (keys are file names)
+	for fileName := range config.Files {
+		filePath := fileName
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(stepExec.LocalPath, filePath)
+		}
+		stepLogger.Printf("DEBUG: fileName=%s filePath=%s", fileName, filePath)
+		info, err := os.Stat(filePath)
+		if err != nil {
+			stepLogger.Printf("Warning: could not stat %s: %v", filePath, err)
+			config.Files[fileName] = ""
+			rerunNeeded = true
+			continue
+		}
+		if info.IsDir() {
+			stepLogger.Printf("Skipping directory: %s", filePath)
+			config.Files[fileName] = ""
+			continue
+		}
+		hash, err := models.GetSHA256(filePath)
+		if err != nil {
+			stepLogger.Printf("Warning: could not compute hash for %s: %v", filePath, err)
+			config.Files[fileName] = ""
+			rerunNeeded = true
+			continue
+		}
+		if old, ok := config.Files[fileName]; !ok || old != hash {
+			rerunNeeded = true
+		}
+		config.Files[fileName] = hash
+	}
+
+	// If any hash changed, or hashes were missing, update and persist
+	if rerunNeeded {
+		stepLogger.Printf("File hashes changed or missing; will update and persist hashes.")
+
+		// Persist updated hashes to step settings
+		wrapped := map[string]interface{}{ "rubric_set": config }
+		if updated, err := json.Marshal(wrapped); err == nil {
+			stepLogger.Printf("DEBUG: Marshaled settings: %s", string(updated))
+			_, _ = db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(updated), stepExec.StepID)
+		} else {
+			stepLogger.Printf("ERROR: Failed to marshal settings for step %d: %v", stepExec.StepID, err)
+		}
+	}
 
 	// 1. Parse the main rubric file to get the list of criteria.
 	markdownFilePath := filepath.Join(stepExec.LocalPath, config.File)
@@ -96,24 +169,42 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 			GeneratedBy: strconv.Itoa(stepExec.StepID),
 		}
 
+		wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellSettings}
+		newSettingsBytes, _ := json.Marshal(wrappedSettings)
+
 		// Preserve last_run if present in the existing step
 		if existingStep, ok := existingStepsMap[criterion.Title]; ok {
 			var existingStepSettings struct {
 				RubricShell models.RubricShellConfig `json:"rubric_shell"`
 			}
+			shouldUpdate := false
 			if err := json.Unmarshal([]byte(existingStep.Settings), &existingStepSettings); err == nil {
-				if existingStepSettings.RubricShell.LastRun != nil {
-					newRubricShellSettings.LastRun = existingStepSettings.RubricShell.LastRun
+				// Compare relevant fields
+				rsOld := existingStepSettings.RubricShell
+				rsNew := newRubricShellSettings
+				if rsOld.Command != rsNew.Command ||
+					rsOld.CriterionID != rsNew.CriterionID ||
+					rsOld.Counter != rsNew.Counter ||
+					rsOld.Score != rsNew.Score ||
+					rsOld.Required != rsNew.Required ||
+					len(rsOld.DependsOn) != len(rsNew.DependsOn) ||
+					rsOld.GeneratedBy != rsNew.GeneratedBy {
+					shouldUpdate = true
+				} else {
+					for i := range rsOld.DependsOn {
+						if rsOld.DependsOn[i] != rsNew.DependsOn[i] {
+							shouldUpdate = true
+							break
+						}
+					}
 				}
+				if existingStep.Title != title {
+					shouldUpdate = true
+				}
+			} else {
+				shouldUpdate = true // Could not unmarshal, safest to update
 			}
-		}
-
-		wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellSettings}
-		newSettingsBytes, _ := json.Marshal(wrappedSettings)
-
-		if existingStep, ok := existingStepsMap[criterion.Title]; ok {
-			// Step exists, check if it needs an update.
-			if existingStep.Title != title || string(existingStep.Settings) != string(newSettingsBytes) {
+			if shouldUpdate {
 				if err := models.UpdateStep(db, existingStep.ID, title, string(newSettingsBytes)); err != nil {
 					stepLogger.Printf("Failed to update step %d for criterion '%s': %v", existingStep.ID, criterion.Title, err)
 				} else {

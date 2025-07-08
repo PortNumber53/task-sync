@@ -234,7 +234,6 @@ func ParseRubric(filePath string) ([]Criterion, error) {
 type DynamicRubricConfig struct {
 	DynamicRubric struct {
 		Files       map[string]string `json:"files,omitempty"`
-		Hashes      map[string]string `json:"hashes,omitempty"`
 		Rubrics          []string          `json:"rubrics,omitempty"`
 		Hash             string            `json:"hash,omitempty"`
 
@@ -311,6 +310,7 @@ type RubricShellConfig struct {
 	GeneratedBy      string            `json:"generated_by,omitempty"`
 	ContainerName    string            `json:"container_name,omitempty"`
 	LastRun          map[string]string `json:"last_run,omitempty"`
+	Files            map[string]string `json:"files,omitempty"`
 }
 
 func (c *RubricShellConfig) GetImageTag() string      { return c.ImageTag }
@@ -319,14 +319,20 @@ func (c *RubricShellConfig) HasImage() bool           { return c.ImageTag != "" 
 func (c *RubricShellConfig) GetDependsOn() []Dependency { return c.DependsOn }
 
 // RubricSetConfig represents the configuration for a rubric_set step.
+// RubricSetConfig represents the configuration for a rubric_set step.
+// - File: the main rubric markdown file
+// - Files: additional files to track for hash changes (name->relative path)
+// - Hashes: map of filename to last known SHA256 hash
+// When any file's hash changes, the step should re-run.
 type RubricSetConfig struct {
 	File             string            `json:"file"`
+	Files            map[string]string `json:"files,omitempty"`
 	HeldOutTest      string            `json:"held_out_test,omitempty"`
 	Solution1        string            `json:"solution_1,omitempty"`
 	Solution2        string            `json:"solution_2,omitempty"`
 	Solution3        string            `json:"solution_3,omitempty"`
 	Solution4        string            `json:"solution_4,omitempty"`
-	Hashes           map[string]string `json:"hashes,omitempty"`
+
 	DependsOn        []Dependency      `json:"depends_on,omitempty"`
 }
 

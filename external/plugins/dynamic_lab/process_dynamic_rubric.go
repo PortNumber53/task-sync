@@ -35,24 +35,22 @@ func processDynamicRubricSteps(db *sql.DB) error {
 
 		// 1. Check hashes of files in the 'files' map
 		if config.DynamicRubric.Files != nil {
-			if config.DynamicRubric.Hashes == nil {
-				config.DynamicRubric.Hashes = make(map[string]string)
-			}
+			
 			for file := range config.DynamicRubric.Files {
-				filePath := filepath.Join(step.LocalPath, file)
-				newHash, err := models.GetSHA256(filePath)
-				if err != nil {
-					log.Printf("Error hashing file %s for step %d: %v", file, step.StepID, err)
-					continue
-				}
-
-				storedHash, ok := config.DynamicRubric.Hashes[file]
-				if !ok || storedHash != newHash {
-					log.Printf("File %s changed for step %d. Old hash: %s, New hash: %s", file, step.StepID, storedHash, newHash)
-					overallChanged = true
-					config.DynamicRubric.Hashes[file] = newHash
-				}
+			filePath := filepath.Join(step.LocalPath, file)
+			newHash, err := models.GetSHA256(filePath)
+			if err != nil {
+				log.Printf("Error hashing file %s for step %d: %v", file, step.StepID, err)
+				continue
 			}
+
+			storedHash, ok := config.DynamicRubric.Files[file]
+			if !ok || storedHash != newHash {
+				log.Printf("File %s changed for step %d. Old hash: %s, New hash: %s", file, step.StepID, storedHash, newHash)
+				overallChanged = true
+			}
+			config.DynamicRubric.Files[file] = newHash
+		}
 		}
 
 		// 2. Check the rubric file itself and parse criteria

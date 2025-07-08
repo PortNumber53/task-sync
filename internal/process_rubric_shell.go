@@ -122,6 +122,58 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 
 	// For hashing (import is already at the top of the file)
 
+	// --- File hash change detection logic (copied from rubric_set) ---
+	// Find parent rubric_set step and get its files map
+	parentRubricSet, err := models.GetRubricSetFromDependencies(db, stepExec.StepID, stepLogger)
+	if err != nil {
+		stepLogger.Printf("Warning: could not find parent rubric_set: %v", err)
+	}
+	filesChanged := false
+	if parentRubricSet != nil && parentRubricSet.Files != nil {
+		if config.Files == nil {
+			config.Files = make(map[string]string)
+		}
+		for fileName := range parentRubricSet.Files {
+			filePath := fileName
+			if !filepath.IsAbs(filePath) {
+				filePath = filepath.Join(stepExec.LocalPath, filePath)
+			}
+			stepLogger.Printf("DEBUG: fileName=%s filePath=%s", fileName, filePath)
+			info, err := os.Stat(filePath)
+			fileIsException := fileName == "TASK_DATA.md" || fileName == "rubrics.mhtml"
+			if err != nil {
+				stepLogger.Printf("Warning: could not stat %s: %v", filePath, err)
+				if config.Files[fileName] != "" && !fileIsException {
+					filesChanged = true
+				}
+				config.Files[fileName] = ""
+				continue
+			}
+			if info.IsDir() {
+				stepLogger.Printf("Skipping directory: %s", filePath)
+				if config.Files[fileName] != "" && !fileIsException {
+					filesChanged = true
+				}
+				config.Files[fileName] = ""
+				continue
+			}
+			hash, err := models.GetSHA256(filePath)
+			if err != nil {
+				stepLogger.Printf("Warning: could not compute hash for %s: %v", filePath, err)
+				if config.Files[fileName] != "" && !fileIsException {
+					filesChanged = true
+				}
+				config.Files[fileName] = ""
+				continue
+			}
+			if old, ok := config.Files[fileName]; (!ok || old != hash) && !fileIsException {
+				filesChanged = true
+			}
+			config.Files[fileName] = hash
+		}
+	}
+	// --- End file hash change detection ---
+
 	for solutionPatch, containerName := range taskSettings.AssignContainers {
 		stepLogger.Printf("--- Processing solution '%s' in container '%s' ---", solutionPatch, containerName)
 		result := make(map[string]string)
@@ -130,12 +182,16 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		// Compute hash of rubric_shell fields + container image_tag/image_hash
 		imageTag := config.ImageTag
 		imageHash := config.ImageID // If you have ImageHash, use that; else use ImageID as fallback
-		hashInput := fmt.Sprintf("command:%s|counter:%d|criterion_id:%s|required:%v|score:%f|image_tag:%s|image_hash:%s",
+		hashInput := fmt.Sprintf("command:%s|counter:%s|criterion_id:%s|required:%v|score:%d|image_tag:%s|image_hash:%s",
 			config.Command, config.Counter, config.CriterionID, config.Required, config.Score, imageTag, imageHash)
 		hashVal := fmt.Sprintf("%x", sha256.Sum256([]byte(hashInput)))
 
-		// Check last_run for this solution/container
-		if prevHash, ok := config.LastRun[solutionPatch]; ok && prevHash == hashVal {
+		// Check last_run for this solution/container and file hashes
+		shouldSkip := false
+		if prevHash, ok := config.LastRun[solutionPatch]; ok && prevHash == hashVal && !filesChanged {
+			shouldSkip = true
+		}
+		if shouldSkip {
 			stepLogger.Printf("No changes detected for solution '%s' in container '%s'. Skipping execution.", solutionPatch, containerName)
 			// Preserve previous results if present, else create new
 			prevResult := make(map[string]string)
@@ -146,7 +202,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 			}
 			prevResult["last_run_at"] = time.Now().Format(time.RFC3339)
 			prevResult["skipped"] = "true"
-			prevResult["reason"] = "last_run hash matched"
+			prevResult["reason"] = "last_run hash and file hashes matched"
 			allResults[solutionPatch] = prevResult
 			continue
 		}
@@ -164,6 +220,29 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 				result["error"] = err.Error()
 				result["output"] = output
 				break
+			}
+		}
+
+		// 1b. Execute pre_patch.patch as a shell script in the container if present and non-empty
+		if currentRunError == nil {
+			prePatchFile := "pre_patch.patch"
+			prePatchPath := filepath.Join(stepExec.LocalPath, prePatchFile)
+			info, err := os.Stat(prePatchPath)
+			if err == nil && !info.IsDir() && info.Size() > 0 {
+				destPrePatch := "/tmp/pre_patch.patch"
+				cmdCpPrePatch := exec.Command("docker", "cp", prePatchPath, fmt.Sprintf("%s:%s", containerName, destPrePatch))
+				if output, err := runCmd(cmdCpPrePatch, "copy pre_patch.patch", false); err != nil {
+					currentRunError = err
+					result["error"] = err.Error()
+					result["output"] = output
+				} else {
+					cmdExecPrePatch := exec.Command("docker", "exec", containerName, "bash", "-c", "bash /tmp/pre_patch.patch")
+					if output, err := runCmd(cmdExecPrePatch, "execute pre_patch.patch", true); err != nil {
+						currentRunError = err
+						result["error"] = err.Error()
+						result["output"] = output
+					}
+				}
 			}
 		}
 
@@ -209,8 +288,9 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		// 4. Run the rubric command
 		if currentRunError == nil {
 			var commandOutputBuilder strings.Builder
-			commandLine := fmt.Sprintf("docker exec %s %s", containerName, config.Command)
-			cmdRun := exec.Command("sh", "-c", commandLine)
+			// Robustly execute multi-step commands inside the container using bash -c '<command>'
+			commandLine := fmt.Sprintf("docker exec %s bash -c '%s'", containerName, escapeSingleQuotes(config.Command))
+			cmdRun := exec.Command("bash", "-c", commandLine)
 			output, err := runCmd(cmdRun, "run rubric command", true)
 			commandOutputBuilder.WriteString(output)
 
@@ -225,7 +305,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		config.LastRun[solutionPatch] = hashVal
 
 		// Add last_run_at and set skipped to false (or remove if present)
-		result["last_run_at"] = "2025-07-06T16:18:26-07:00"
+		result["last_run_at"] = time.Now().Format(time.RFC3339)
 		if _, ok := result["skipped"]; ok {
 			delete(result, "skipped")
 		}
@@ -274,4 +354,9 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 
 	stepLogger.Printf("Rubric shell step finished for criterion ID %s. Overall status: %v", config.CriterionID, finalErr)
 	return finalErr
+}
+
+// escapeSingleQuotes escapes single quotes for safe use inside bash -c '<cmd>'
+func escapeSingleQuotes(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
 }

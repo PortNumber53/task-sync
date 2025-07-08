@@ -35,29 +35,27 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 
 	// 1. Check hashes of associated files
 	if config.DynamicRubric.Files != nil {
-		if config.DynamicRubric.Hashes == nil {
-			config.DynamicRubric.Hashes = make(map[string]string)
-		}
+		
 		for file := range config.DynamicRubric.Files {
-			filePath := filepath.Join(stepExec.LocalPath, file)
-			newHash, err := models.GetSHA256(filePath)
-			if err != nil {
-				if errors.Is(err, models.ErrEmptyFile) {
-					stepLogger.Printf("Warning: Treating empty file as changed: %s in step %d", filePath, stepExec.StepID)
-					newHash = ""
-				} else {
-					stepLogger.Printf("Error hashing file %s for step %d: %v", file, stepExec.StepID, err)
-					continue // Skip this file on other errors
-				}
-			}
-
-			storedHash, ok := config.DynamicRubric.Hashes[file]
-			if !ok || storedHash != newHash {
-				stepLogger.Printf("File %s changed for step %d. Old hash: '%s', New hash: '%s'", file, stepExec.StepID, storedHash, newHash)
-				overallChanged = true
-				config.DynamicRubric.Hashes[file] = newHash
+		filePath := filepath.Join(stepExec.LocalPath, file)
+		newHash, err := models.GetSHA256(filePath)
+		if err != nil {
+			if errors.Is(err, models.ErrEmptyFile) {
+				stepLogger.Printf("Warning: Treating empty file as changed: %s in step %d", filePath, stepExec.StepID)
+				newHash = ""
+			} else {
+				stepLogger.Printf("Error hashing file %s for step %d: %v", file, stepExec.StepID, err)
+				continue // Skip this file on other errors
 			}
 		}
+
+		storedHash, ok := config.DynamicRubric.Files[file]
+		if !ok || storedHash != newHash {
+			stepLogger.Printf("File %s changed for step %d. Old hash: '%s', New hash: '%s'", file, stepExec.StepID, storedHash, newHash)
+			overallChanged = true
+		}
+		config.DynamicRubric.Files[file] = newHash
+	}
 	}
 
 	// 2. Check the main rubric file

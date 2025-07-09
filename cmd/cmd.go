@@ -552,8 +552,16 @@ func HandleStepRunID(db *sql.DB) {
 		os.Exit(1)
 	}
 
+	// Parse --force flag
+	force := false
+	for i := 4; i < len(os.Args); i++ {
+		if os.Args[i] == "--force" {
+			force = true
+		}
+	}
+
 	fmt.Printf("Running step ID %d...\n", stepID)
-	if err := internal.ProcessSpecificStep(db, stepID); err != nil {
+	if err := internal.ProcessSpecificStep(db, stepID, force); err != nil {
 		fmt.Printf("Error processing step: %v\n", err)
 		os.Exit(1)
 	}

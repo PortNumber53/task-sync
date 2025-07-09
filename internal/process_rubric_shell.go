@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PortNumber53/task-sync/pkg/models"
@@ -41,7 +43,7 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 		stepLogger := log.New(os.Stdout, fmt.Sprintf("STEP %d [rubric_shell]: ", stepExec.StepID), log.Ldate|log.Ltime|log.Lshortfile)
 
 		// Call the original processor for the individual step.
-		if err := ProcessRubricShellStep(db, &stepExec, stepLogger); err != nil {
+		if err := ProcessRubricShellStep(db, &stepExec, stepLogger, false); err != nil {
 			logger.Printf("failed to process rubric_shell step %d: %v", stepExec.StepID, err)
 			// Continue processing other steps even if one fails.
 		}
@@ -53,7 +55,7 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 // ProcessRubricShellStep handles the execution of a rubric_shell step.
 // It fetches the latest container assignments from the task settings, then for each assigned container,
 // it applies the relevant patches and runs the test command, capturing the results.
-func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
+func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger, force bool) error {
 	cfg, _ := LoadConfig()
 	passMarker := cfg.PassMarker
 	failMarker := cfg.FailMarker
@@ -174,146 +176,214 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 	}
 	// --- End file hash change detection ---
 
+	// If not force, and filesChanged is false, skip execution
+	if !force && !filesChanged {
+		stepLogger.Printf("No changes detected for solution(s). Skipping execution.")
+		return nil
+	}
+
+	var (
+		wg sync.WaitGroup
+		resultsMu sync.Mutex
+	)
 	for solutionPatch, containerName := range taskSettings.AssignContainers {
-		stepLogger.Printf("--- Processing solution '%s' in container '%s' ---", solutionPatch, containerName)
-		result := make(map[string]string)
-		var currentRunError error
+		wg.Add(1)
+		go func(solutionPatch, containerName string) {
+			defer wg.Done()
+			stepLogger.Printf("--- Processing solution '%s' in container '%s' ---", solutionPatch, containerName)
+			result := make(map[string]string)
+			var currentRunError error
 
-		// Compute hash of rubric_shell fields + container image_tag/image_hash
-		imageTag := config.ImageTag
-		imageHash := config.ImageID // If you have ImageHash, use that; else use ImageID as fallback
-		hashInput := fmt.Sprintf("command:%s|counter:%s|criterion_id:%s|required:%v|score:%d|image_tag:%s|image_hash:%s",
-			config.Command, config.Counter, config.CriterionID, config.Required, config.Score, imageTag, imageHash)
-		hashVal := fmt.Sprintf("%x", sha256.Sum256([]byte(hashInput)))
+			// Compute hash of rubric_shell fields + container image_tag/image_hash
+			imageTag := config.ImageTag
+			imageHash := config.ImageID // If you have ImageHash, use that; else use ImageID as fallback
+			hashInput := fmt.Sprintf("command:%s|counter:%s|criterion_id:%s|required:%v|score:%d|image_tag:%s|image_hash:%s",
+				config.Command, config.Counter, config.CriterionID, config.Required, config.Score, imageTag, imageHash)
+			hashVal := fmt.Sprintf("%x", sha256.Sum256([]byte(hashInput)))
 
-		// Check last_run for this solution/container and file hashes
-		shouldSkip := false
-		if prevHash, ok := config.LastRun[solutionPatch]; ok && prevHash == hashVal && !filesChanged {
-			shouldSkip = true
-		}
-		if shouldSkip {
-			stepLogger.Printf("No changes detected for solution '%s' in container '%s'. Skipping execution.", solutionPatch, containerName)
-			// Preserve previous results if present, else create new
-			prevResult := make(map[string]string)
-			if ar, ok := allResults[solutionPatch]; ok && ar != nil {
-				for k, v := range ar {
-					prevResult[k] = v
+			// Check last_run for this solution/container and file hashes
+			shouldSkip := false
+			if !force {
+				resultsMu.Lock()
+				if prevHash, ok := config.LastRun[solutionPatch]; ok && prevHash == hashVal && !filesChanged {
+					shouldSkip = true
+				}
+				resultsMu.Unlock()
+			}
+			if shouldSkip {
+				stepLogger.Printf("No changes detected for solution '%s' in container '%s'. Skipping execution.", solutionPatch, containerName)
+				// Preserve previous results if present, else create new
+				prevResult := make(map[string]string)
+				resultsMu.Lock()
+				if ar, ok := allResults[solutionPatch]; ok && ar != nil {
+					for k, v := range ar {
+						prevResult[k] = v
+					}
+				}
+				resultsMu.Unlock()
+				prevResult["last_run_at"] = time.Now().Format(time.RFC3339)
+				prevResult["skipped"] = "true"
+				prevResult["reason"] = "last_run hash and file hashes matched"
+				resultsMu.Lock()
+				allResults[solutionPatch] = prevResult
+				resultsMu.Unlock()
+				return
+			}
+
+			// 1. Fully clean the repo status inside the container
+			cleanupCmds := [][]string{
+				{"docker", "exec", containerName, "git", "checkout", "--", "."},
+				{"docker", "exec", containerName, "git", "clean", "-fd"},
+				{"docker", "exec", containerName, "git", "reset", "--hard"},
+			}
+			for _, args := range cleanupCmds {
+				cmd := exec.Command(args[0], args[1:]...)
+				if output, err := runCmd(cmd, "cleanup repo", false); err != nil {
+					currentRunError = err
+					result["error"] = err.Error()
+					result["output"] = output
+					break
 				}
 			}
-			prevResult["last_run_at"] = time.Now().Format(time.RFC3339)
-			prevResult["skipped"] = "true"
-			prevResult["reason"] = "last_run hash and file hashes matched"
-			allResults[solutionPatch] = prevResult
-			continue
-		}
 
-		// 1. Fully clean the repo status inside the container
-		cleanupCmds := [][]string{
-			{"docker", "exec", containerName, "git", "checkout", "--", "."},
-			{"docker", "exec", containerName, "git", "clean", "-fd"},
-			{"docker", "exec", containerName, "git", "reset", "--hard"},
-		}
-		for _, args := range cleanupCmds {
-			cmd := exec.Command(args[0], args[1:]...)
-			if output, err := runCmd(cmd, "cleanup repo", false); err != nil {
-				currentRunError = err
-				result["error"] = err.Error()
-				result["output"] = output
-				break
+			// 1b. Execute pre_patch.patch as a shell script in the container if present and non-empty
+			if currentRunError == nil {
+				prePatchFile := "pre_patch.patch"
+				prePatchPath := filepath.Join(stepExec.LocalPath, prePatchFile)
+				info, err := os.Stat(prePatchPath)
+				if err == nil && !info.IsDir() && info.Size() > 0 {
+					destPrePatch := "/tmp/pre_patch.patch"
+					cmdCpPrePatch := exec.Command("docker", "cp", prePatchPath, fmt.Sprintf("%s:%s", containerName, destPrePatch))
+					if output, err := runCmd(cmdCpPrePatch, "copy pre_patch.patch", false); err != nil {
+						currentRunError = err
+						result["error"] = err.Error()
+						result["output"] = output
+					} else {
+						cmdExecPrePatch := exec.Command("docker", "exec", containerName, "bash", "-c", "bash /tmp/pre_patch.patch")
+						if output, err := runCmd(cmdExecPrePatch, "execute pre_patch.patch", true); err != nil {
+							currentRunError = err
+							result["error"] = err.Error()
+							result["output"] = output
+						}
+					}
+				}
 			}
-		}
 
-		// 1b. Execute pre_patch.patch as a shell script in the container if present and non-empty
-		if currentRunError == nil {
-			prePatchFile := "pre_patch.patch"
-			prePatchPath := filepath.Join(stepExec.LocalPath, prePatchFile)
-			info, err := os.Stat(prePatchPath)
-			if err == nil && !info.IsDir() && info.Size() > 0 {
-				destPrePatch := "/tmp/pre_patch.patch"
-				cmdCpPrePatch := exec.Command("docker", "cp", prePatchPath, fmt.Sprintf("%s:%s", containerName, destPrePatch))
-				if output, err := runCmd(cmdCpPrePatch, "copy pre_patch.patch", false); err != nil {
+			// 2. Apply solution patch if specified
+			if currentRunError == nil && solutionPatch != "" {
+				solutionPatchPath := filepath.Join(stepExec.LocalPath, solutionPatch)
+				destSolutionPath := filepath.Join("/app", solutionPatch)
+				cmdCpSolution := exec.Command("docker", "cp", solutionPatchPath, fmt.Sprintf("%s:%s", containerName, destSolutionPath))
+				if output, err := runCmd(cmdCpSolution, "copy solution patch", false); err != nil {
 					currentRunError = err
 					result["error"] = err.Error()
 					result["output"] = output
 				} else {
-					cmdExecPrePatch := exec.Command("docker", "exec", containerName, "bash", "-c", "bash /tmp/pre_patch.patch")
-					if output, err := runCmd(cmdExecPrePatch, "execute pre_patch.patch", true); err != nil {
+					cmdApplySolution := exec.Command("docker", "exec", containerName, "git", "apply", destSolutionPath)
+					if output, err := runCmd(cmdApplySolution, "apply solution patch", false); err != nil {
 						currentRunError = err
 						result["error"] = err.Error()
 						result["output"] = output
 					}
 				}
 			}
-		}
 
-		// 2. Apply solution patch if specified
-		if currentRunError == nil && solutionPatch != "" {
-			solutionPatchPath := filepath.Join(stepExec.LocalPath, solutionPatch)
-			destSolutionPath := filepath.Join("/app", solutionPatch)
-			cmdCpSolution := exec.Command("docker", "cp", solutionPatchPath, fmt.Sprintf("%s:%s", containerName, destSolutionPath))
-			if output, err := runCmd(cmdCpSolution, "copy solution patch", false); err != nil {
-				currentRunError = err
-				result["error"] = err.Error()
-				result["output"] = output
-			} else {
-				cmdApplySolution := exec.Command("docker", "exec", containerName, "git", "apply", destSolutionPath)
-				if output, err := runCmd(cmdApplySolution, "apply solution patch", false); err != nil {
+			// 3. Apply held-out test patch
+			if currentRunError == nil {
+				heldOutTestPatch := "held_out_tests.patch" // TODO: This should be configurable
+				heldOutTestPatchPath := filepath.Join(stepExec.LocalPath, heldOutTestPatch)
+				destTestPath := filepath.Join("/app", heldOutTestPatch)
+				cmdCpTest := exec.Command("docker", "cp", heldOutTestPatchPath, fmt.Sprintf("%s:%s", containerName, destTestPath))
+				if output, err := runCmd(cmdCpTest, "copy held-out test patch", false); err != nil {
 					currentRunError = err
 					result["error"] = err.Error()
 					result["output"] = output
+				} else {
+					cmdApplyTest := exec.Command("docker", "exec", containerName, "git", "apply", destTestPath)
+					if output, err := runCmd(cmdApplyTest, "apply held-out test patch", false); err != nil {
+						currentRunError = err
+						result["error"] = err.Error()
+						result["output"] = output
+					}
 				}
 			}
-		}
 
-		// 3. Apply held-out test patch
-		if currentRunError == nil {
-			heldOutTestPatch := "held_out_tests.patch" // TODO: This should be configurable
-			heldOutTestPatchPath := filepath.Join(stepExec.LocalPath, heldOutTestPatch)
-			destTestPath := filepath.Join("/app", heldOutTestPatch)
-			cmdCpTest := exec.Command("docker", "cp", heldOutTestPatchPath, fmt.Sprintf("%s:%s", containerName, destTestPath))
-			if output, err := runCmd(cmdCpTest, "copy held-out test patch", false); err != nil {
-				currentRunError = err
-				result["error"] = err.Error()
-				result["output"] = output
-			} else {
-				cmdApplyTest := exec.Command("docker", "exec", containerName, "git", "apply", destTestPath)
-				if output, err := runCmd(cmdApplyTest, "apply held-out test patch", false); err != nil {
+			// 4. Run the rubric command
+			if currentRunError == nil {
+				var commandOutputBuilder strings.Builder
+				commandLine := fmt.Sprintf("docker exec %s bash -c '%s'", containerName, escapeSingleQuotes(config.Command))
+				cmdRun := exec.Command("bash", "-c", commandLine)
+
+				// Timeout logic
+				timeoutSeconds := cfg.TimeoutSeconds
+				if timeoutSeconds <= 0 {
+					timeoutSeconds = 120 // default 2 min
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+				defer cancel()
+				cmdRun = exec.CommandContext(ctx, "bash", "-c", commandLine)
+
+				output, err := cmdRun.CombinedOutput()
+				outputStr := string(output)
+				commandOutputBuilder.WriteString(outputStr)
+				result["output"] = commandOutputBuilder.String()
+
+				// Emoji logic
+				var emoji string
+				// Check for TIMEOUT_MARKER in output
+				const TIMEOUT_MARKER = "#__TIMEOUT__#"
+				if idx := strings.Index(outputStr, TIMEOUT_MARKER); idx != -1 {
+					emoji = "⌚"
+					result["error"] = "Timed out"
+					// Optionally extract the time after the marker
+					timeInfo := strings.TrimSpace(outputStr[idx+len(TIMEOUT_MARKER):])
+					if timeInfo != "" {
+						// If the time is present, store it
+						result["timeout_time"] = timeInfo
+					}
+					currentRunError = fmt.Errorf("timeout detected via marker")
+				} else if ctx.Err() == context.DeadlineExceeded {
+					emoji = "⌚"
+					result["error"] = "Timed out"
+					currentRunError = ctx.Err()
+				} else if strings.Contains(outputStr, passMarker) {
+					emoji = "✅"
+				} else if strings.Contains(outputStr, failMarker) {
+					emoji = "❌"
+				} else if strings.Contains(strings.ToLower(outputStr), "no such file") || strings.Contains(strings.ToLower(outputStr), "not found") {
+					emoji = "💀"
+					result["error"] = "File not found"
+					currentRunError = fmt.Errorf("file not found")
+				} else {
+					emoji = "❓"
+				}
+				result["emoji"] = emoji
+
+				if err != nil && ctx.Err() != context.DeadlineExceeded {
 					currentRunError = err
 					result["error"] = err.Error()
-					result["output"] = output
 				}
 			}
-		}
 
-		// 4. Run the rubric command
-		if currentRunError == nil {
-			var commandOutputBuilder strings.Builder
-			// Robustly execute multi-step commands inside the container using bash -c '<command>'
-			commandLine := fmt.Sprintf("docker exec %s bash -c '%s'", containerName, escapeSingleQuotes(config.Command))
-			cmdRun := exec.Command("bash", "-c", commandLine)
-			output, err := runCmd(cmdRun, "run rubric command", true)
-			commandOutputBuilder.WriteString(output)
+			// Update last_run for this solution/container
+			resultsMu.Lock()
+			config.LastRun[solutionPatch] = hashVal
+			resultsMu.Unlock()
 
-			result["output"] = commandOutputBuilder.String()
-			if err != nil {
-				currentRunError = err
-				result["error"] = err.Error()
+			// Add last_run_at and set skipped to false (or remove if present)
+			result["last_run_at"] = time.Now().Format(time.RFC3339)
+			if _, ok := result["skipped"]; ok {
+				delete(result, "skipped")
 			}
-		}
-
-		// Update last_run for this solution/container
-		config.LastRun[solutionPatch] = hashVal
-
-		// Add last_run_at and set skipped to false (or remove if present)
-		result["last_run_at"] = time.Now().Format(time.RFC3339)
-		if _, ok := result["skipped"]; ok {
-			delete(result, "skipped")
-		}
-		allResults[solutionPatch] = result
-		if currentRunError != nil && finalErr == nil {
-			finalErr = currentRunError // Capture the first error
-		}
+			resultsMu.Lock()
+			allResults[solutionPatch] = result
+			if currentRunError != nil && finalErr == nil {
+				finalErr = currentRunError // Capture the first error
+			}
+			resultsMu.Unlock()
+		}(solutionPatch, containerName)
 	}
+	wg.Wait();
 
 	// 5. Marshal and save all results
 	resultsBytes, jsonErr := json.MarshalIndent(allResults, "", "  ")

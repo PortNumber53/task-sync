@@ -13,56 +13,72 @@ import (
 )
 
 // stepProcessors maps step types to their respective processor functions with consistent signature using wrappers.
-var stepProcessors = map[string]func(*sql.DB, *models.StepExec, *log.Logger) error{
-	"docker_pull":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerPullSteps(db, se.StepID); return nil },
-		"docker_build":   func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerBuildSteps(db, logger, se.StepID); return nil },
-	"docker_run":   func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { return processDockerRunSteps(db, se.StepID) },
-	"docker_pool":  func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { return processDockerPoolSteps(db, se.StepID) },
-	"docker_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { processDockerShellSteps(db, se.StepID); return nil },
-		"file_exists": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
-		if se != nil && se.StepID != 0 {
-			return ProcessFileExistsStep(db, se, logger)
-		}
-		return processAllFileExistsSteps(db, logger)
-	},
-	"rubrics_import": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { return processRubricsImportSteps(db, se.StepID) },
-	"rubric_set": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
-		// If a specific step is provided (from ProcessSpecificStep), run only that.
-		if se != nil && se.StepID != 0 {
-			return ProcessRubricSetStep(db, se, logger)
-		}
-		// Otherwise (from executePendingSteps), run all rubric_set steps.
-		return processAllRubricSetSteps(db, logger)
-	},
-	"rubric_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
-		// If a specific step is provided (from ProcessSpecificStep), run only that.
-		if se != nil && se.StepID != 0 {
-			return ProcessRubricShellStep(db, se, logger)
-		}
-		// Otherwise (from executePendingSteps), run all rubric_shell steps.
-		return processAllRubricShellSteps(db, logger)
-	},
-	"dynamic_rubric": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
-		if se != nil && se.StepID != 0 {
-			return ProcessDynamicRubricStep(db, se, logger)
-		}
-		// For now, do not process all dynamic_rubric steps at once. Only log if such steps exist.
-		rows, err := db.Query(`SELECT id FROM steps WHERE settings ? 'dynamic_rubric'`)
-		if err != nil {
-			logger.Printf("Could not check for dynamic_rubric steps: %v", err)
+// getStepProcessors returns the step processor map, parameterized by force flag for rubric_shell steps.
+func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *log.Logger) error {
+	return map[string]func(*sql.DB, *models.StepExec, *log.Logger) error{
+		"docker_pull": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			processDockerPullSteps(db, se.StepID)
 			return nil
-		}
-		defer rows.Close()
-		if rows.Next() {
-			logger.Printf("Skipping bulk processing of dynamic_rubric steps (not supported). Use specific StepID.")
-		}
-		return nil
-	},
+		},
+		"docker_build": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			processDockerBuildSteps(db, logger, se.StepID)
+			return nil
+		},
+		"docker_run": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			return processDockerRunSteps(db, se.StepID)
+		},
+		"docker_pool": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			return processDockerPoolSteps(db, se.StepID)
+		},
+		"docker_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			processDockerShellSteps(db, se.StepID)
+			return nil
+		},
+		"file_exists": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			if se != nil && se.StepID != 0 {
+				return ProcessFileExistsStep(db, se, logger)
+			}
+			return processAllFileExistsSteps(db, logger)
+		},
+		"rubrics_import": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { return processRubricsImportSteps(db, se.StepID) },
+		"rubric_set": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			// If a specific step is provided (from ProcessSpecificStep), run only that.
+			if se != nil && se.StepID != 0 {
+				return ProcessRubricSetStep(db, se, logger)
+			}
+			// Otherwise (from executePendingSteps), run all rubric_set steps.
+			return processAllRubricSetSteps(db, logger)
+		},
+		"rubric_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			// If a specific step is provided (from ProcessSpecificStep), run only that.
+			if se != nil && se.StepID != 0 {
+				return ProcessRubricShellStep(db, se, logger, force)
+			}
+			// Otherwise (from executePendingSteps), run all rubric_shell steps.
+			return processAllRubricShellSteps(db, logger)
+		},
+		"dynamic_rubric": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			if se != nil && se.StepID != 0 {
+				return ProcessDynamicRubricStep(db, se, logger)
+			}
+			// For now, do not process all dynamic_rubric steps at once. Only log if such steps exist.
+			rows, err := db.Query(`SELECT id FROM steps WHERE settings ? 'dynamic_rubric'`)
+			if err != nil {
+				logger.Printf("Could not check for dynamic_rubric steps: %v", err)
+				return nil
+			}
+			defer rows.Close()
+			if rows.Next() {
+				logger.Printf("Skipping bulk processing of dynamic_rubric steps (not supported). Use specific StepID.")
+			}
+			return nil
+		},
+	}
 }
 
 // ProcessSteps is the main entry point for processing all pending steps.
 func ProcessSteps(db *sql.DB) error {
-	return executePendingSteps(db, stepProcessors)
+	return executePendingSteps(db, getStepProcessors(false))
 }
 
 // ProcessStepsForTask processes all steps for a specific task by ID, respecting dependencies.
@@ -89,7 +105,7 @@ func ProcessStepsForTask(db *sql.DB, taskID int) error {
 
 	for _, stepID := range stepIDs {
 		fmt.Printf("Processing step ID %d...\n", stepID)
-		if err := ProcessSpecificStep(db, stepID); err != nil {
+		if err := ProcessSpecificStep(db, stepID, false); err != nil {
 			fmt.Printf("Error processing step %d: %v\n", stepID, err)
 			// Continue processing other steps even if one fails
 		}
@@ -378,7 +394,7 @@ func printChildren(nodes []*StepNode, prefix string) {
 }
 
 // ProcessSpecificStep processes a single step by its ID.
-func ProcessSpecificStep(db *sql.DB, stepID int) error {
+func ProcessSpecificStep(db *sql.DB, stepID int, force bool) error {
 	// Fetch the full step details including task_id
 	var stepExec models.StepExec
 	err := db.QueryRow("SELECT id, task_id, title, settings FROM steps WHERE id = $1", stepID).Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings)
@@ -402,8 +418,9 @@ func ProcessSpecificStep(db *sql.DB, stepID int) error {
 	}
 
 	var stepType string
+	processors := getStepProcessors(force)
 	for key := range settings {
-		if _, exists := stepProcessors[key]; exists {
+		if _, exists := processors[key]; exists {
 			stepType = key
 			break
 		}
@@ -415,7 +432,14 @@ func ProcessSpecificStep(db *sql.DB, stepID int) error {
 
 	stepLogger := log.New(os.Stdout, fmt.Sprintf("STEP %d [%s]: ", stepID, stepType), log.Ldate|log.Ltime|log.Lshortfile)
 
-	if processor, exists := stepProcessors[stepType]; exists {
+	// If --force, clear step results before running
+	if force {
+		if err := ClearStepResults(db, stepID); err != nil {
+			stepLogger.Printf("Warning: could not clear step results for step %d: %v", stepID, err)
+		}
+	}
+
+	if processor, exists := processors[stepType]; exists {
 		return processor(db, &stepExec, stepLogger)
 	} else {
 		return fmt.Errorf("no processor found for step type %s of step %d", stepType, stepID)

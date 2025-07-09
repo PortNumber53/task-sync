@@ -179,8 +179,11 @@ func ReportTask(db *sql.DB, taskID int) error {
 					icon := "❔"
 					if results != nil {
 						if res, ok := results[patch]; ok {
-							if out, ok := res["output"].(string); ok {
-								// Detect errorlevel=127 or similar (command not found)
+							// Use emoji field if present
+							if emoji, ok := res["emoji"].(string); ok && emoji != "" {
+								icon = emoji
+							} else if out, ok := res["output"].(string); ok {
+								// Fallback to old logic
 								if strings.Contains(out, "errorlevel=127") || strings.Contains(out, "exit status 127") || strings.Contains(out, "command not found") || strings.Contains(out, "No such file or directory") {
 									icon = "💀"
 								} else if strings.Contains(out, passMarker) {

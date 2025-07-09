@@ -4,14 +4,16 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 // Config holds values parsed from ~/.config/task/task.conf
 type Config struct {
-	LogFile    string
-	PassMarker string
-	FailMarker string
+	LogFile        string
+	PassMarker     string
+	FailMarker     string
+	TimeoutSeconds int // New: hard timeout for rubric commands (seconds)
 }
 
 // LoadConfig loads config from ~/.config/task/task.conf (if present)
@@ -45,7 +47,12 @@ func LoadConfig() (*Config, error) {
 				cfg.PassMarker = val
 			case "FAIL_MARKER":
 				cfg.FailMarker = val
+			case "TIMEOUT_SECONDS":
+				if v, err := strconv.Atoi(val); err == nil {
+					cfg.TimeoutSeconds = v
+				}
 			}
+
 		}
 	}
 	return cfg, scanner.Err()

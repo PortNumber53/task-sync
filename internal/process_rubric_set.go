@@ -229,6 +229,29 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 		}
 	}
 
+	// 6. Force re-run: set LastRun=nil for all upserted rubric_shell steps
+	generatedSteps, err := models.GetGeneratedSteps(db, stepExec.StepID)
+	if err != nil {
+		stepLogger.Printf("Failed to fetch generated rubric_shell steps for force re-run: %v", err)
+	} else {
+		for _, step := range generatedSteps {
+			var holder models.StepConfigHolder
+			if err := json.Unmarshal([]byte(step.Settings), &holder); err == nil && holder.RubricShell != nil {
+				holder.RubricShell.LastRun = nil
+				updatedSettings, err := json.Marshal(map[string]interface{}{ "rubric_shell": holder.RubricShell })
+				if err == nil {
+					if err := models.UpdateStepSettings(db, step.ID, string(updatedSettings)); err == nil {
+						stepLogger.Printf("Forced re-run: reset LastRun for rubric_shell step %d", step.ID)
+					} else {
+						stepLogger.Printf("Failed to update settings for forced re-run of step %d: %v", step.ID, err)
+					}
+				} else {
+					stepLogger.Printf("Failed to marshal settings for forced re-run of step %d: %v", step.ID, err)
+				}
+			}
+		}
+	}
+
 	stepLogger.Println("Successfully reconciled rubric_set step.")
 	return nil
 }

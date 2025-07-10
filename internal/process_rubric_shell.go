@@ -176,6 +176,18 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 	}
 	// --- End file hash change detection ---
 
+	// If LastRun is nil or missing entries for any solution, trigger re-run
+	if config.LastRun == nil {
+		filesChanged = true
+	} else {
+		for solutionPatch := range taskSettings.AssignContainers {
+			if _, ok := config.LastRun[solutionPatch]; !ok {
+				filesChanged = true
+				break
+			}
+		}
+	}
+
 	// If not force, and filesChanged is false, skip execution
 	if !force && !filesChanged {
 		stepLogger.Printf("No changes detected for solution(s). Skipping execution.")

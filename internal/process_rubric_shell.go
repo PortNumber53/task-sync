@@ -98,7 +98,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 		}
 	}
 
-	var finalErr error
+	var numSuccess, numTotal int
 
 	// Helper to run a command and log its execution and output.
 	runCmd := func(cmd *exec.Cmd, description string, logOutput bool) (string, error) {
@@ -310,58 +310,64 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 
 			// 4. Run the rubric command
 			if currentRunError == nil {
-				var commandOutputBuilder strings.Builder
-				commandLine := fmt.Sprintf("docker exec %s bash -c '%s'", containerName, escapeSingleQuotes(config.Command))
-				cmdRun := exec.Command("bash", "-c", commandLine)
-
-				// Timeout logic
-				timeoutSeconds := cfg.TimeoutSeconds
-				if timeoutSeconds <= 0 {
-					timeoutSeconds = 120 // default 2 min
-				}
-				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
-				defer cancel()
-				cmdRun = exec.CommandContext(ctx, "bash", "-c", commandLine)
-
-				output, err := cmdRun.CombinedOutput()
-				outputStr := string(output)
-				commandOutputBuilder.WriteString(outputStr)
-				result["output"] = commandOutputBuilder.String()
-
-				// Emoji logic
-				var emoji string
-				// Check for TIMEOUT_MARKER in output
-				const TIMEOUT_MARKER = "#__TIMEOUT__#"
-				if idx := strings.Index(outputStr, TIMEOUT_MARKER); idx != -1 {
-					emoji = "⌚"
-					result["error"] = "Timed out"
-					// Optionally extract the time after the marker
-					timeInfo := strings.TrimSpace(outputStr[idx+len(TIMEOUT_MARKER):])
-					if timeInfo != "" {
-						// If the time is present, store it
-						result["timeout_time"] = timeInfo
-					}
-					currentRunError = fmt.Errorf("timeout detected via marker")
-				} else if ctx.Err() == context.DeadlineExceeded {
-					emoji = "⌚"
-					result["error"] = "Timed out"
-					currentRunError = ctx.Err()
-				} else if strings.Contains(outputStr, passMarker) {
-					emoji = "✅"
-				} else if strings.Contains(outputStr, failMarker) {
-					emoji = "❌"
-				} else if strings.Contains(strings.ToLower(outputStr), "no such file") || strings.Contains(strings.ToLower(outputStr), "not found") {
-					emoji = "💀"
-					result["error"] = "File not found"
-					currentRunError = fmt.Errorf("file not found")
+				stepLogger.Printf("[DEBUG] Preparing to run rubric command for container '%s': config.Command=\"%s\"", containerName, config.Command)
+				if config.Command == "" {
+					stepLogger.Printf("[ERROR] Rubric command is empty for container '%s'. Skipping execution.", containerName)
 				} else {
-					emoji = "❓"
-				}
-				result["emoji"] = emoji
+					var commandOutputBuilder strings.Builder
+					commandLine := fmt.Sprintf("docker exec %s bash -c '%s'", containerName, escapeSingleQuotes(config.Command))
+					stepLogger.Printf("[DEBUG] Executing rubric command: %s", commandLine)
+					cmdRun := exec.Command("bash", "-c", commandLine)
 
-				if err != nil && ctx.Err() != context.DeadlineExceeded {
-					currentRunError = err
-					result["error"] = err.Error()
+					// Timeout logic
+					timeoutSeconds := cfg.TimeoutSeconds
+					if timeoutSeconds <= 0 {
+						timeoutSeconds = 120 // default 2 min
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+					defer cancel()
+					cmdRun = exec.CommandContext(ctx, "bash", "-c", commandLine)
+
+					output, err := cmdRun.CombinedOutput()
+					outputStr := string(output)
+					commandOutputBuilder.WriteString(outputStr)
+					result["output"] = commandOutputBuilder.String()
+
+					// Emoji logic
+					var emoji string
+					// Check for TIMEOUT_MARKER in output
+					const TIMEOUT_MARKER = "#__TIMEOUT__#"
+					if idx := strings.Index(outputStr, TIMEOUT_MARKER); idx != -1 {
+						emoji = "⌚"
+						result["error"] = "Timed out"
+						// Optionally extract the time after the marker
+						timeInfo := strings.TrimSpace(outputStr[idx+len(TIMEOUT_MARKER):])
+						if timeInfo != "" {
+							// If the time is present, store it
+							result["timeout_time"] = timeInfo
+						}
+						currentRunError = fmt.Errorf("timeout detected via marker")
+					} else if ctx.Err() == context.DeadlineExceeded {
+						emoji = "⌚"
+						result["error"] = "Timed out"
+						currentRunError = ctx.Err()
+					} else if strings.Contains(outputStr, passMarker) {
+						emoji = "✅"
+					} else if strings.Contains(outputStr, failMarker) {
+						emoji = "❌"
+					} else if strings.Contains(strings.ToLower(outputStr), "no such file") || strings.Contains(strings.ToLower(outputStr), "not found") {
+						emoji = "💀"
+						result["error"] = "File not found"
+						currentRunError = fmt.Errorf("file not found")
+					} else {
+						emoji = "❓"
+					}
+					result["emoji"] = emoji
+
+					if err != nil && ctx.Err() != context.DeadlineExceeded {
+						currentRunError = err
+						result["error"] = err.Error()
+					}
 				}
 			}
 
@@ -377,13 +383,47 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 			}
 			resultsMu.Lock()
 			allResults[solutionPatch] = result
-			if currentRunError != nil && finalErr == nil {
-				finalErr = currentRunError // Capture the first error
-			}
 			resultsMu.Unlock()
 		}(solutionPatch, containerName)
 	}
 	wg.Wait();
+
+	// Insert into rubric_shell_output_history (1 row per criterion/run, with 4 solution outputs)
+	solutionOutputs := make([]string, 4)
+	solutionNames := []string{"solution1.patch", "solution2.patch", "solution3.patch", "solution4.patch"}
+	exceptions := make([]string, 0)
+	for i, sol := range solutionNames {
+		if res, ok := allResults[sol]; ok {
+			if out, ok := res["output"]; ok {
+				solutionOutputs[i] = out
+			}
+			if errStr, ok := res["error"]; ok && errStr != "" {
+				exceptions = append(exceptions, fmt.Sprintf("%s: %s", sol, errStr))
+			}
+		} else {
+			solutionOutputs[i] = ""
+		}
+	}
+	moduleExplanation := ""
+	// If you want to extract module_explanation from results, add logic here
+	exceptionStr := strings.Join(exceptions, "; ")
+	errHist := models.InsertRubricShellOutputHistory(
+		db,
+		config.CriterionID, // rubric_shell_uuid
+		config.CriterionID, // criterion (can use same as uuid or extract from config)
+		config.Required,
+		float64(config.Score),
+		config.Command,
+		solutionOutputs[0],
+		solutionOutputs[1],
+		solutionOutputs[2],
+		solutionOutputs[3],
+		moduleExplanation,
+		exceptionStr,
+	)
+	if errHist != nil {
+		stepLogger.Printf("Failed to insert rubric_shell_output_history: %v", errHist)
+	}
 
 	// 5. Marshal and save all results
 	resultsBytes, jsonErr := json.MarshalIndent(allResults, "", "  ")
@@ -422,8 +462,19 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 	}
 	// --- end WebSocket update logic ---
 
-	stepLogger.Printf("Rubric shell step finished for criterion ID %s. Overall status: %v", config.CriterionID, finalErr)
-	return finalErr
+	numTotal = len(allResults)
+	numSuccess = 0
+	for _, result := range allResults {
+		if emoji, ok := result["emoji"]; ok && emoji == "✅" {
+			numSuccess++
+		}
+	}
+	percent := 0
+	if numTotal > 0 {
+		percent = numSuccess * 100 / numTotal
+	}
+	stepLogger.Printf("Rubric shell step finished for criterion ID %s. SUCCESS: %d/%d (%d%%)", config.CriterionID, numSuccess, numTotal, percent)
+	return nil
 }
 
 // escapeSingleQuotes escapes single quotes for safe use inside bash -c '<cmd>'

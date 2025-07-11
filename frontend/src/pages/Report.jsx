@@ -56,34 +56,34 @@ const Report = () => {
   if (error) return <div style={{ color: "red" }}>Error: {error}</div>;
 
   return (
-    <div style={{ padding: 24 }}>
-      <h1>Task Report</h1>
+    <div className="w-full">
+      <h1 className="text-center text-2xl font-medium py-4">Task Report</h1>
       {wsUpdate && (
-        <div style={{ background: '#e0ffe0', padding: 10, marginBottom: 16, border: '1px solid #bada55' }}>
-          <strong>Live update received:</strong>
-          <pre style={{ margin: 0, fontSize: 12 }}>{JSON.stringify(wsUpdate, null, 2)}</pre>
+        <div className="bg-green-50 p-2 mb-4 border border-green-200">
+          <strong className="text-sm font-medium">Live update received:</strong>
+          <pre className="m-0 text-xs">{JSON.stringify(wsUpdate, null, 2)}</pre>
         </div>
       )}
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      <table className="w-full border-collapse">
         <thead>
-          <tr>
-            <th style={{ border: "1px solid #ccc", padding: 8 }}>ID</th>
-            <th style={{ border: "1px solid #ccc", padding: 8 }}>Name</th>
-            <th style={{ border: "1px solid #ccc", padding: 8 }}>Status</th>
-            <th style={{ border: "1px solid #ccc", padding: 8 }}>Local Path</th>
-            <th style={{ border: "1px solid #ccc", padding: 8 }}>Created At</th>
-            <th style={{ border: "1px solid #ccc", padding: 8 }}>Updated At</th>
+          <tr className="bg-gray-50">
+            <th className="border border-gray-200 p-2 text-left text-sm font-medium">ID</th>
+            <th className="border border-gray-200 p-2 text-left text-sm font-medium">Name</th>
+            <th className="border border-gray-200 p-2 text-left text-sm font-medium">Status</th>
+            <th className="border border-gray-200 p-2 text-left text-sm font-medium">Local Path</th>
+            <th className="border border-gray-200 p-2 text-left text-sm font-medium">Created At</th>
+            <th className="border border-gray-200 p-2 text-left text-sm font-medium">Updated At</th>
           </tr>
         </thead>
         <tbody>
           {tasks.map((task) => (
-            <tr key={task.id}>
-              <td style={{ border: "1px solid #ccc", padding: 8 }}>{task.id}</td>
-              <td style={{ border: "1px solid #ccc", padding: 8 }}>{task.name}</td>
-              <td style={{ border: "1px solid #ccc", padding: 8 }}>{task.status}</td>
-              <td style={{ border: "1px solid #ccc", padding: 8 }}>{task.local_path || ""}</td>
-              <td style={{ border: "1px solid #ccc", padding: 8 }}>{task.created_at}</td>
-              <td style={{ border: "1px solid #ccc", padding: 8 }}>{task.updated_at}</td>
+            <tr key={task.id} className="hover:bg-gray-50">
+              <td className="border border-gray-200 p-2 text-sm">{task.id}</td>
+              <td className="border border-gray-200 p-2 text-sm">{task.name}</td>
+              <td className="border border-gray-200 p-2 text-sm">{task.status}</td>
+              <td className="border border-gray-200 p-2 text-sm">{task.local_path || ""}</td>
+              <td className="border border-gray-200 p-2 text-sm">{task.created_at}</td>
+              <td className="border border-gray-200 p-2 text-sm">{task.updated_at}</td>
             </tr>
           ))}
         </tbody>

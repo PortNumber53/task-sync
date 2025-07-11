@@ -8,12 +8,12 @@ function App() {
   return (
     <Router>
       <NavBar />
-      <main className="pt-[44px] min-h-screen bg-gray-50 dark:bg-gray-950">
+      <main className="pt-[44px] min-h-screen bg-background text-primary">
         <Routes>
           <Route path="/report" element={<Report />} />
           <Route path="*" element={
-            <div className="px-0">
-              <h2 className="text-2xl font-bold mb-2 text-center py-4">Welcome to TaskSync</h2>
+            <div className="px-0 bg-surface text-primary rounded shadow-md max-w-xl mx-auto mt-10 p-6">
+              <h2 className="text-2xl font-bold mb-2 text-center py-4 text-primary">Welcome to TaskSync</h2>
               <p className="text-center">Select "Report" to view all tasks.</p>
             </div>
           } />

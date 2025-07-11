@@ -402,11 +402,15 @@ func ProcessSpecificStep(db *sql.DB, stepID int, force bool) error {
 		return fmt.Errorf("failed to fetch step %d: %w", stepID, err)
 	}
 
-	// Fetch the LocalPath from the tasks table using taskID
-	var localPath string
-	err = db.QueryRow("SELECT local_path FROM tasks WHERE id = $1", stepExec.TaskID).Scan(&localPath)
+	// Fetch the LocalPath and Status from the tasks table using taskID
+	var localPath, status string
+	err = db.QueryRow("SELECT local_path, status FROM tasks WHERE id = $1", stepExec.TaskID).Scan(&localPath, &status)
 	if err != nil {
-		return fmt.Errorf("failed to fetch task local path for task ID %d: %w", stepExec.TaskID, err)
+		return fmt.Errorf("failed to fetch task local path/status for task ID %d: %w", stepExec.TaskID, err)
+	}
+	if status != "active" {
+		log.Printf("STEP %d: Skipping execution because parent task %d status is not active (status=%q)", stepID, stepExec.TaskID, status)
+		return nil
 	}
 	stepExec.LocalPath = localPath
 

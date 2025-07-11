@@ -6,6 +6,9 @@ NEW_TASK_DATA.md
 TASK_DATA.md
 rubrics.mhtml
 pre_patch.patch
+PROMPT.md
+report*.json
+rubrics.json
 
 tmp/
 

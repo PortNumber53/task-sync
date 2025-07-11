@@ -25,6 +25,7 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE s.settings ? 'rubric_shell'
+		  AND t.status = 'active'
 	`
 	rows, err := db.Query(query)
 	if err != nil {
@@ -56,6 +57,16 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 // It fetches the latest container assignments from the task settings, then for each assigned container,
 // it applies the relevant patches and runs the test command, capturing the results.
 func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger, force bool) error {
+	// Defensive: Check parent task status before running
+	var status string
+	err := db.QueryRow("SELECT status FROM tasks WHERE id = $1", stepExec.TaskID).Scan(&status)
+	if err != nil {
+		return fmt.Errorf("failed to fetch parent task status for step %d: %w", stepExec.StepID, err)
+	}
+	if status != "active" {
+		stepLogger.Printf("Skipping execution because parent task %d status is not active (status=\"%s\")", stepExec.TaskID, status)
+		return nil
+	}
 	cfg, _ := LoadConfig()
 	passMarker := cfg.PassMarker
 	failMarker := cfg.FailMarker
@@ -224,20 +235,11 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 			}
 			if shouldSkip {
 				stepLogger.Printf("No changes detected for solution '%s' in container '%s'. Skipping execution.", solutionPatch, containerName)
-				// Preserve previous results if present, else create new
-				prevResult := make(map[string]string)
+				// Preserve previous results if present; do NOT update last_run_at, skipped, or reason
 				resultsMu.Lock()
 				if ar, ok := allResults[solutionPatch]; ok && ar != nil {
-					for k, v := range ar {
-						prevResult[k] = v
-					}
+					allResults[solutionPatch] = ar
 				}
-				resultsMu.Unlock()
-				prevResult["last_run_at"] = time.Now().Format(time.RFC3339)
-				prevResult["skipped"] = "true"
-				prevResult["reason"] = "last_run hash and file hashes matched"
-				resultsMu.Lock()
-				allResults[solutionPatch] = prevResult
 				resultsMu.Unlock()
 				return
 			}

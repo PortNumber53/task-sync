@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
+import { API_BASE_URL, WS_BASE_URL } from "../config";
 
 const Report = () => {
   const [tasks, setTasks] = useState([]);
@@ -8,24 +9,39 @@ const Report = () => {
   const wsRef = useRef(null);
 
   useEffect(() => {
-    fetch("http://localhost:8064/tasks")
-      .then((res) => {
-        if (!res.ok) throw new Error("Failed to fetch tasks");
+    console.log('Fetching tasks from:', `${API_BASE_URL}/tasks`);
+    fetch(`${API_BASE_URL}/tasks`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+      mode: 'cors'
+      // Temporarily removed credentials to simplify CORS
+      // credentials: 'include' // Will be re-added once CORS is properly configured
+    })
+      .then(async (res) => {
+        console.log('Response status:', res.status);
+        if (!res.ok) {
+          const errorText = await res.text();
+          throw new Error(`HTTP error! Status: ${res.status}, Body: ${errorText}`);
+        }
         return res.json();
       })
       .then((data) => {
+        console.log('Tasks data received:', data);
         setTasks(data.tasks || []);
         setLoading(false);
       })
       .catch((err) => {
-        setError(err.message);
+        console.error('Fetch error:', err);
+        setError(`Failed to load tasks: ${err.message}`);
         setLoading(false);
       });
   }, []);
 
   // WebSocket for real-time updates
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:8064/ws/updates");
+    const ws = new WebSocket(`${WS_BASE_URL}/updates`);
     wsRef.current = ws;
     ws.onopen = () => {
       // Optionally: ws.send("hello");
@@ -78,12 +94,12 @@ const Report = () => {
         <tbody>
           {tasks.map((task) => (
             <tr key={task.id} className="hover:bg-gray-50">
-              <td className="border border-gray-200 p-2 text-sm">{task.id}</td>
-              <td className="border border-gray-200 p-2 text-sm">{task.name}</td>
-              <td className="border border-gray-200 p-2 text-sm">{task.status}</td>
-              <td className="border border-gray-200 p-2 text-sm">{task.local_path || ""}</td>
-              <td className="border border-gray-200 p-2 text-sm">{task.created_at}</td>
-              <td className="border border-gray-200 p-2 text-sm">{task.updated_at}</td>
+              <td className="border border-border p-2 text-sm bg-surface text-primary">{task.id}</td>
+              <td className="border border-border p-2 text-sm bg-surface text-primary">{task.name}</td>
+              <td className="border border-border p-2 text-sm bg-surface text-primary">{task.status}</td>
+              <td className="border border-border p-2 text-sm bg-surface text-primary">{task.local_path || ""}</td>
+              <td className="border border-border p-2 text-sm bg-surface text-primary">{task.created_at}</td>
+              <td className="border border-border p-2 text-sm bg-surface text-primary">{task.updated_at}</td>
             </tr>
           ))}
         </tbody>

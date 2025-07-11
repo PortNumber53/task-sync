@@ -111,13 +111,16 @@ func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) 
 	// Register WebSocket API endpoint
 	RegisterWebsocketRoutes(r, db)
 
-	// Add CORS middleware for Vite dev server
+	// Add CORS middleware with proper configuration
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:5173"},
+		AllowOrigins:     []string{"http://192.168.70.70:5173", "http://localhost:5173"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
+		AllowOriginFunc: func(origin string) bool {
+			return true
+		},
 	}))
 
 	r.GET("/", func(c *gin.Context) {

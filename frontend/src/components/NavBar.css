@@ -6,8 +6,8 @@
   right: 0;
   width: 100vw;
   height: 44px;
-  background-color: #f5f5f7;
-  color: #333333;
+  background-color: #ffffff; /* surface */
+  color: #2563eb; /* primary */
   z-index: 50;
   display: flex;
   align-items: center;

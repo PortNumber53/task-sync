@@ -45,28 +45,30 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 			continue
 		}
 
-		var configHolder models.StepConfigHolder
-		if err := json.Unmarshal([]byte(step.Settings), &configHolder); err != nil {
+		var settingsMap map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(step.Settings), &settingsMap); err != nil {
 			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid step config"})
 			models.StepLogger.Printf("Step %d: invalid step config: %v\n", step.StepID, err)
 			continue
 		}
 
-		config := configHolder.RubricsImport
-
-		// Add logging to inspect config values
-		models.StepLogger.Printf("DEBUG: Step %d: configHolder: %+v\n", step.StepID, configHolder)
-		models.StepLogger.Printf("DEBUG: Step %d: config: %+v\n", step.StepID, config)
-		if config != nil {
-			models.StepLogger.Printf("DEBUG: Step %d: config.MHTMLFile: %s\n", step.StepID, config.MHTMLFile)
-			models.StepLogger.Printf("DEBUG: Step %d: config.MDFile: %s\n", step.StepID, config.MDFile)
-		}
-
-		if config == nil {
-			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "rubrics_import config not found"})
-			models.StepLogger.Printf("Step %d: rubrics_import config not found in step settings\n", step.StepID)
+		var config models.RubricsImportConfig
+		if rubricsImportJSON, ok := settingsMap["rubrics_import"]; ok {
+			if err := json.Unmarshal(rubricsImportJSON, &config); err != nil {
+				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("invalid rubrics_import config: %v", err)})
+				models.StepLogger.Printf("Step %d: invalid rubrics_import config: %v\n", step.StepID, err)
+				continue
+			}
+		} else {
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "rubrics_import not found in settings"})
+			models.StepLogger.Printf("Step %d: rubrics_import not found in step settings\n", step.StepID)
 			continue
 		}
+
+		// Add logging to inspect config values
+		models.StepLogger.Printf("DEBUG: Step %d: config: %+v\n", step.StepID, config)
+		models.StepLogger.Printf("DEBUG: Step %d: config.MHTMLFile: %s\n", step.StepID, config.MHTMLFile)
+		models.StepLogger.Printf("DEBUG: Step %d: config.MDFile: %s\n", step.StepID, config.MDFile)
 
 		ok, err := models.CheckDependencies(db, &step)
 		if err != nil {

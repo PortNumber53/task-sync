@@ -17,7 +17,7 @@ import (
 // It checks triggers for file hash changes, image mismatches, and container assignments,
 // and supports a force parameter to override conditions.
 func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
-	stepLogger.Printf("Debug: Raw step settings: %s", string(stepExec.Settings)) // Add debug log for inspection
+	stepLogger.Printf("Debug: Raw step settings: %s", string(stepExec.Settings))
 	var settings struct {
 		DockerVolumePool models.DockerVolumePoolConfig `json:"docker_volume_pool"`
 	}
@@ -31,43 +31,51 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	// Check for force flag
 	if config.Force {
 		stepLogger.Println("Force flag set; running step regardless of triggers")
-		// Proceed with step execution (stub for now)
 		return runDockerVolumePoolStep(db, stepExec, stepLogger)
 	}
+
+	// Gather artifact container and volume names
+	artifactContainers := make([]string, 0, len(config.Triggers.Containers))
+	artifactVolumes := make([]string, 0, len(config.Triggers.Containers))
+	for patch, container := range config.Triggers.Containers {
+		artifactContainers = append(artifactContainers, container)
+		artifactVolumes = append(artifactVolumes, fmt.Sprintf("task_%d_%s_volume", stepExec.TaskID, patch))
+	}
+
+	// Check image triggers
+	imageChanged, err := checkImageTriggers(db, stepExec, config, stepLogger)
+	if err != nil {
+		return err
+	}
+
+	// Check container existence
+	containersExist := CheckArtifactContainersExist(artifactContainers, stepLogger)
+
+	// Check volume existence
+	volumesExist := CheckArtifactVolumesExist(artifactVolumes, stepLogger)
 
 	// Check file hash triggers
-	runNeeded, err := checkFileHashTriggers(db, stepExec, config, stepLogger)
+	filesChanged, err := checkFileHashTriggers(db, stepExec, config, stepLogger)
 	if err != nil {
 		return err
-	}
-	if runNeeded {
-		stepLogger.Println("File hash change detected; running step")
-		return runDockerVolumePoolStep(db, stepExec, stepLogger)
 	}
 
-	// Check image mismatch triggers
-	runNeeded, err = checkImageTriggers(db, stepExec, config, stepLogger)
-	if err != nil {
-		return err
-	}
-	if runNeeded {
-		stepLogger.Println("Image mismatch detected; running step")
+	// Decision logic
+	if imageChanged || !containersExist || !volumesExist {
+		stepLogger.Printf("[Trigger] Image changed: %v, Containers exist: %v, Volumes exist: %v", imageChanged, containersExist, volumesExist)
+		stepLogger.Println("Triggering full rebuild: recreate containers and volumes, run all steps")
 		return runDockerVolumePoolStep(db, stepExec, stepLogger)
 	}
-
-	// Check container assignment triggers
-	runNeeded, err = checkContainerTriggers(db, stepExec, config, stepLogger)
-	if err != nil {
-		return err
-	}
-	if runNeeded {
-		stepLogger.Println("Container assignment mismatch detected; running step")
-		return runDockerVolumePoolStep(db, stepExec, stepLogger)
+	if filesChanged {
+		stepLogger.Println("Triggering partial rebuild: files changed, redoing file/patch/git/volume steps, containers reused")
+		// TODO: Implement partial step (reuse containers/volumes, only redo file ops)
+		return runDockerVolumePoolStep(db, stepExec, stepLogger) // Placeholder: full run for now
 	}
 
 	stepLogger.Println("No triggers activated; skipping step execution")
 	return nil
 }
+
 
 // Helper function to check file hash triggers
 func checkFileHashTriggers(db *sql.DB, stepExec *models.StepExec, config *models.DockerVolumePoolConfig, logger *log.Logger) (bool, error) {

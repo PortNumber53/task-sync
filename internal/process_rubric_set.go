@@ -156,6 +156,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	}
 
 	// 4. Reconcile steps based on the rubric file.
+	updatedOrCreated := false
 	for _, criterion := range criteria {
 		title := fmt.Sprintf("Rubric %s: %s", criterion.Counter, criterion.Title)
 
@@ -209,6 +210,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 					stepLogger.Printf("Failed to update step %d for criterion '%s': %v", existingStep.ID, criterion.Title, err)
 				} else {
 					stepLogger.Printf("Updated step %d for criterion '%s'", existingStep.ID, criterion.Title)
+					updatedOrCreated = true
 				}
 			}
 			delete(existingStepsMap, criterion.Title) // Mark as processed
@@ -216,6 +218,8 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 			// Step doesn't exist, create it.
 			if _, err := models.CreateStep(db, strconv.Itoa(stepExec.TaskID), title, string(newSettingsBytes)); err != nil {
 				stepLogger.Printf("Failed to create new step for criterion '%s': %v", criterion.Title, err)
+			} else {
+				updatedOrCreated = true
 			}
 		}
 	}
@@ -234,21 +238,29 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	if err != nil {
 		stepLogger.Printf("Failed to fetch generated rubric_shell steps for force re-run: %v", err)
 	} else {
-		for _, step := range generatedSteps {
-			var holder models.StepConfigHolder
-			if err := json.Unmarshal([]byte(step.Settings), &holder); err == nil && holder.RubricShell != nil {
-				holder.RubricShell.LastRun = nil
-				updatedSettings, err := json.Marshal(map[string]interface{}{ "rubric_shell": holder.RubricShell })
-				if err == nil {
-					if err := models.UpdateStepSettings(db, step.ID, string(updatedSettings)); err == nil {
-						stepLogger.Printf("Forced re-run: reset LastRun for rubric_shell step %d", step.ID)
-					} else {
-						stepLogger.Printf("Failed to update settings for forced re-run of step %d: %v", step.ID, err)
+		if len(generatedSteps) > 0 {
+			if updatedOrCreated {
+				for _, step := range generatedSteps {
+					var holder models.StepConfigHolder
+					if err := json.Unmarshal([]byte(step.Settings), &holder); err == nil && holder.RubricShell != nil {
+						holder.RubricShell.LastRun = nil
+						updatedSettings, err := json.Marshal(map[string]interface{}{ "rubric_shell": holder.RubricShell })
+						if err == nil {
+							if err := models.UpdateStepSettings(db, step.ID, string(updatedSettings)); err == nil {
+								stepLogger.Printf("Forced re-run: reset LastRun for rubric_shell step %d due to changes", step.ID)
+							} else {
+								stepLogger.Printf("Failed to update settings for forced re-run of step %d: %v", step.ID, err)
+							}
+						} else {
+							stepLogger.Printf("Failed to marshal settings for forced re-run of step %d: %v", step.ID, err)
+						}
 					}
-				} else {
-					stepLogger.Printf("Failed to marshal settings for forced re-run of step %d: %v", step.ID, err)
 				}
+			} else {
+				stepLogger.Printf("No changes detected, skipping LastRun reset")
 			}
+		} else {
+			stepLogger.Printf("No generated steps to update")
 		}
 	}
 

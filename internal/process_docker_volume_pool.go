@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
+
 	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
@@ -13,12 +17,15 @@ import (
 // It checks triggers for file hash changes, image mismatches, and container assignments,
 // and supports a force parameter to override conditions.
 func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
+	stepLogger.Printf("Debug: Raw step settings: %s", string(stepExec.Settings)) // Add debug log for inspection
 	var settings struct {
 		DockerVolumePool models.DockerVolumePoolConfig `json:"docker_volume_pool"`
 	}
 	if err := json.Unmarshal([]byte(stepExec.Settings), &settings); err != nil {
 		return fmt.Errorf("failed to unmarshal step settings: %w", err)
 	}
+	stepLogger.Printf("Unmarshaled settings: %+v", settings.DockerVolumePool)
+	stepLogger.Printf("Solutions loaded: %v", settings.DockerVolumePool.Solutions)
 	config := &settings.DockerVolumePool
 
 	// Check for force flag
@@ -102,18 +109,339 @@ func checkContainerTriggers(db *sql.DB, stepExec *models.StepExec, config *model
 	if err != nil {
 		return false, fmt.Errorf("failed to get task settings: %w", err)
 	}
+
+	// Use AssignedContainers from struct (task.settings.assigned_containers)
+	containerMap := taskSettings.AssignedContainers
+	logger.Printf("[TriggerCheck] Using taskSettings.AssignedContainers: %v", containerMap)
+
+	logger.Printf("[TriggerCheck] Comparing step triggers.containers: %v", config.Triggers.Containers)
+	logger.Printf("[TriggerCheck] Against task assigned_containers: %v", containerMap)
 	runNeeded := false
 	for fileName, expectedContainer := range config.Triggers.Containers {
-		actualContainer, exists := taskSettings.AssignContainers[fileName] // Changed to AssignContainers
-		if !exists || actualContainer != expectedContainer {
+		actualContainer, exists := containerMap[fileName]
+		if !exists {
+			logger.Printf("[TriggerCheck] File %s missing in assigned_containers, expected: %s", fileName, expectedContainer)
 			runNeeded = true
+		} else if actualContainer != expectedContainer {
+			logger.Printf("[TriggerCheck] File %s container mismatch: assigned=%s, expected=%s", fileName, actualContainer, expectedContainer)
+			runNeeded = true
+		} else {
+			logger.Printf("[TriggerCheck] File %s container matches: %s", fileName, actualContainer)
 		}
 	}
 	return runNeeded, nil
 }
 
-// Stub for actual step execution logic
+// Helper function to replace placeholders in parameters slice
+func replacePlaceholders(params []string, replacements map[string]string) []string {
+	result := make([]string, len(params))
+	for i, param := range params {
+		for key, value := range replacements {
+			param = strings.ReplaceAll(param, key, value)
+		}
+		result[i] = param
+	}
+	return result
+}
+
 func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.Logger) error {
-	logger.Println("Docker volume pool step execution not yet implemented")
-	return nil // Replace with actual logic later
+	var settings struct {
+		DockerVolumePool models.DockerVolumePoolConfig `json:"docker_volume_pool"`
+	}
+	if err := json.Unmarshal([]byte(stepExec.Settings), &settings); err != nil {
+		return fmt.Errorf("failed to unmarshal step settings: %w", err)
+	}
+	logger.Printf("Unmarshaled settings: %+v", settings.DockerVolumePool)
+	logger.Printf("Solutions loaded: %v", settings.DockerVolumePool.Solutions)
+	config := &settings.DockerVolumePool
+
+	// Get task ID and solutions from Triggers.Containers keys
+	taskID := stepExec.TaskID
+	solutionsMap := config.Triggers.Containers
+	solutions := make([]string, 0, len(solutionsMap))
+	for sol := range solutionsMap {
+		solutions = append(solutions, sol)
+	}
+
+	// Prepare to collect artifact container names for output
+	artifactContainers := make(map[string]string)
+
+	for i, solution := range solutions {
+		logger.Printf("Processing solution %s for task %d", solution, taskID)
+		volumeName := fmt.Sprintf("task_%d_%s_volume", taskID, solution)
+		containerFolder := config.ContainerFolder
+		imageTag := config.Triggers.ImageTag
+
+		// Prepare replacements for placeholders
+		tmpHostPath := fmt.Sprintf("/tmp/task_%d_solution_step_%d_tmp_folder", taskID, i)
+		dockerVolumePath := "/tmp/volume"
+		replacements := map[string]string{
+			"%%IMAGETAG%%":     imageTag,
+			"%%HOSTPATH%%":     tmpHostPath,
+			"%%DOCKERVOLUME%%": dockerVolumePath,
+		}
+		params := replacePlaceholders(config.Parameters, replacements)
+
+		// Utility function to add keep-alive command if not already present
+		params = addKeepAliveCommand(params, config.KeepForever, logger)
+
+		// Run the Docker command
+		tmpContainerName := fmt.Sprintf("task_%d_tmp_container_step_%d", taskID, i)
+		if err := runDockerCommand(params, tmpContainerName, logger, config.KeepForever); err != nil {
+			return err
+		}
+
+		// Step 3: Copy files to volume inside temporary container
+		copyCmd := fmt.Sprintf("cp -r %s/* %s", containerFolder, dockerVolumePath)
+		if err := execInContainer(tmpContainerName, copyCmd, logger); err != nil {
+			removeDockerContainer(tmpContainerName, logger)
+			return err
+		}
+		logger.Println("Files copied to Docker volume")
+
+		// Step 4: Remove temporary container
+		if err := removeDockerContainer(tmpContainerName, logger); err != nil {
+			return err
+		}
+		logger.Printf("Removed temporary container: %s")
+
+		// Step 5: Start new artifact container with volume mounted
+		artifactContainerName := fmt.Sprintf("task_%d_step_%d_artifact%d", taskID, stepExec.StepID, i)
+		artifactContainers[solution] = artifactContainerName
+		artifactReplacements := map[string]string{
+			"%%IMAGETAG%%":     imageTag,
+			"%%HOSTPATH%%":     volumeName,
+			"%%DOCKERVOLUME%%": containerFolder,
+		}
+		artifactParams := replacePlaceholders(config.Parameters, artifactReplacements)
+		artifactParams = addKeepAliveCommand(artifactParams, config.KeepForever, logger)
+		// Run the artifact container
+		if err := runDockerCommand(artifactParams, artifactContainerName, logger, config.KeepForever); err != nil {
+			return err
+		}
+
+		// Step 6: Run git commands and apply patch inside artifact container
+		// Ensure repository is clean
+		gitCleanCmd := "git reset --hard && git clean -fd"
+		if err := execInContainer(artifactContainerName, gitCleanCmd, logger); err != nil {
+			if !config.KeepForever {
+				removeDockerContainer(artifactContainerName, logger)
+			}
+			return err
+		}
+		// Copy patch file from host into the container before applying
+		patchHostPath := filepath.Join(stepExec.LocalPath, solution)
+		patchContainerPath := fmt.Sprintf("/app/ansible/%s", solution)
+		cpCmd := exec.Command("docker", "cp", patchHostPath, artifactContainerName+":"+patchContainerPath)
+		logger.Printf("Copying patch file %s to container %s:%s", patchHostPath, artifactContainerName, patchContainerPath)
+		if output, err := cpCmd.CombinedOutput(); err != nil {
+			logger.Printf("Error copying patch file: %v, output: %s", err, string(output))
+			if !config.KeepForever {
+				removeDockerContainer(artifactContainerName, logger)
+			}
+			return fmt.Errorf("failed to copy patch file to container: %w", err)
+		}
+
+		// Apply solution patch
+		patchCmd := fmt.Sprintf("git apply %s", patchContainerPath)
+		if err := execInContainer(artifactContainerName, patchCmd, logger); err != nil {
+			if !config.KeepForever {
+				removeDockerContainer(artifactContainerName, logger)
+			}
+			return err
+		}
+		logger.Printf("Applied patch %s in container %s", solution, artifactContainerName)
+
+		// Remove artifact container only if not keep_forever
+		if !config.KeepForever {
+			if err := removeDockerContainer(artifactContainerName, logger); err != nil {
+				return err
+			}
+			logger.Printf("Removed artifact container: %s")
+		} else {
+			logger.Printf("Keeping artifact container %s as per keep_forever flag", artifactContainerName)
+		}
+	}
+
+	// After all containers, store artifact container names and image ID in Artifacts
+	if config.Artifacts == nil {
+		config.Artifacts = make(map[string]interface{})
+	}
+	config.Artifacts["containers"] = artifactContainers
+
+	// Update triggers.containers with artifact container names
+	if config.Triggers.Containers == nil {
+		config.Triggers.Containers = make(map[string]string)
+	}
+	for patch, container := range artifactContainers {
+		config.Triggers.Containers[patch] = container
+	}
+
+	// Always update assigned_containers in task settings
+	taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
+	if err != nil {
+		logger.Printf("Warning: Could not fetch task settings to update assigned_containers: %v", err)
+	} else {
+		taskSettings.AssignedContainers = make(map[string]string)
+		for patch, container := range artifactContainers {
+			taskSettings.AssignedContainers[patch] = container
+		}
+		if err := models.UpdateTaskSettings(db, stepExec.TaskID, taskSettings); err != nil {
+			logger.Printf("Warning: Could not update assigned_containers in task settings: %v", err)
+		} else {
+			logger.Printf("Updated assigned_containers in task settings for task %d", stepExec.TaskID)
+		}
+	}
+
+	// Update triggers.files with current file hashes
+	if config.Triggers.Files == nil {
+		config.Triggers.Files = make(map[string]string)
+	}
+	for file := range config.Triggers.Files {
+		filePath := filepath.Join(stepExec.LocalPath, file)
+		hash, err := models.GetSHA256(filePath)
+		if err != nil {
+			logger.Printf("Warning: Failed to compute hash for %s: %v", filePath, err)
+			continue
+		}
+		config.Triggers.Files[file] = hash
+	}
+
+	// Retrieve image ID for the used image tag
+	imageID := ""
+	inspectCmd := exec.Command("docker", "inspect", "--format", "{{.Id}}", config.Triggers.ImageTag)
+	if output, err := inspectCmd.CombinedOutput(); err == nil {
+		imageID = strings.TrimSpace(string(output))
+	} else {
+		logger.Printf("Warning: Failed to get image ID for image tag %s: %v, output: %s", config.Triggers.ImageTag, err, string(output))
+	}
+	config.Artifacts["image_id"] = imageID
+
+	// Update triggers.image_id as well
+	config.Triggers.ImageID = imageID
+
+	// Persist updated settings
+	settings.DockerVolumePool = *config
+	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		logger.Printf("Error marshaling updated settings: %v", err)
+		return err
+	}
+	if err := models.UpdateStepSettings(db, stepExec.StepID, string(settingsJSON)); err != nil {
+		logger.Printf("Error updating step settings: %v", err)
+		return err
+	}
+	logger.Printf("Updated step settings with artifact container names, image ID, triggers.containers, and triggers.files.")
+
+	return nil
+}
+
+// Utility function to add keep-alive command if not already present
+func addKeepAliveCommand(params []string, keepForever bool, logger *log.Logger) []string {
+	if keepForever {
+		hasKeepAliveCmd := false
+		for _, param := range params {
+			if (strings.Contains(param, "while true") && strings.Contains(param, "sleep")) ||
+				strings.Contains(param, "sleep infinity") ||
+				strings.Contains(param, "tail -f") {
+				hasKeepAliveCmd = true
+				break
+			}
+		}
+		if !hasKeepAliveCmd {
+			keepAliveArgs := []string{"-c", "while true; do sleep 30; done"}
+			params = append(params, keepAliveArgs...)
+			logger.Printf("Added keep-alive command to parameters: %v", params)
+		}
+	}
+	return params
+}
+
+// General function to run Docker command with given parameters and name
+// Polls for the container to be running, up to timeoutSeconds
+func waitForContainerRunning(containerName string, timeoutSeconds int, logger *log.Logger) error {
+	for i := 0; i < timeoutSeconds; i++ {
+		inspectCmd := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", containerName)
+		out, err := inspectCmd.CombinedOutput()
+		if err == nil && strings.TrimSpace(string(out)) == "true" {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("container %s did not reach running state within %d seconds", containerName, timeoutSeconds)
+}
+
+func runDockerCommand(params []string, containerName string, logger *log.Logger, detached bool) error {
+	// Add container name conflict handling
+	removeCmd := exec.Command("docker", "rm", "-f", containerName)
+	removeOutput, removeErr := removeCmd.CombinedOutput()
+	if removeErr != nil && !strings.Contains(string(removeOutput), "No such container") {
+		logger.Printf("Error removing existing container %s: %v, output: %s", containerName, removeErr, string(removeOutput))
+		return fmt.Errorf("failed to remove existing container: %w", removeErr)
+	}
+	// Flatten params: split on spaces except for -c keep-alive command
+	flattened := []string{}
+	for i := 0; i < len(params); i++ {
+		if params[i] == "-c" && i+1 < len(params) {
+			flattened = append(flattened, "-c", params[i+1])
+			i++ // skip next, already appended
+		} else {
+			parts := strings.Split(params[i], " ")
+			flattened = append(flattened, parts...)
+		}
+	}
+	if detached {
+		flattened = append([]string{"-d"}, flattened...)
+	}
+	cmdArgs := append([]string{"run", "--name", containerName}, flattened...)
+	logger.Printf("Running Docker command: docker %s", strings.Join(cmdArgs, " "))
+	cmd := exec.Command("docker", cmdArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Error running Docker command for container %s: %v, output: %s", containerName, err, string(output))
+		return fmt.Errorf("failed to run Docker command: %w", err)
+	}
+	logger.Printf("Successfully ran Docker command for container %s", containerName)
+	if detached {
+		// Wait for container to be running
+		if err := waitForContainerRunning(containerName, 15, logger); err != nil {
+			logger.Printf("Container %s did not reach running state: %v", containerName, err)
+			return err
+		}
+		logger.Printf("Container %s is running", containerName)
+	}
+	return nil
+}
+
+func createDockerVolume(name string, logger *log.Logger) error {
+	cmd := exec.Command("docker", "volume", "create", name)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Error creating Docker volume %s: %v, output: %s", name, err, string(output))
+		return fmt.Errorf("failed to create Docker volume: %w", err)
+	}
+	logger.Printf("Created Docker volume: %s", name)
+	return nil
+}
+
+func execInContainer(containerName, command string, logger *log.Logger) error {
+	cmd := exec.Command("docker", "exec", containerName, "bash", "-c", command)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Error executing in container %s: %v, output: %s", containerName, err, string(output))
+		return fmt.Errorf("failed to execute command in container: %w", err)
+	}
+	logger.Printf("Executed in container %s: %s", containerName, command)
+	return nil
+}
+
+func removeDockerContainer(name string, logger *log.Logger) error {
+	cmd := exec.Command("docker", "rm", "-f", name)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Error removing container %s: %v, output: %s", name, err, string(output))
+		return fmt.Errorf("failed to remove Docker container: %w", err)
+	}
+	logger.Printf("Removed container: %s", name)
+	return nil
 }

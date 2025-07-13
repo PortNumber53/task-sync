@@ -193,8 +193,9 @@ Usage:
   task-sync step <command> [flags]
 
 Available Commands:
-  create     Create a new step
   copy       Copy a step to another task
+  create     Create a new step
+  delete     Delete a step by ID
   edit       Edit a step's settings
   info       Show detailed information about a step
   list       List all steps

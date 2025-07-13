@@ -31,6 +31,7 @@ type StepConfigHolder struct {
 	DockerPool    *DockerPoolConfig    `json:"docker_pool,omitempty"`
 	DockerBuild   *DockerBuildConfig   `json:"docker_build,omitempty"`
 	DockerShell   *DockerShellConfig   `json:"docker_shell,omitempty"`
+	DockerVolumePool *DockerVolumePoolConfig `json:"docker_volume_pool"`
 }
 
 // StepConfig is an interface that all step configurations should implement.
@@ -226,6 +227,17 @@ func (c *RubricSetConfig) GetImageTag() string      { return "" }
 func (c *RubricSetConfig) GetImageID() string       { return "" }
 func (c *RubricSetConfig) HasImage() bool           { return false }
 func (c *RubricSetConfig) GetDependsOn() []Dependency { return c.DependsOn }
+
+// DockerVolumePoolConfig represents the configuration for a docker_volume_pool step.
+type DockerVolumePoolConfig struct {
+	Triggers struct {
+		Files map[string]string `json:"files"`
+		ImageID string `json:"image_id"`
+		ImageTag string `json:"image_tag"`
+		Containers map[string]string `json:"containers"`
+	} `json:"triggers"`
+	Force bool `json:"force"`
+}
 
 // stepLogger is a global logger for step-related messages.
 var StepLogger *log.Logger

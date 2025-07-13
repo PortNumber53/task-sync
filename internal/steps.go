@@ -34,6 +34,7 @@ func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *l
 			processDockerShellSteps(db, se.StepID)
 			return nil
 		},
+		"docker_volume_pool": ProcessDockerVolumePoolStep,
 		"file_exists": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			if se != nil && se.StepID != 0 {
 				return ProcessFileExistsStep(db, se, logger)

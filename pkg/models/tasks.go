@@ -6,13 +6,17 @@ import (
 	"fmt"
 )
 
+// Docker holds the Docker image settings.
+type Docker struct {
+	ImageID  string `json:"image_id"`
+	ImageTag string `json:"image_tag"`
+}
+
 // TaskSettings holds the settings for a task.
 type TaskSettings struct {
-	Docker struct {
-		ImageTag string `json:"image_tag,omitempty"`
-		ImageID  string `json:"image_id,omitempty"`
-	} `json:"docker,omitempty"`
-	AssignContainers map[string]string `json:"assign_containers,omitempty"`
+	Docker Docker `json:"docker"`
+	AssignContainers map[string]string `json:"assign_containers"`
+	AssignedContainers map[string]string `json:"assigned_containers"`
 	// Add other fields as needed based on project requirements
 }
 

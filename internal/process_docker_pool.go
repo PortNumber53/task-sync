@@ -179,7 +179,7 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 			assignContainers := make(map[string]string)
 			// Try to get solution patch names from existing mapping (fallback to generic names)
 			var patchNames []string
-			if taskSettings.AssignContainers != nil && len(taskSettings.AssignContainers) > 0 {
+			if len(taskSettings.AssignContainers) > 0 {
 				for k := range taskSettings.AssignContainers {
 					patchNames = append(patchNames, k)
 				}

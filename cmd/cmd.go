@@ -346,34 +346,22 @@ func HandleTaskInfo() {
 func HandleTaskCreate() {
 	var name, status, localPath string
 	for i := 3; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--name":
-			if i+1 < len(os.Args) {
-				name = os.Args[i+1]
-				i++
-			} else {
-				fmt.Println("Error: --name requires a value")
-				helpPkg.PrintTaskCreateHelp()
-				os.Exit(1)
-			}
-		case "--status":
-			if i+1 < len(os.Args) {
-				status = os.Args[i+1]
-				i++
-			} else {
-				fmt.Println("Error: --status requires a value")
-				helpPkg.PrintTaskCreateHelp()
-				os.Exit(1)
-			}
-		case "--local_path":
-			if i+1 < len(os.Args) {
-				localPath = os.Args[i+1]
-				i++
-			} else {
-				fmt.Println("Error: --local_path requires a value")
-				helpPkg.PrintTaskCreateHelp()
-				os.Exit(1)
-			}
+		arg := os.Args[i]
+		if strings.HasPrefix(arg, "--name=") {
+			name = strings.TrimPrefix(arg, "--name=")
+		} else if arg == "--name" && i+1 < len(os.Args) {
+			name = os.Args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--status=") {
+			status = strings.TrimPrefix(arg, "--status=")
+		} else if arg == "--status" && i+1 < len(os.Args) {
+			status = os.Args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--local_path=") {
+			localPath = strings.TrimPrefix(arg, "--local_path=")
+		} else if arg == "--local_path" && i+1 < len(os.Args) {
+			localPath = os.Args[i+1]
+			i++
 		}
 	}
 

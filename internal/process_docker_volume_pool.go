@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -174,26 +175,29 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 	// Prepare to collect artifact container names for output
 	artifactContainers := make(map[string]string)
 
+	localPath := stepExec.LocalPath
 	for i, solution := range solutions {
 		logger.Printf("Processing solution %s for task %d", solution, taskID)
-		volumeName := fmt.Sprintf("task_%d_%s_volume", taskID, solution)
+		// Use localPath and sequential naming for the volume, prefixed with step ID
+		volumeName := fmt.Sprintf("step_%d_volume_solution%d", stepExec.StepID, i+1)
+		volumeHostPath := filepath.Join(localPath, volumeName)
 		containerFolder := config.ContainerFolder
 		imageTag := config.Triggers.ImageTag
 
 		// --- VOLUME CREATION & CHECK LOGGING ---
-		logger.Printf("[VOLUME] Checking if Docker volume exists: %s", volumeName)
-		inspectCmd := exec.Command("docker", "volume", "inspect", volumeName)
-		inspectOutput, inspectErr := inspectCmd.CombinedOutput()
-		if inspectErr != nil {
-			logger.Printf("[VOLUME] Volume %s does not exist or error inspecting: %v, output: %s", volumeName, inspectErr, string(inspectOutput))
-			logger.Printf("[VOLUME] Attempting to create Docker volume: %s", volumeName)
-			if err := createDockerVolume(volumeName, logger); err != nil {
-				logger.Printf("[VOLUME] Error creating Docker volume %s: %v", volumeName, err)
+		logger.Printf("[VOLUME] Checking if host path exists: %s", volumeHostPath)
+		if _, err := os.Stat(volumeHostPath); os.IsNotExist(err) {
+			logger.Printf("[VOLUME] Host path %s does not exist. Creating...", volumeHostPath)
+			if err := os.MkdirAll(volumeHostPath, 0755); err != nil {
+				logger.Printf("[VOLUME] Error creating host path %s: %v", volumeHostPath, err)
 				return err
 			}
-			logger.Printf("[VOLUME] Successfully created Docker volume: %s", volumeName)
+			logger.Printf("[VOLUME] Successfully created host path: %s", volumeHostPath)
+		} else if err != nil {
+			logger.Printf("[VOLUME] Error checking host path %s: %v", volumeHostPath, err)
+			return err
 		} else {
-			logger.Printf("[VOLUME] Docker volume %s already exists", volumeName)
+			logger.Printf("[VOLUME] Host path %s already exists", volumeHostPath)
 		}
 
 		// Prepare replacements for placeholders
@@ -263,6 +267,9 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 			"%%DOCKERVOLUME%%": containerFolder,
 		}
 		artifactParams := replacePlaceholders(config.Parameters, artifactReplacements)
+		// Inject --user flag for host UID:GID
+		userFlag := fmt.Sprintf("--user=%d:%d", os.Getuid(), os.Getgid())
+		artifactParams = append([]string{userFlag}, artifactParams...)
 		artifactParams = addKeepAliveCommand(artifactParams, config.KeepForever, logger)
 		logger.Printf("[CONTAINER] Running Docker command to create artifact container: %s with params: %v", artifactContainerName, artifactParams)
 		if err := runDockerCommand(artifactParams, artifactContainerName, logger, config.KeepForever); err != nil {
@@ -270,6 +277,22 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 			return err
 		}
 		logger.Printf("[CONTAINER] Artifact container %s created successfully", artifactContainerName)
+
+		// Step 5.5: chown mounted files to host user using a temp container as root
+		chownContainerName := fmt.Sprintf("task_%d_step_%d_chown%d", taskID, stepExec.StepID, i)
+		chownCmd := fmt.Sprintf("chown -R %d:%d %s", os.Getuid(), os.Getgid(), containerFolder)
+		chownParams := []string{
+			"--rm",
+			"-v", fmt.Sprintf("%s:%s", volumeName, containerFolder),
+			"--entrypoint", "/bin/bash",
+			imageTag,
+			"-c", chownCmd,
+		}
+		logger.Printf("[CHOWN] Running chown in temp container %s: %s", chownContainerName, chownCmd)
+		if err := runDockerCommand(chownParams, chownContainerName, logger, false); err != nil {
+			logger.Printf("[CHOWN] Error running chown in temp container %s: %v", chownContainerName, err)
+			return err
+		}
 
 		// Step 6: Run git commands and apply patch inside artifact container
 		// Ensure repository is clean

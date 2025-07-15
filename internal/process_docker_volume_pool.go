@@ -77,7 +77,6 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	return nil
 }
 
-
 // Helper function to check file hash triggers
 func checkFileHashTriggers(db *sql.DB, stepExec *models.StepExec, config *models.DockerVolumePoolConfig, logger *log.Logger) (bool, error) {
 	runNeeded := false
@@ -176,100 +175,90 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 	artifactContainers := make(map[string]string)
 
 	localPath := stepExec.LocalPath
-	for i, solution := range solutions {
-		logger.Printf("Processing solution %s for task %d", solution, taskID)
-		// Use localPath and sequential naming for the volume, prefixed with step ID
-		volumeName := fmt.Sprintf("step_%d_volume_solution%d", stepExec.StepID, i+1)
-		volumeHostPath := filepath.Join(localPath, volumeName)
-		containerFolder := config.ContainerFolder
-		imageTag := config.Triggers.ImageTag
+	// --- PREPARATION: Create a single Docker volume for the task ---
+	volumeName := fmt.Sprintf("step_%d_original_volume", stepExec.StepID)
+	containerFolder := config.ContainerFolder
+	imageTag := config.Triggers.ImageTag
 
-		// --- VOLUME CREATION & CHECK LOGGING ---
-		logger.Printf("[VOLUME] Checking if host path exists: %s", volumeHostPath)
-		if _, err := os.Stat(volumeHostPath); os.IsNotExist(err) {
-			logger.Printf("[VOLUME] Host path %s does not exist. Creating...", volumeHostPath)
-			if err := os.MkdirAll(volumeHostPath, 0755); err != nil {
-				logger.Printf("[VOLUME] Error creating host path %s: %v", volumeHostPath, err)
+	// Create the Docker volume if it doesn't exist
+	logger.Printf("[VOLUME] Checking if Docker volume exists: %s", volumeName)
+	if !dockerVolumeExists(volumeName) {
+		logger.Printf("[VOLUME] Creating Docker volume: %s", volumeName)
+		if err := createDockerVolume(volumeName, logger); err != nil {
+			logger.Printf("[VOLUME] Error creating Docker volume %s: %v", volumeName, err)
+			return err
+		}
+		logger.Printf("[VOLUME] Successfully created Docker volume: %s", volumeName)
+	} else {
+		logger.Printf("[VOLUME] Docker volume %s already exists", volumeName)
+	}
+
+	// Start a persistent container to copy container_folder into the Docker volume
+	prepContainerName := fmt.Sprintf("task_%d_step_%d_prep", taskID, stepExec.StepID)
+	prepParams := []string{
+		"-d", // detached
+		"--name", prepContainerName,
+		"-v", fmt.Sprintf("%s:%s", volumeName, "/original"),
+		"--entrypoint", "/bin/bash",
+		imageTag,
+		"-c", fmt.Sprintf("cp -r %s/. /original/ && while true; do sleep 30; done", containerFolder),
+	}
+	logger.Printf("[PREP] Running Docker command to create persistent prep container: %s with params: %v", prepContainerName, prepParams)
+	if err := runDockerCommand(prepParams, prepContainerName, logger, true); err != nil {
+		logger.Printf("[PREP] Error running Docker command for prep container %s: %v", prepContainerName, err)
+		return err
+	}
+	logger.Printf("[PREP] Prep container %s created and running", prepContainerName)
+
+	// --- For each solution: create host folder and copy from Docker volume ---
+	var hostFolder string
+	for i, solution := range solutions {
+		hostFolder = filepath.Join(localPath, fmt.Sprintf("step_%d_volume_solution%d", stepExec.StepID, i+1))
+		logger.Printf("[SOLUTION] Preparing host folder for solution %s", solution)
+		if _, err := os.Stat(hostFolder); os.IsNotExist(err) {
+			logger.Printf("[SOLUTION] Host folder %s does not exist. Creating...", hostFolder)
+			if err := os.MkdirAll(hostFolder, 0755); err != nil {
+				logger.Printf("[SOLUTION] Error creating host folder %s: %v", hostFolder, err)
 				return err
 			}
-			logger.Printf("[VOLUME] Successfully created host path: %s", volumeHostPath)
+			logger.Printf("[SOLUTION] Successfully created host folder: %s", hostFolder)
 		} else if err != nil {
-			logger.Printf("[VOLUME] Error checking host path %s: %v", volumeHostPath, err)
+			logger.Printf("[SOLUTION] Error checking host folder %s: %v", hostFolder, err)
 			return err
 		} else {
-			logger.Printf("[VOLUME] Host path %s already exists", volumeHostPath)
+			logger.Printf("[SOLUTION] Host folder %s already exists", hostFolder)
 		}
 
-		// Prepare replacements for placeholders
-		tmpHostPath := fmt.Sprintf("/tmp/task_%d_solution_step_%d_tmp_folder", taskID, i)
-		dockerVolumePath := "/tmp/volume"
-		replacements := map[string]string{
-			"%%IMAGETAG%%":     imageTag,
-			"%%HOSTPATH%%":     tmpHostPath,
-			"%%DOCKERVOLUME%%": dockerVolumePath,
+		// Use a temp container to copy from Docker volume to host folder
+		tmpCopyContainer := fmt.Sprintf("task_%d_step_%d_copyout%d", taskID, stepExec.StepID, i)
+		tmpCopyParams := []string{
+			"--rm",
+			"-v", fmt.Sprintf("%s:/original:ro", volumeName),
+			"-v", fmt.Sprintf("%s:%s", hostFolder, containerFolder),
+			"--entrypoint", "/bin/bash",
+			imageTag,
+			"-c", fmt.Sprintf("cp -r /original/. %s", containerFolder),
 		}
-		params := replacePlaceholders(config.Parameters, replacements)
-
-		// Utility function to add keep-alive command if not already present
-		params = addKeepAliveCommand(params, config.KeepForever, logger)
-
-		// Run the Docker command (temporary container for copying files)
-		tmpContainerName := fmt.Sprintf("task_%d_tmp_container_step_%d", taskID, i)
-		logger.Printf("[CONTAINER] Running Docker command to create temp container: %s with params: %v", tmpContainerName, params)
-		if err := runDockerCommand(params, tmpContainerName, logger, config.KeepForever); err != nil {
-			logger.Printf("[CONTAINER] Error running Docker command for temp container %s: %v", tmpContainerName, err)
+		logger.Printf("[COPYOUT] Copying from Docker volume to host folder using container %s", tmpCopyContainer)
+		if err := runDockerCommand(tmpCopyParams, tmpCopyContainer, logger, false); err != nil {
+			logger.Printf("[COPYOUT] Error copying from Docker volume to host folder in container %s: %v", tmpCopyContainer, err)
 			return err
 		}
-		logger.Printf("[CONTAINER] Temp container %s created successfully", tmpContainerName)
 
-		// Step 3: Wait for container to be ready by running 'pwd' in a loop
-		ready := false
-		for attempt := 1; attempt <= 10; attempt++ {
-			err := execInContainer(tmpContainerName, "pwd", logger)
-			if err == nil {
-				logger.Printf("[WAIT] Container %s is ready (pwd succeeded on attempt %d)", tmpContainerName, attempt)
-				ready = true
-				break
-			} else {
-				logger.Printf("[WAIT] Attempt %d: Container %s not ready yet (pwd failed): %v", attempt, tmpContainerName, err)
-				time.Sleep(1 * time.Second)
-			}
+		artifactContainerName := fmt.Sprintf("task_%d_step_%d_artifact%d", taskID, stepExec.StepID, i+1)
+		artifactParams := []string{
+			"--user=0:0", // Run as root by default
+			"--rm",
+			"--platform", "linux/amd64",
+			"--cpus", "2",
+			"--memory", "1G",
+			"--pids-limit", "512",
+			"-v", fmt.Sprintf("%s:%s", hostFolder, containerFolder), // bind mount
+			"-v", fmt.Sprintf("%s:/original:ro", volumeName), // docker volume read-only
+			"--entrypoint", "/bin/bash",
+			imageTag,
+			"--login",
 		}
-		if !ready {
-			logger.Printf("[WAIT] Container %s did not become ready after 10 attempts. Skipping copy and keeping container for debugging.", tmpContainerName)
-			return fmt.Errorf("container %s not ready for file copy", tmpContainerName)
-		}
-
-		// Step 3: Copy files to volume inside temporary container
-		copyCmd := fmt.Sprintf("cp -r %s/. %s || true", containerFolder, dockerVolumePath)
-		logger.Printf("[COPY] Copying files from %s to %s inside container %s", containerFolder, dockerVolumePath, tmpContainerName)
-		if err := execInContainer(tmpContainerName, copyCmd, logger); err != nil {
-			logger.Printf("[COPY] Error copying files in container %s: %v", tmpContainerName, err)
-			logger.Printf("[DEBUG] Temp container %s is being kept for debugging after copy error. You may inspect it manually.", tmpContainerName)
-			return err
-		}
-		logger.Println("[COPY] Files copied to Docker volume successfully")
-
-		// Step 4: Remove temporary container
-		logger.Printf("[CONTAINER] Removing temporary container: %s", tmpContainerName)
-		if err := removeDockerContainer(tmpContainerName, logger); err != nil {
-			logger.Printf("[CONTAINER] Error removing temporary container %s: %v", tmpContainerName, err)
-			return err
-		}
-		logger.Printf("[CONTAINER] Removed temporary container: %s", tmpContainerName)
-
-		// Step 5: Start new artifact container with volume mounted
-		artifactContainerName := fmt.Sprintf("task_%d_step_%d_artifact%d", taskID, stepExec.StepID, i)
-		artifactContainers[solution] = artifactContainerName
-		artifactReplacements := map[string]string{
-			"%%IMAGETAG%%":     imageTag,
-			"%%HOSTPATH%%":     volumeName,
-			"%%DOCKERVOLUME%%": containerFolder,
-		}
-		artifactParams := replacePlaceholders(config.Parameters, artifactReplacements)
-		// Inject --user flag for host UID:GID
-		userFlag := fmt.Sprintf("--user=%d:%d", os.Getuid(), os.Getgid())
-		artifactParams = append([]string{userFlag}, artifactParams...)
 		artifactParams = addKeepAliveCommand(artifactParams, config.KeepForever, logger)
 		logger.Printf("[CONTAINER] Running Docker command to create artifact container: %s with params: %v", artifactContainerName, artifactParams)
 		if err := runDockerCommand(artifactParams, artifactContainerName, logger, config.KeepForever); err != nil {
@@ -277,26 +266,15 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 			return err
 		}
 		logger.Printf("[CONTAINER] Artifact container %s created successfully", artifactContainerName)
-
-		// Step 5.5: chown mounted files to host user using a temp container as root
-		chownContainerName := fmt.Sprintf("task_%d_step_%d_chown%d", taskID, stepExec.StepID, i)
-		chownCmd := fmt.Sprintf("chown -R %d:%d %s", os.Getuid(), os.Getgid(), containerFolder)
-		chownParams := []string{
-			"--rm",
-			"-v", fmt.Sprintf("%s:%s", volumeName, containerFolder),
-			"--entrypoint", "/bin/bash",
-			imageTag,
-			"-c", chownCmd,
-		}
-		logger.Printf("[CHOWN] Running chown in temp container %s: %s", chownContainerName, chownCmd)
-		if err := runDockerCommand(chownParams, chownContainerName, logger, false); err != nil {
-			logger.Printf("[CHOWN] Error running chown in temp container %s: %v", chownContainerName, err)
+		// Step 6: Run git commands and apply patch inside artifact container
+		gitSafeCmd := "git -c safe.directory=/app/ansible reset --hard && git -c safe.directory=/app/ansible clean -fd"
+		if err := execInContainer(artifactContainerName, gitSafeCmd, logger); err != nil {
+			if !config.KeepForever {
+				removeDockerContainer(artifactContainerName, logger)
+			}
 			return err
 		}
-
-		// Step 6: Run git commands and apply patch inside artifact container
-		// Ensure repository is clean
-		gitCleanCmd := "git reset --hard && git clean -fd"
+		gitCleanCmd := "git -c safe.directory=/app/ansible reset --hard && git -c safe.directory=/app/ansible clean -fd"
 		if err := execInContainer(artifactContainerName, gitCleanCmd, logger); err != nil {
 			if !config.KeepForever {
 				removeDockerContainer(artifactContainerName, logger)
@@ -315,9 +293,8 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 			}
 			return fmt.Errorf("failed to copy patch file to container: %w", err)
 		}
-
 		// Apply solution patch
-		patchCmd := fmt.Sprintf("git apply %s", patchContainerPath)
+		patchCmd := fmt.Sprintf("git -c safe.directory=/app/ansible apply %s", patchContainerPath)
 		if err := execInContainer(artifactContainerName, patchCmd, logger); err != nil {
 			if !config.KeepForever {
 				removeDockerContainer(artifactContainerName, logger)
@@ -325,16 +302,7 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 			return err
 		}
 		logger.Printf("Applied patch %s in container %s", solution, artifactContainerName)
-
-		// Remove artifact container only if not keep_forever
-		if !config.KeepForever {
-			if err := removeDockerContainer(artifactContainerName, logger); err != nil {
-				return err
-			}
-			logger.Printf("Removed artifact container: %s")
-		} else {
-			logger.Printf("Keeping artifact container %s as per keep_forever flag", artifactContainerName)
-		}
+		artifactContainers[solution] = artifactContainerName
 	}
 
 	// After all containers, store artifact container names and image ID in Artifacts
@@ -485,6 +453,12 @@ func runDockerCommand(params []string, containerName string, logger *log.Logger,
 		logger.Printf("Container %s is running", containerName)
 	}
 	return nil
+}
+
+func dockerVolumeExists(volumeName string) bool {
+	cmd := exec.Command("docker", "volume", "inspect", volumeName)
+	err := cmd.Run()
+	return err == nil
 }
 
 func createDockerVolume(name string, logger *log.Logger) error {

@@ -4,8 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-
+	"log"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,8 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/PortNumber53/task-sync/pkg/models"
-	"log"
+	"bytes"
+	"os/exec"
 )
 
 // sqlOpen is a package-level variable to allow mocking of sql.Open in tests.
@@ -293,6 +295,7 @@ func TestExecutePendingSteps(t *testing.T) {
 		t.Errorf("there were unfulfilled expectations: %s", err)
 	}
 }
+
 func TestGetStepInfo(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -303,7 +306,7 @@ func TestGetStepInfo(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		rows := sqlmock.NewRows([]string{"id", "task_id", "title", "settings", "results", "created_at", "updated_at"}).
 			AddRow(1, 101, "Step 1", `{"key":"val"}`, `{"res":"ok"}`, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
-		mock.ExpectQuery(`SELECT\s+s\.id,\s+s\.task_id,\s+s\.title,\s+s\.settings::text,\s+s\.results::text,\s+s\.created_at,\s+s\.updated_at\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*\$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+s\.id,\s+s\.task_id,\s+s\.title,\s+s\.settings::text,\s+s\.results::text,\s+s\.created_at,\s+s\.updated_at\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*\$1`)).
 			WithArgs(1).
 			WillReturnRows(rows)
 		info, err := GetStepInfo(db, 1)
@@ -319,7 +322,7 @@ func TestGetStepInfo(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		mock.ExpectQuery(`SELECT\s+s\.id,\s+s\.task_id,\s+s\.title,\s+s\.settings::text,\s+s\.results::text,\s+s\.created_at,\s+s\.updated_at\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*\$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+s\.id,\s+s\.task_id,\s+s\.title,\s+s\.settings::text,\s+s\.results::text,\s+s\.created_at,\s+s\.updated_at\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*\$1`)).
 			WithArgs(999).
 			WillReturnError(sql.ErrNoRows)
 		info, err := GetStepInfo(db, 999)
@@ -335,7 +338,7 @@ func TestGetStepInfo(t *testing.T) {
 	})
 
 	t.Run("db error", func(t *testing.T) {
-		mock.ExpectQuery(`SELECT\s+s\.id,\s+s\.task_id,\s+s\.title,\s+s\.settings::text,\s+s\.results::text,\s+s\.created_at,\s+s\.updated_at\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*\$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+s\.id,\s+s\.task_id,\s+s\.title,\s+s\.settings::text,\s+s\.results::text,\s+s\.created_at,\s+s\.updated_at\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*\$1`)).
 			WithArgs(2).
 			WillReturnError(sql.ErrConnDone)
 		info, err := GetStepInfo(db, 2)
@@ -360,18 +363,18 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("successful copy", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
 			WithArgs(101).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
 		rows := sqlmock.NewRows([]string{"title", "settings"}).
-			AddRow("test_step", "{}")
-		mock.ExpectQuery(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`).
+			AddRow("test_step", "{\"key\":\"val\"}")
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`)).
 			WithArgs(1).
 			WillReturnRows(rows)
 
 		mock.ExpectQuery("INSERT INTO steps").
-			WithArgs(101, "test_step", "{}").
+			WithArgs(101, "test_step", "{\"key\":\"val\"}").
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
 		mock.ExpectCommit()
 
@@ -389,7 +392,7 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("target task not found", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
 			WithArgs(999).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectRollback()
@@ -408,11 +411,11 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("source step not found", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
 			WithArgs(101).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
-		mock.ExpectQuery(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`)).
 			WithArgs(99).
 			WillReturnError(sql.ErrNoRows)
 		mock.ExpectRollback()
@@ -431,18 +434,18 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("insert fails", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
 			WithArgs(101).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
 		rows := sqlmock.NewRows([]string{"title", "settings"}).
-			AddRow("test_step", "{}")
-		mock.ExpectQuery(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`).
+			AddRow("test_step", "{\"key\":\"val\"}")
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`)).
 			WithArgs(1).
 			WillReturnRows(rows)
 
 		mock.ExpectQuery("INSERT INTO steps").
-			WithArgs(101, "test_step", "{}").
+			WithArgs(101, "test_step", "{\"key\":\"val\"}").
 			WillReturnError(fmt.Errorf("insert failed"))
 		mock.ExpectRollback()
 
@@ -460,11 +463,11 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("query fails", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
 			WithArgs(101).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
-		mock.ExpectQuery(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`)).
 			WithArgs(1).
 			WillReturnError(fmt.Errorf("query failed"))
 		mock.ExpectRollback()
@@ -490,9 +493,9 @@ func TestCheckDependencies(t *testing.T) {
 	defer db.Close()
 
 	t.Run("no dependencies", func(t *testing.T) {
-		mock.ExpectQuery(`SELECT COALESCE\s*\(\s*\(SELECT value FROM jsonb_each\s*\(settings\)\s*WHERE key = 'depends_on'\)\s*,\s*'\[\]'::jsonb\s*\)\s*::text\s*FROM steps WHERE id = \$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
 			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow("[]"))
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(`[]`))
 
 		stepExec := &models.StepExec{StepID: 1}
 		ok, err := models.CheckDependencies(db, stepExec)
@@ -509,11 +512,11 @@ func TestCheckDependencies(t *testing.T) {
 
 	t.Run("dependencies met", func(t *testing.T) {
 		dependsOnJSON := `[{"id": 2}, {"id": 3}]`
-		mock.ExpectQuery(`SELECT\s*COALESCE\s*\(\s*\(\s*SELECT\s+value\s+FROM\s+jsonb_each\s*\(\s*settings\s*\)\s*WHERE\s+key\s*=\s*'depends_on'\s*\)\s*,\s*'\[\]'::jsonb\s*\)\s*::text\s*FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
 			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(dependsOnJSON))
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(dependsOnJSON))
 
-		query := `SELECT\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*ANY\(\$1::int\[\]\)\s+AND\s+\(s\.results-\>\>'result'\s+IS\s+NULL\s+OR\s+s\.results-\>\>'result'\s+!=\s+'success'\)\s*\)`
+		query := regexp.MustCompile(`SELECT\s+NOT\s+EXISTS\(\s*SELECT\s+1\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*ANY\(\$1::int\[\]\)\s+AND\s+\(s\.results->>'result'\s+IS\s+NULL\s+OR\s+s\.results->>'result'\s+!=\s+'success'\)\)`)
 		mock.ExpectQuery(query).
 			WithArgs(pq.Array([]int{2, 3})).
 			WillReturnRows(sqlmock.NewRows([]string{"not_exists"}).AddRow(true))
@@ -533,11 +536,11 @@ func TestCheckDependencies(t *testing.T) {
 
 	t.Run("dependencies not met (one failed)", func(t *testing.T) {
 		dependsOnJSON := `[{"id": 2}, {"id": 3}]`
-		mock.ExpectQuery(`SELECT\s*COALESCE\s*\(\s*\(\s*SELECT\s+value\s+FROM\s+jsonb_each\s*\(\s*settings\s*\)\s*WHERE\s+key\s*=\s*'depends_on'\s*\)\s*,\s*'\[\]'::jsonb\s*\)\s*::text\s*FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
 			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(dependsOnJSON))
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(dependsOnJSON))
 
-		query := `SELECT\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*ANY\(\$1::int\[\]\)\s+AND\s+\(s\.results-\>\>'result'\s+IS\s+NULL\s+OR\s+s\.results-\>\>'result'\s+!=\s+'success'\)\s*\)`
+		query := regexp.MustCompile(`SELECT\s+NOT\s+EXISTS\(\s*SELECT\s+1\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*ANY\(\$1::int\[\]\)\s+AND\s+\(s\.results->>'result'\s+IS\s+NULL\s+OR\s+s\.results->>'result'\s+!=\s+'success'\)\)`)
 		mock.ExpectQuery(query).
 			WithArgs(pq.Array([]int{2, 3})).
 			WillReturnRows(sqlmock.NewRows([]string{"not_exists"}).AddRow(false))
@@ -557,11 +560,11 @@ func TestCheckDependencies(t *testing.T) {
 
 	t.Run("db error on dependency query", func(t *testing.T) {
 		dependsOnJSON := `[{"id": 2}]`
-		mock.ExpectQuery(`SELECT\s*COALESCE\s*\(\s*\(\s*SELECT\s+value\s+FROM\s+jsonb_each\s*\(\s*settings\s*\)\s*WHERE\s+key\s*=\s*'depends_on'\s*\)\s*,\s*'\[\]'::jsonb\s*\)\s*::text\s*FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
 			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(dependsOnJSON))
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(dependsOnJSON))
 
-		query := `SELECT\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*ANY\(\$1::int\[\]\)\s+AND\s+\(s\.results-\>\>'result'\s+IS\s+NULL\s+OR\s+s\.results-\>\>'result'\s+!=\s+'success'\)\s*\)`
+		query := regexp.MustCompile(`SELECT\s+NOT\s+EXISTS\(\s*SELECT\s+1\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*ANY\(\$1::int\[\]\)\s+AND\s+\(s\.results->>'result'\s+IS\s+NULL\s+OR\s+s\.results->>'result'\s+!=\s+'success'\)\)`)
 		mock.ExpectQuery(query).
 			WithArgs(pq.Array([]int{2})).
 			WillReturnError(fmt.Errorf("db error"))
@@ -580,7 +583,7 @@ func TestCheckDependencies(t *testing.T) {
 	})
 
 	t.Run("db error on initial query", func(t *testing.T) {
-		mock.ExpectQuery(`SELECT COALESCE\s*\(\s*\(SELECT value FROM jsonb_each\s*\(settings\)\s*WHERE key = 'depends_on'\)\s*,\s*'\[\]'::jsonb\s*\)\s*::text\s*FROM steps WHERE id = \$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
 			WithArgs(1).
 			WillReturnError(fmt.Errorf("db error"))
 
@@ -599,9 +602,9 @@ func TestCheckDependencies(t *testing.T) {
 
 	t.Run("invalid json for depends_on", func(t *testing.T) {
 		dependsOnJSON := `not-a-json`
-		mock.ExpectQuery(`SELECT COALESCE\s*\(\s*\(SELECT value FROM jsonb_each\s*\(settings\)\s*WHERE key = 'depends_on'\)\s*,\s*'\[\]'::jsonb\s*\)\s*::text\s*FROM steps WHERE id = \$1`).
+		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
 			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(dependsOnJSON))
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(dependsOnJSON))
 
 		stepExec := &models.StepExec{StepID: 1}
 		ok, err := models.CheckDependencies(db, stepExec)
@@ -616,6 +619,7 @@ func TestCheckDependencies(t *testing.T) {
 		}
 	})
 }
+
 func TestClearStepResults(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -661,4 +665,59 @@ func TestClearStepResults(t *testing.T) {
 			t.Errorf("unmet expectations: %v", err)
 		}
 	})
+}
+
+func TestProcessDockerExtractVolumeStep(t *testing.T) {
+	db, mockDB, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	stepExec := &models.StepExec{
+		StepID:   1,
+		TaskID:   1,
+		Settings: `{"docker_extract_volume":{"volume_name":"task_1_volume","image_id":"test-image","app_folder":"/path/to/app"}}`,
+		LocalPath: "/task/path",
+	}
+	logger := log.New(io.Discard, "", 0)
+
+	// Mock task settings query
+	mockDB.ExpectQuery(regexp.MustCompile(`SELECT\s+settings\s+FROM\s+tasks\s+WHERE\s+id\s+=\s*\$1`)).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"settings"}).AddRow(`{"docker":{"image_id":"test-image"}}`))
+
+	// Mock CommandFunc for Docker calls
+	origCommand := CommandFunc
+	defer func() { CommandFunc = origCommand }()
+	CommandFunc = func(name string, arg ...string) *exec.Cmd {
+		args := append([]string{}, arg...)
+		cs := exec.Command(name, args...)  // Use exec.Command for base creation in mock
+		cs.Stdout = &bytes.Buffer{}
+		cs.Stderr = &bytes.Buffer{}
+		if name == "docker" && len(args) > 0 {
+			if args[0] == "volume" && args[1] == "create" && args[2] == "task_1_volume" {
+				cs = exec.Command("true") // Simulate success
+			} else if args[0] == "run" && strings.Contains(strings.Join(args, " "), "--name extract_vol_container_1") {
+				cs = exec.Command("true")
+			} else if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "installCmd") {
+				cs = exec.Command("true")
+			} else if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "rsyncCmd") {
+				cs = exec.Command("true")
+			} else if args[0] == "rm" && args[1] == "-f" && strings.Contains(args[2], "extract_vol_container_") {
+				cs = exec.Command("true")
+			}
+		}
+		return cs
+	}
+
+	// Run the step and check for no error
+	err = ProcessDockerExtractVolumeStep(db, stepExec, logger)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+
+	if err := mockDB.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled DB expectations: %s", err)
+	}
 }

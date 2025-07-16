@@ -17,6 +17,7 @@ type TaskSettings struct {
 	Docker Docker `json:"docker"`
 	AssignContainers map[string]string `json:"assign_containers"`
 	AssignedContainers map[string]string `json:"assigned_containers"`
+	VolumeName string `json:"volume_name"`
 	// Add other fields as needed based on project requirements
 }
 

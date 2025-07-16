@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -196,6 +197,7 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 	// Start a persistent container to copy container_folder into the Docker volume
 	prepContainerName := fmt.Sprintf("task_%d_step_%d_prep", taskID, stepExec.StepID)
 	prepParams := []string{
+		"--platform", "linux/amd64",
 		"-d", // detached
 		"--name", prepContainerName,
 		"-v", fmt.Sprintf("%s:%s", volumeName, "/original"),
@@ -233,11 +235,12 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 		tmpCopyContainer := fmt.Sprintf("task_%d_step_%d_copyout%d", taskID, stepExec.StepID, i)
 		tmpCopyParams := []string{
 			"--rm",
+			"--platform", "linux/amd64",
 			"-v", fmt.Sprintf("%s:/original:ro", volumeName),
 			"-v", fmt.Sprintf("%s:%s", hostFolder, containerFolder),
 			"--entrypoint", "/bin/bash",
 			imageTag,
-			"-c", fmt.Sprintf("cp -r /original/. %s", containerFolder),
+			"-c", "tar cf - /original | tar xf - -C " + containerFolder,
 		}
 		logger.Printf("[COPYOUT] Copying from Docker volume to host folder using container %s", tmpCopyContainer)
 		if err := runDockerCommand(tmpCopyParams, tmpCopyContainer, logger, false); err != nil {
@@ -245,11 +248,19 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 			return err
 		}
 
+		// After successful copy, create a flag file to signal completion
+		flagFilePath := filepath.Join(hostFolder, "copy_done.flag")
+		if err := os.WriteFile(flagFilePath, []byte{}, 0644); err != nil {
+			logger.Printf("Error creating flag file: %v", err)
+			return fmt.Errorf("failed to create flag file: %w", err)
+		}
+
+		// Removed git init check as per user feedback that the directory should already be initialized
 		artifactContainerName := fmt.Sprintf("task_%d_step_%d_artifact%d", taskID, stepExec.StepID, i+1)
 		artifactParams := []string{
 			"--user=0:0", // Run as root by default
-			"--rm",
 			"--platform", "linux/amd64",
+			"--rm",
 			"--cpus", "2",
 			"--memory", "1G",
 			"--pids-limit", "512",
@@ -266,7 +277,18 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 			return err
 		}
 		logger.Printf("[CONTAINER] Artifact container %s created successfully", artifactContainerName)
-		// Step 6: Run git commands and apply patch inside artifact container
+
+		// In artifact container setup, wait for the flag file before git operations
+		waitCmd := "while [ ! -f " + containerFolder + "/copy_done.flag ]; do sleep 1; done"
+		if err := execInContainer(artifactContainerName, waitCmd, logger); err != nil {
+			logger.Printf("Error waiting for copy_done flag: %v", err)
+			if !config.KeepForever {
+				removeDockerContainer(artifactContainerName, logger)
+			}
+			return fmt.Errorf("failed to wait for copy completion: %w", err)
+		}
+
+		// Then proceed with git commands
 		gitSafeCmd := "git -c safe.directory=/app/ansible reset --hard && git -c safe.directory=/app/ansible clean -fd"
 		if err := execInContainer(artifactContainerName, gitSafeCmd, logger); err != nil {
 			if !config.KeepForever {
@@ -281,25 +303,26 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 			}
 			return err
 		}
-		// Copy patch file from host into the container before applying
+		// Corrected copy using tar to handle symlinks reliably
 		patchHostPath := filepath.Join(stepExec.LocalPath, solution)
-		patchContainerPath := fmt.Sprintf("/app/ansible/%s", solution)
-		cpCmd := exec.Command("docker", "cp", patchHostPath, artifactContainerName+":"+patchContainerPath)
-		logger.Printf("Copying patch file %s to container %s:%s", patchHostPath, artifactContainerName, patchContainerPath)
-		if output, err := cpCmd.CombinedOutput(); err != nil {
-			logger.Printf("Error copying patch file: %v, output: %s", err, string(output))
+		patchContainerPath := fmt.Sprintf("%s/%s", config.ContainerFolder, solution)
+		tarCmd := exec.Command("tar", "czf", "-", patchHostPath)
+		output, err := tarCmd.Output()
+		if err != nil {
+			logger.Printf("Error creating tar archive: %v", err)
 			if !config.KeepForever {
 				removeDockerContainer(artifactContainerName, logger)
 			}
-			return fmt.Errorf("failed to copy patch file to container: %w", err)
+			return fmt.Errorf("failed to create tar archive: %w", err)
 		}
-		// Apply solution patch
-		patchCmd := fmt.Sprintf("git -c safe.directory=/app/ansible apply %s", patchContainerPath)
-		if err := execInContainer(artifactContainerName, patchCmd, logger); err != nil {
+		dockerExecCmd := exec.Command("docker", "exec", "-i", artifactContainerName, "tar", "xzf", "-", "-C", filepath.Dir(patchContainerPath))
+		dockerExecCmd.Stdin = bytes.NewReader(output)
+		if execOutput, execErr := dockerExecCmd.CombinedOutput(); execErr != nil {
+			logger.Printf("Error extracting tar in container: %v, output: %s", execErr, string(execOutput))
 			if !config.KeepForever {
 				removeDockerContainer(artifactContainerName, logger)
 			}
-			return err
+			return fmt.Errorf("failed to copy patch file to container: %w", execErr)
 		}
 		logger.Printf("Applied patch %s in container %s", solution, artifactContainerName)
 		artifactContainers[solution] = artifactContainerName

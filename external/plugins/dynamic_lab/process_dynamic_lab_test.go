@@ -66,10 +66,10 @@ func TestProcessDynamicLabSteps_ContainerIdInheritance(t *testing.T) {
 		},
 	})
 
-	rows := sqlmock.NewRows([]string{"id", "task_id", "title", "settings", "local_path"}).
-		AddRow(1, 1, "Test Inheritance Step", string(dynamicLabSettings), "/tmp")
+	rows := sqlmock.NewRows([]string{"id", "task_id", "title", "settings", "depends_on"}).
+		AddRow(1, 1, "Test Inheritance Step", string(dynamicLabSettings), `[]`)
 
-	mock.ExpectQuery("SELECT s.id, s.task_id, s.title, s.settings, COALESCE").WillReturnRows(rows)
+	mock.ExpectQuery(`SELECT id, task_id, title, settings FROM steps WHERE settings LIKE $1 ORDER BY id`).WithArgs("%dynamic_lab%").WillReturnRows(rows)
 	mock.ExpectQuery("SELECT results FROM steps WHERE id").WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"results"}).AddRow(sql.NullString{String: string(dependencyResults), Valid: true}))
 	mock.ExpectExec(`DELETE FROM steps WHERE settings->'generated_by' \? \$1`).WithArgs("1").WillReturnResult(sqlmock.NewResult(1, 1)) // deleteGeneratedSteps
 	mock.ExpectQuery("SELECT id FROM tasks WHERE").WithArgs("1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))             // getTaskByID

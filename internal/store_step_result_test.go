@@ -19,7 +19,7 @@ func TestStoreStepResult(t *testing.T) {
 		}
 		defer db.Close()
 
-		mock.ExpectExec("UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2").
+		mock.ExpectExec(`UPDATE steps SET results = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`).
 			WithArgs(resultJSON, 1).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -39,7 +39,7 @@ func TestStoreStepResult(t *testing.T) {
 		}
 		defer db.Close()
 
-		mock.ExpectExec("UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2").
+		mock.ExpectExec(`UPDATE steps SET results = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`).
 			WithArgs(resultJSON, 1).
 			WillReturnResult(sqlmock.NewResult(0, 0)) // 0 rows affected
 
@@ -59,7 +59,7 @@ func TestStoreStepResult(t *testing.T) {
 		}
 		defer db.Close()
 
-		mock.ExpectExec("UPDATE steps SET results = $1::jsonb, updated_at = now() WHERE id = $2").
+		mock.ExpectExec(`UPDATE steps SET results = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`).
 			WithArgs(resultJSON, 2).
 			WillReturnError(sql.ErrConnDone)
 

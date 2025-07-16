@@ -38,7 +38,7 @@ func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *l
 			processDockerShellSteps(db, se.StepID)
 			return nil
 		},
-		"docker_volume_pool": ProcessDockerVolumePoolStep,
+		"docker_volume_pool":    ProcessDockerVolumePoolStep,
 		"docker_extract_volume": ProcessDockerExtractVolumeStep,
 		"file_exists": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			if se != nil && se.StepID != 0 {
@@ -46,7 +46,9 @@ func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *l
 			}
 			return processAllFileExistsSteps(db, logger)
 		},
-		"rubrics_import": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error { return processRubricsImportSteps(db, se.StepID) },
+		"rubrics_import": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
+			return processRubricsImportSteps(db, se.StepID)
+		},
 		"rubric_set": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			// If a specific step is provided (from ProcessSpecificStep), run only that.
 			if se != nil && se.StepID != 0 {
@@ -118,7 +120,6 @@ func ProcessStepsForTask(db *sql.DB, taskID int) error {
 	}
 	return nil
 }
-
 
 func executePendingSteps(db *sql.DB, stepProcessors map[string]func(*sql.DB, *models.StepExec, *log.Logger) error) error {
 	// Iterate over the map and call each function
@@ -496,7 +497,7 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	logger.Printf("Step configuration: %s", string(configJSON))
 
 	// Construct volume name based on task ID
-	volumeName := fmt.Sprintf("volume_%d", se.TaskID)
+	volumeName := fmt.Sprintf("volume_task_%d", se.TaskID)
 
 	// Fetch image ID from step config or fall back to task settings
 	imageID := config.GetImageID()
@@ -529,7 +530,7 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	if err != nil {
 		return fmt.Errorf("failed to get task settings: %w", err)
 	}
-	taskSettings.VolumeName = volumeName  // Set the volume name after adding the field to TaskSettings
+	taskSettings.VolumeName = volumeName // Set the volume name after adding the field to TaskSettings
 	err = models.UpdateTaskSettings(db, se.TaskID, taskSettings)
 	if err != nil {
 		return fmt.Errorf("failed to update task settings: %w", err)
@@ -546,60 +547,92 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	}
 	logger.Printf("Command succeeded: volume created %s", volumeName)
 
-	// Start container with volume mounted and bind mount for app folder
-	containerName := fmt.Sprintf("extract_vol_container_%d", se.StepID) // Unique name per step ID
-	appFolderPath := filepath.Join(se.LocalPath, config.AppFolder) // Join local path with app folder
-	cmd = CommandFunc("docker", "run", "-d", "--platform", "linux/amd64", "--name", containerName, "-v", volumeName+":/original", "-v", appFolderPath+":/src", imageID, "tail", "-f", "/dev/null") // Use tail -f to keep container running
-	logger.Printf("Executing command: docker run -d --platform linux/amd64 --name %s -v %s:/original -v %s:/src %s tail -f /dev/null", containerName, volumeName, appFolderPath, imageID)
+	appHostPath := filepath.Join(se.LocalPath, "original/") + "/"
+	solution1Path := filepath.Join(se.LocalPath, "solution1_volume/") + "/"
+	solution2Path := filepath.Join(se.LocalPath, "solution2_volume/") + "/"
+	solution3Path := filepath.Join(se.LocalPath, "solution3_volume/") + "/"
+	solution4Path := filepath.Join(se.LocalPath, "solution4_volume/") + "/"
+	containerName := fmt.Sprintf("extract_vol_container_%d", se.StepID)
+	cmd = CommandFunc("docker", "run", "-d", "--platform", "linux/amd64", "--name", containerName, "-v", volumeName+":/original_volume", "-v", appHostPath+":/original", "-v", solution1Path+":/solution1", "-v", solution2Path+":/solution2", "-v", solution3Path+":/solution3", "-v", solution4Path+":/solution4", imageID, "tail", "-f", "/dev/null")
+	logger.Printf("Executing command: docker run -d --platform linux/amd64 --name %s -v %s:/original_volume -v %s:/orignal -v %s:/solution1 -v %s:/solution2 -v %s:/solution3 -v %s:/solution4 %s tail -f /dev/null", containerName, volumeName, appHostPath, solution1Path, solution2Path, solution3Path, solution4Path, imageID)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
-		logger.Printf("Command output: %s", string(output))
-		// Clean up on failure
-		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupOutput, cleanupErr := cleanupCmd.CombinedOutput()
-		if cleanupErr != nil {
-			logger.Printf("Cleanup command output: %s", string(cleanupOutput))
-			logger.Printf("Failed to remove container %s: %v", containerName, cleanupErr)
-		}
-		return fmt.Errorf("failed to start container: %v, output: %s", err, string(output))
+		logger.Printf("Command failed: %s", string(output))
+		return fmt.Errorf("failed to start container: %w", err)
 	}
 	logger.Printf("Command succeeded: container started %s", containerName)
 
-	// Install rsync in the container (Debian-based)
 	installCmd := "apt-get update && apt-get install -y rsync"
 	execCmd := CommandFunc("docker", "exec", containerName, "bash", "-c", installCmd)
-	logger.Printf("Executing command: docker exec %s bash -c 'apt-get update && apt-get install -y rsync'", containerName)
-	installOutput, installErr := execCmd.CombinedOutput()
-	if installErr != nil {
-		logger.Printf("Command output: %s", string(installOutput))
-		// Clean up on failure
+	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, installCmd)
+	output, err = execCmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Command failed: %s", string(output))
 		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupOutput, cleanupErr := cleanupCmd.CombinedOutput()
-		if cleanupErr != nil {
-			logger.Printf("Cleanup command output: %s", string(cleanupOutput))
-			logger.Printf("Failed to remove container %s: %v", containerName, cleanupErr)
-		}
-		return fmt.Errorf("failed to install rsync: %v, output: %s", installErr, string(installOutput))
+		cleanupCmd.Run()
+		return fmt.Errorf("failed to install rsync: %w", err)
 	}
-	logger.Printf("Command succeeded: rsync installed in container")
+	logger.Printf("Command succeeded: rsync installed")
 
-	// Run rsync command inside container
-	rsyncCmd := "rsync -a --delete-during /src/ /original/"
-	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd)
-	logger.Printf("Executing command: docker exec %s bash -c 'rsync -a --delete-during /src/ /original/'", containerName)
-	rsyncOutput, rsyncErr := execCmd.CombinedOutput()
-	if rsyncErr != nil {
-		logger.Printf("Command output: %s", string(rsyncOutput))
-		// Clean up on failure
+	rsyncCmd1 := fmt.Sprintf("rsync -a --delete-during %s/ /original/", config.AppFolder)
+	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd1)
+	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd1)
+	output, err = execCmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Command failed: %s", string(output))
 		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupOutput, cleanupErr := cleanupCmd.CombinedOutput()
-		if cleanupErr != nil {
-			logger.Printf("Cleanup command output: %s", string(cleanupOutput))
-			logger.Printf("Failed to remove container %s: %v", containerName, cleanupErr)
-		}
-		return fmt.Errorf("failed to run rsync: %v, output: %s", rsyncErr, string(rsyncOutput))
+		cleanupCmd.Run()
+		return fmt.Errorf("rsync from /src/ to /original/ failed: %w", err)
 	}
-	logger.Printf("Command succeeded: rsync completed")
+	logger.Printf("Command succeeded: rsync from %2 to /original/ completed", config.AppFolder)
+
+	rsyncCmd2 := "rsync -a --delete-during /original/ /solution1/"
+	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd2)
+	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd2)
+	output, err = execCmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Command failed: %s", string(output))
+		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+		cleanupCmd.Run()
+		return fmt.Errorf("rsync from /original/ to /solution1/ failed: %w", err)
+	}
+	logger.Printf("Command succeeded: rsync from /original/ to /solution1/ completed")
+
+	rsyncCmd3 := "rsync -a --delete-during /original/ /solution2/"
+	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd3)
+	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd3)
+	output, err = execCmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Command failed: %s", string(output))
+		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+		cleanupCmd.Run()
+		return fmt.Errorf("rsync from /original/ to /solution2/ failed: %w", err)
+	}
+	logger.Printf("Command succeeded: rsync from /original/ to /solution2/ completed")
+
+	rsyncCmd4 := "rsync -a --delete-during /original/ /solution3/"
+	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd4)
+	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd4)
+	output, err = execCmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Command failed: %s", string(output))
+		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+		cleanupCmd.Run()
+		return fmt.Errorf("rsync from /original/ to /solution3/ failed: %w", err)
+	}
+	logger.Printf("Command succeeded: rsync from /original/ to /solution3/ completed")
+
+	rsyncCmd5 := "rsync -a --delete-during /original/ /solution4/"
+	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd5)
+	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd5)
+	output, err = execCmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Command failed: %s", string(output))
+		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+		cleanupCmd.Run()
+		return fmt.Errorf("rsync from /original/ to /solution4/ failed: %w", err)
+	}
+	logger.Printf("Command succeeded: rsync from /original/ to /solution4/ completed")
 
 	// Remove the container after operation
 	cmd = CommandFunc("docker", "rm", "-f", containerName)

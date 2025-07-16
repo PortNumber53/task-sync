@@ -16,7 +16,12 @@ type TriggerCheckResult struct {
 
 // CheckArtifactContainersExist returns true if all containers exist (docker ps -a)
 func CheckArtifactContainersExist(containerNames []string, logger *log.Logger) bool {
+	logger.Printf("Checking existence for container names: %v", containerNames)
 	for _, name := range containerNames {
+		if name == "" {
+			logger.Printf("Empty container name provided, skipping check")
+			continue // Skip empty names to avoid invalid logs
+		}
 		cmd := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}")
 		output, err := cmd.CombinedOutput()
 		if err != nil {

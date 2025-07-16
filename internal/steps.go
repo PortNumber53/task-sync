@@ -525,17 +525,19 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 		return fmt.Errorf("Docker image %s does not exist: %w", imageID, err)
 	}
 
-	// Store volume name in task settings
+	// Store volume name and app_folder in task settings
 	taskSettings, err := models.GetTaskSettings(db, se.TaskID)
 	if err != nil {
 		return fmt.Errorf("failed to get task settings: %w", err)
 	}
-	taskSettings.VolumeName = volumeName // Set the volume name after adding the field to TaskSettings
+	taskSettings.VolumeName = volumeName
+	taskSettings.AppFolder = config.AppFolder // Store the app_folder in task settings
+
 	err = models.UpdateTaskSettings(db, se.TaskID, taskSettings)
 	if err != nil {
 		return fmt.Errorf("failed to update task settings: %w", err)
 	}
-	logger.Printf("Updated task settings with volume name: %s", volumeName)
+	logger.Printf("Updated task settings with volume name: %s and app_folder: %s", volumeName, config.AppFolder)
 
 	// Create Docker volume
 	cmd := CommandFunc("docker", "volume", "create", volumeName)

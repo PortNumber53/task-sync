@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -36,12 +35,18 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 		return runDockerVolumePoolStep(db, stepExec, stepLogger)
 	}
 
-	// Gather artifact container and volume names
-	artifactContainers := make([]string, 0, len(config.Triggers.Containers))
-	artifactVolumes := make([]string, 0, len(config.Triggers.Containers))
+	// Initialize or update Triggers.Containers if empty
+	if len(config.Triggers.Containers) == 0 {
+		config.Triggers.Containers = initializeContainerMap(stepExec.TaskID, config.Solutions)
+		stepLogger.Printf("Initialized Triggers.Containers: %v", config.Triggers.Containers)
+	}
+
+	// Gather container and volume names for checks
+	containerList := make([]string, 0, len(config.Triggers.Containers))
+	volumeList := make([]string, 0, len(config.Triggers.Containers))
 	for patch, container := range config.Triggers.Containers {
-		artifactContainers = append(artifactContainers, container)
-		artifactVolumes = append(artifactVolumes, fmt.Sprintf("task_%d_%s_volume", stepExec.TaskID, patch))
+		containerList = append(containerList, container)
+		volumeList = append(volumeList, fmt.Sprintf("task_%d_%s_volume", stepExec.TaskID, patch))
 	}
 
 	// Check image triggers
@@ -51,10 +56,10 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	}
 
 	// Check container existence
-	containersExist := CheckArtifactContainersExist(artifactContainers, stepLogger)
+	containersExist := CheckArtifactContainersExist(containerList, stepLogger)
 
 	// Check volume existence
-	volumesExist := CheckArtifactVolumesExist(artifactVolumes, stepLogger)
+	volumesExist := CheckArtifactVolumesExist(volumeList, stepLogger)
 
 	// Check file hash triggers
 	filesChanged, err := checkFileHashTriggers(db, stepExec, config, stepLogger)
@@ -160,245 +165,308 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 	if err := json.Unmarshal([]byte(stepExec.Settings), &settings); err != nil {
 		return fmt.Errorf("failed to unmarshal step settings: %w", err)
 	}
-	logger.Printf("Unmarshaled settings: %+v", settings.DockerVolumePool)
-	logger.Printf("Solutions loaded: %v", settings.DockerVolumePool.Solutions)
 	config := &settings.DockerVolumePool
+	
+	// Initialize flags for container recreation
+	recreateNeeded := false
+	forceRecreate := config.Force
 
-	// Get task ID and solutions from Triggers.Containers keys
-	taskID := stepExec.TaskID
-	solutionsMap := config.Triggers.Containers
-	solutions := make([]string, 0, len(solutionsMap))
-	for sol := range solutionsMap {
-		solutions = append(solutions, sol)
-	}
-
-	// Prepare to collect artifact container names for output
-	artifactContainers := make(map[string]string)
-
-	localPath := stepExec.LocalPath
-	// --- PREPARATION: Create a single Docker volume for the task ---
-	volumeName := fmt.Sprintf("step_%d_original_volume", stepExec.StepID)
-	containerFolder := config.ContainerFolder
-	imageTag := config.Triggers.ImageTag
-
-	// Create the Docker volume if it doesn't exist
-	logger.Printf("[VOLUME] Checking if Docker volume exists: %s", volumeName)
-	if !dockerVolumeExists(volumeName) {
-		logger.Printf("[VOLUME] Creating Docker volume: %s", volumeName)
-		if err := createDockerVolume(volumeName, logger); err != nil {
-			logger.Printf("[VOLUME] Error creating Docker volume %s: %v", volumeName, err)
-			return err
-		}
-		logger.Printf("[VOLUME] Successfully created Docker volume: %s", volumeName)
-	} else {
-		logger.Printf("[VOLUME] Docker volume %s already exists", volumeName)
-	}
-
-	// Start a persistent container to copy container_folder into the Docker volume
-	prepContainerName := fmt.Sprintf("task_%d_step_%d_prep", taskID, stepExec.StepID)
-	prepParams := []string{
-		"--platform", "linux/amd64",
-		"-d", // detached
-		"--name", prepContainerName,
-		"-v", fmt.Sprintf("%s:%s", volumeName, "/original"),
-		"--entrypoint", "/bin/bash",
-		imageTag,
-		"-c", fmt.Sprintf("cp -r %s/. /original/ && while true; do sleep 30; done", containerFolder),
-	}
-	logger.Printf("[PREP] Running Docker command to create persistent prep container: %s with params: %v", prepContainerName, prepParams)
-	if err := runDockerCommand(prepParams, prepContainerName, logger, true); err != nil {
-		logger.Printf("[PREP] Error running Docker command for prep container %s: %v", prepContainerName, err)
-		return err
-	}
-	logger.Printf("[PREP] Prep container %s created and running", prepContainerName)
-
-	// --- For each solution: create host folder and copy from Docker volume ---
-	var hostFolder string
-	for i, solution := range solutions {
-		hostFolder = filepath.Join(localPath, fmt.Sprintf("step_%d_volume_solution%d", stepExec.StepID, i+1))
-		logger.Printf("[SOLUTION] Preparing host folder for solution %s", solution)
-		if _, err := os.Stat(hostFolder); os.IsNotExist(err) {
-			logger.Printf("[SOLUTION] Host folder %s does not exist. Creating...", hostFolder)
-			if err := os.MkdirAll(hostFolder, 0755); err != nil {
-				logger.Printf("[SOLUTION] Error creating host folder %s: %v", hostFolder, err)
-				return err
-			}
-			logger.Printf("[SOLUTION] Successfully created host folder: %s", hostFolder)
-		} else if err != nil {
-			logger.Printf("[SOLUTION] Error checking host folder %s: %v", hostFolder, err)
-			return err
-		} else {
-			logger.Printf("[SOLUTION] Host folder %s already exists", hostFolder)
-		}
-
-		// Use a temp container to copy from Docker volume to host folder
-		tmpCopyContainer := fmt.Sprintf("task_%d_step_%d_copyout%d", taskID, stepExec.StepID, i)
-		tmpCopyParams := []string{
-			"--rm",
-			"--platform", "linux/amd64",
-			"-v", fmt.Sprintf("%s:/original:ro", volumeName),
-			"-v", fmt.Sprintf("%s:%s", hostFolder, containerFolder),
-			"--entrypoint", "/bin/bash",
-			imageTag,
-			"-c", "tar cf - /original | tar xf - -C " + containerFolder,
-		}
-		logger.Printf("[COPYOUT] Copying from Docker volume to host folder using container %s", tmpCopyContainer)
-		if err := runDockerCommand(tmpCopyParams, tmpCopyContainer, logger, false); err != nil {
-			logger.Printf("[COPYOUT] Error copying from Docker volume to host folder in container %s: %v", tmpCopyContainer, err)
-			return err
-		}
-
-		// After successful copy, create a flag file to signal completion
-		flagFilePath := filepath.Join(hostFolder, "copy_done.flag")
-		if err := os.WriteFile(flagFilePath, []byte{}, 0644); err != nil {
-			logger.Printf("Error creating flag file: %v", err)
-			return fmt.Errorf("failed to create flag file: %w", err)
-		}
-
-		// Removed git init check as per user feedback that the directory should already be initialized
-		artifactContainerName := fmt.Sprintf("task_%d_step_%d_artifact%d", taskID, stepExec.StepID, i+1)
-		artifactParams := []string{
-			"--user=0:0", // Run as root by default
-			"--platform", "linux/amd64",
-			"--rm",
-			"--cpus", "2",
-			"--memory", "1G",
-			"--pids-limit", "512",
-			"-v", fmt.Sprintf("%s:%s", hostFolder, containerFolder), // bind mount
-			"-v", fmt.Sprintf("%s:/original:ro", volumeName), // docker volume read-only
-			"--entrypoint", "/bin/bash",
-			imageTag,
-			"--login",
-		}
-		artifactParams = addKeepAliveCommand(artifactParams, config.KeepForever, logger)
-		logger.Printf("[CONTAINER] Running Docker command to create artifact container: %s with params: %v", artifactContainerName, artifactParams)
-		if err := runDockerCommand(artifactParams, artifactContainerName, logger, config.KeepForever); err != nil {
-			logger.Printf("[CONTAINER] Error running Docker command for artifact container %s: %v", artifactContainerName, err)
-			return err
-		}
-		logger.Printf("[CONTAINER] Artifact container %s created successfully", artifactContainerName)
-
-		// In artifact container setup, wait for the flag file before git operations
-		waitCmd := "while [ ! -f " + containerFolder + "/copy_done.flag ]; do sleep 1; done"
-		if err := execInContainer(artifactContainerName, waitCmd, logger); err != nil {
-			logger.Printf("Error waiting for copy_done flag: %v", err)
-			if !config.KeepForever {
-				removeDockerContainer(artifactContainerName, logger)
-			}
-			return fmt.Errorf("failed to wait for copy completion: %w", err)
-		}
-
-		// Then proceed with git commands
-		gitSafeCmd := "git -c safe.directory=/app/ansible reset --hard && git -c safe.directory=/app/ansible clean -fd"
-		if err := execInContainer(artifactContainerName, gitSafeCmd, logger); err != nil {
-			if !config.KeepForever {
-				removeDockerContainer(artifactContainerName, logger)
-			}
-			return err
-		}
-		gitCleanCmd := "git -c safe.directory=/app/ansible reset --hard && git -c safe.directory=/app/ansible clean -fd"
-		if err := execInContainer(artifactContainerName, gitCleanCmd, logger); err != nil {
-			if !config.KeepForever {
-				removeDockerContainer(artifactContainerName, logger)
-			}
-			return err
-		}
-		// Corrected copy using tar to handle symlinks reliably
-		patchHostPath := filepath.Join(stepExec.LocalPath, solution)
-		patchContainerPath := fmt.Sprintf("%s/%s", config.ContainerFolder, solution)
-		tarCmd := exec.Command("tar", "czf", "-", patchHostPath)
-		output, err := tarCmd.Output()
-		if err != nil {
-			logger.Printf("Error creating tar archive: %v", err)
-			if !config.KeepForever {
-				removeDockerContainer(artifactContainerName, logger)
-			}
-			return fmt.Errorf("failed to create tar archive: %w", err)
-		}
-		dockerExecCmd := exec.Command("docker", "exec", "-i", artifactContainerName, "tar", "xzf", "-", "-C", filepath.Dir(patchContainerPath))
-		dockerExecCmd.Stdin = bytes.NewReader(output)
-		if execOutput, execErr := dockerExecCmd.CombinedOutput(); execErr != nil {
-			logger.Printf("Error extracting tar in container: %v, output: %s", execErr, string(execOutput))
-			if !config.KeepForever {
-				removeDockerContainer(artifactContainerName, logger)
-			}
-			return fmt.Errorf("failed to copy patch file to container: %w", execErr)
-		}
-		logger.Printf("Applied patch %s in container %s", solution, artifactContainerName)
-		artifactContainers[solution] = artifactContainerName
-	}
-
-	// After all containers, store artifact container names and image ID in Artifacts
-	if config.Artifacts == nil {
-		config.Artifacts = make(map[string]interface{})
-	}
-	config.Artifacts["containers"] = artifactContainers
-
-	// Update triggers.containers with artifact container names
-	if config.Triggers.Containers == nil {
-		config.Triggers.Containers = make(map[string]string)
-	}
-	for patch, container := range artifactContainers {
-		config.Triggers.Containers[patch] = container
-	}
-
-	// Always update assigned_containers in task settings
+	// Get task settings to access local_path and app_folder
 	taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
 	if err != nil {
-		logger.Printf("Warning: Could not fetch task settings to update assigned_containers: %v", err)
-	} else {
-		taskSettings.AssignedContainers = make(map[string]string)
-		for patch, container := range artifactContainers {
-			taskSettings.AssignedContainers[patch] = container
-		}
-		if err := models.UpdateTaskSettings(db, stepExec.TaskID, taskSettings); err != nil {
-			logger.Printf("Warning: Could not update assigned_containers in task settings: %v", err)
-		} else {
-			logger.Printf("Updated assigned_containers in task settings for task %d", stepExec.TaskID)
-		}
+		return fmt.Errorf("failed to get task settings: %w", err)
 	}
 
-	// Update triggers.files with current file hashes
-	if config.Triggers.Files == nil {
-		config.Triggers.Files = make(map[string]string)
-	}
-	for file := range config.Triggers.Files {
-		filePath := filepath.Join(stepExec.LocalPath, file)
-		hash, err := models.GetSHA256(filePath)
+	// Ensure we have app_folder set
+	if taskSettings.AppFolder == "" {
+		// Fallback to fetching from dependency if not set in task settings
+		appFolder, err := fetchAppFolderFromDependency(db, stepExec, config, logger)
 		if err != nil {
-			logger.Printf("Warning: Failed to compute hash for %s: %v", filePath, err)
-			continue
+			return fmt.Errorf("failed to fetch app_folder from dependency: %w", err)
 		}
-		config.Triggers.Files[file] = hash
+		taskSettings.AppFolder = appFolder
 	}
 
-	// Retrieve image ID for the used image tag
-	imageID := ""
-	inspectCmd := exec.Command("docker", "inspect", "--format", "{{.Id}}", config.Triggers.ImageTag)
-	if output, err := inspectCmd.CombinedOutput(); err == nil {
-		imageID = strings.TrimSpace(string(output))
+	// Initialize or update Triggers.Containers if empty or if any container name is empty
+	recreateContainers := false
+	if len(config.Triggers.Containers) == 0 {
+		recreateContainers = true
 	} else {
-		logger.Printf("Warning: Failed to get image ID for image tag %s: %v, output: %s", config.Triggers.ImageTag, err, string(output))
+		// Check if any container name is empty
+		for patchName, containerName := range config.Triggers.Containers {
+			if containerName == "" {
+				logger.Printf("Empty container name found for %s, will recreate containers", patchName)
+				recreateContainers = true
+				break
+			}
+		}
 	}
-	config.Artifacts["image_id"] = imageID
 
-	// Update triggers.image_id as well
-	config.Triggers.ImageID = imageID
+	if recreateContainers {
+		// If no solutions specified, use default solution files based on pool_size
+		if len(config.Solutions) == 0 {
+			config.Solutions = make([]string, config.PoolSize)
+			for i := 0; i < config.PoolSize; i++ {
+				config.Solutions[i] = fmt.Sprintf("solution%d.patch", i+1)
+			}
+			logger.Printf("Initialized solutions from pool_size: %v", config.Solutions)
+		}
+
+		// Initialize container map with proper names
+		containerMap := make(map[string]string)
+		for _, solution := range config.Solutions {
+			containerMap[solution] = getContainerName(stepExec.TaskID, solution)
+		}
+		config.Triggers.Containers = containerMap
+		logger.Printf("Initialized Triggers.Containers: %v", config.Triggers.Containers)
+
+		// Force recreation of containers since we just initialized the container map
+		recreateNeeded = true
+	}
+
+	// Check if we need to recreate containers based on image tag/ID changes or missing containers
+	recreateNeeded = false // Reset the flag before checking containers
+
+	// Check each container individually
+	for patchName, containerName := range config.Triggers.Containers {
+		exists, err := checkContainerExists(containerName)
+		if err != nil {
+			logger.Printf("Error checking if container %s exists: %v", containerName, err)
+			recreateNeeded = true
+			break
+		}
+
+		if !exists {
+			logger.Printf("Container %s (for %s) does not exist, will recreate all", containerName, patchName)
+			recreateNeeded = true
+			break
+		}
+
+		// Check if container needs recreation due to image changes
+		shouldRecreate, err := shouldRecreateContainer(containerName, config.Triggers.ImageTag, config.Triggers.ImageID, logger)
+		if err != nil {
+			logger.Printf("Error checking if container %s needs recreation: %v", containerName, err)
+			recreateNeeded = true
+			break
+		}
+
+		if shouldRecreate {
+			logger.Printf("Container %s (for %s) needs recreation due to image change", containerName, patchName)
+			recreateNeeded = true
+			break
+		}
+	}
+
+	// Check if volumes exist - we only care about the solution1_volume since that's what we're using
+	solutionVolumePath := filepath.Join(stepExec.LocalPath, "solution1_volume")
+	if _, err := os.Stat(solutionVolumePath); os.IsNotExist(err) {
+		recreateNeeded = true
+		logger.Printf("Volume directory %s doesn't exist, will recreate containers", solutionVolumePath)
+	} else {
+		logger.Printf("Volume directory %s exists, no need to recreate containers", solutionVolumePath)
+	}
+
+	// Even if no recreation is needed, we still need to apply patches
+	if !recreateNeeded && !forceRecreate {
+		logger.Println("All containers are up-to-date, but will ensure patches are applied")
+	} else {
+		// If recreation is needed, we'll handle it in the loop below
+		logger.Println("Container recreation needed, will recreate containers and apply patches")
+	}
+
+	// Create containers for each solution
+	for i, solutionFile := range config.Solutions {
+		solutionNum := i + 1
+		containerName, ok := config.Triggers.Containers[solutionFile]
+		if !ok || containerName == "" {
+			containerName = getContainerName(stepExec.TaskID, solutionFile)
+			config.Triggers.Containers[solutionFile] = containerName
+			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
+		}
+		solutionVolumePath := filepath.Join(stepExec.LocalPath, fmt.Sprintf("solution%d_volume", solutionNum))
+
+		// Remove existing container if it exists
+		if exists, _ := checkContainerExists(containerName); exists {
+			logger.Printf("Removing existing container: %s", containerName)
+			if err := removeDockerContainer(containerName, logger); err != nil {
+				return fmt.Errorf("failed to remove existing container: %w", err)
+			}
+		}
+
+		// Check if we need to recreate the container
+		shouldRecreate, err := shouldRecreateContainer(containerName, config.Triggers.ImageTag, config.Triggers.ImageID, logger)
+		if err != nil {
+			return fmt.Errorf("error checking if container should be recreated: %w", err)
+		}
+
+		if shouldRecreate || forceRecreate {
+			// Only recreate the container if needed
+			if exists, _ := checkContainerExists(containerName); exists {
+				logger.Printf("Removing existing container: %s", containerName)
+				if err := removeDockerContainer(containerName, logger); err != nil {
+					return fmt.Errorf("failed to remove existing container: %w", err)
+				}
+			}
+
+			// Start a new container with the volume mounted
+			params := make([]string, 0, len(config.Parameters)+10) // Pre-allocate with extra capacity
+			
+			// Add base parameters
+			params = append(params, "--platform", "linux/amd64", "-d")
+			params = append(params, "--name", containerName)
+			params = append(params, "-v", fmt.Sprintf("%s:%s", solutionVolumePath, taskSettings.AppFolder))
+			
+			// Add any additional parameters from config
+			for _, param := range config.Parameters {
+				// Replace placeholders in the parameter
+				replaced := param
+				replaced = strings.ReplaceAll(replaced, "%%HOSTPATH%%", solutionVolumePath)
+				replaced = strings.ReplaceAll(replaced, "%%DOCKERVOLUME%%", taskSettings.AppFolder)
+				replaced = strings.ReplaceAll(replaced, "%%IMAGETAG%%", config.Triggers.ImageTag)
+				replaced = strings.ReplaceAll(replaced, "%%VOLUME_NAME%%", solutionVolumePath)
+				replaced = strings.ReplaceAll(replaced, "%%CONTAINER_NAME%%", containerName)
+				replaced = strings.ReplaceAll(replaced, "%%APP_FOLDER%%", taskSettings.AppFolder)
+				
+				// Handle parameters with spaces that aren't quoted
+				if strings.Contains(replaced, " ") && !strings.HasPrefix(replaced, "\"") {
+					params = append(params, strings.Fields(replaced)...)
+				} else {
+					params = append(params, replaced)
+				}
+			}
+
+			// Ensure the image tag is included in the parameters if not already present
+			hasImage := false
+			for _, p := range params {
+				if p == config.Triggers.ImageTag || strings.Contains(p, "/") {
+					hasImage = true
+					break
+				}
+			}
+
+			if !hasImage && config.Triggers.ImageTag != "" {
+				params = append(params, config.Triggers.ImageTag)
+			}
+
+			// Add keep-alive command if needed
+			params = addKeepAliveCommand(params, config.KeepForever, logger)
+
+			if err := runDockerCommand(params, containerName, logger, true); err != nil {
+				logger.Printf("Error starting container %s: %v", containerName, err)
+				return err
+			}
+
+			// Wait for container to be running
+			if err := waitForContainerRunning(containerName, 10, logger); err != nil {
+				logger.Printf("Error waiting for container %s to start: %v", containerName, err)
+				return err
+			}
+			logger.Printf("Successfully started container %s with volume %s mounted to %s", 
+				containerName, solutionVolumePath, taskSettings.AppFolder)
+		} else {
+			// Make sure the container is running
+			if err := waitForContainerRunning(containerName, 5, logger); err != nil {
+				logger.Printf("Container %s is not running, attempting to start it", containerName)
+				startCmd := exec.Command("docker", "start", containerName)
+				if output, err := startCmd.CombinedOutput(); err != nil {
+					return fmt.Errorf("failed to start container %s: %v, output: %s", containerName, err, string(output))
+				}
+				if err := waitForContainerRunning(containerName, 10, logger); err != nil {
+					return fmt.Errorf("container %s failed to start: %w", containerName, err)
+				}
+				logger.Printf("Successfully started container %s", containerName)
+			}
+		} // Added closing brace here
+
+		// Prepare patch file path if it exists
+		patchFile := ""
+		if solutionFile != "" {
+			patchFile = filepath.Join(stepExec.LocalPath, solutionFile)
+			if _, err := os.Stat(patchFile); os.IsNotExist(err) {
+				logger.Printf("Patch file not found: %s, skipping patch application", patchFile)
+				patchFile = ""
+			} else {
+				logger.Printf("Found patch file: %s", patchFile)
+			}
+		}
+
+		// Apply git cleanup and patches to the container
+		logger.Printf("Applying git cleanup and patches to container %s", containerName)
+		if err := applyGitCleanupAndPatch(containerName, solutionFile, config.HeldOutTestFile, config.GradingSetupScript, logger); err != nil {
+			return fmt.Errorf("failed to apply git cleanup and patches to container %s: %w", containerName, err)
+		}
+
+		logger.Printf("Successfully processed container %s with volume %s mounted to %s and applied git cleanup%s", 
+			containerName, solutionVolumePath, taskSettings.AppFolder, func() string {
+				if patchFile != "" {
+					return fmt.Sprintf(" and patch %s", filepath.Base(patchFile))
+				}
+				return ""
+			}())
+
+		// Update the config with the container names for future reference
+		if config.Artifacts == nil {
+			config.Artifacts = make(map[string]interface{})
+		}
+		// Store a copy of the container map in Artifacts for backward compatibility
+		config.Artifacts["containers"] = config.Triggers.Containers
+	}
 
 	// Persist updated settings
 	settings.DockerVolumePool = *config
 	settingsJSON, err := json.Marshal(settings)
 	if err != nil {
-		logger.Printf("Error marshaling updated settings: %v", err)
-		return err
+		return fmt.Errorf("error marshaling updated settings: %w", err)
 	}
 	if err := models.UpdateStepSettings(db, stepExec.StepID, string(settingsJSON)); err != nil {
-		logger.Printf("Error updating step settings: %v", err)
-		return err
+		return fmt.Errorf("error updating step settings: %w", err)
 	}
-	logger.Printf("Updated step settings with artifact container names, image ID, triggers.containers, and triggers.files.")
 
 	return nil
+}
+
+// Helper function to fetch app_folder from docker_extract_volume dependency
+func fetchAppFolderFromDependency(db *sql.DB, stepExec *models.StepExec, config *models.DockerVolumePoolConfig, logger *log.Logger) (string, error) {
+	for _, depMap := range config.DependsOn {
+		// Get the step ID from the dependency map
+		stepID, ok := depMap["id"]
+		if !ok {
+			logger.Printf("No id key in dependency map: %v", depMap)
+			continue
+		}
+		depStep, err := GetStepInfo(db, stepID)
+		if err != nil {
+			logger.Printf("Error fetching dependent step with ID %d: %v", stepID, err)
+			continue
+		}
+
+		logger.Printf("Dependency step ID %d settings: %v", stepID, depStep.Settings)
+
+		// Get docker_extract_volume settings
+		extractSettings, ok := depStep.Settings["docker_extract_volume"].(map[string]interface{})
+		if !ok {
+			logger.Printf("docker_extract_volume key not found or invalid in step settings for ID %d", stepID)
+			continue
+		}
+
+		// Get app_folder from docker_extract_volume settings
+		appFolderVal, exists := extractSettings["app_folder"]
+		if !exists {
+			logger.Printf("app_folder key not found in docker_extract_volume settings for step ID %d", stepID)
+			continue
+		}
+
+		// Convert app_folder to string
+		appFolder, ok := appFolderVal.(string)
+		if !ok {
+			logger.Printf("app_folder is not a string for step ID %d: %v", stepID, appFolderVal)
+			continue
+		}
+
+		logger.Printf("Found app_folder '%s' for step ID %d", appFolder, stepID)
+		return appFolder, nil
+	}
+	return "", fmt.Errorf("no docker_extract_volume dependency found or app_folder not set")
 }
 
 // Utility function to add keep-alive command if not already present
@@ -422,20 +490,6 @@ func addKeepAliveCommand(params []string, keepForever bool, logger *log.Logger) 
 	return params
 }
 
-// General function to run Docker command with given parameters and name
-// Polls for the container to be running, up to timeoutSeconds
-func waitForContainerRunning(containerName string, timeoutSeconds int, logger *log.Logger) error {
-	for i := 0; i < timeoutSeconds; i++ {
-		inspectCmd := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", containerName)
-		out, err := inspectCmd.CombinedOutput()
-		if err == nil && strings.TrimSpace(string(out)) == "true" {
-			return nil
-		}
-		time.Sleep(time.Second)
-	}
-	return fmt.Errorf("container %s did not reach running state within %d seconds", containerName, timeoutSeconds)
-}
-
 func runDockerCommand(params []string, containerName string, logger *log.Logger, detached bool) error {
 	// Add container name conflict handling
 	removeCmd := exec.Command("docker", "rm", "-f", containerName)
@@ -447,19 +501,24 @@ func runDockerCommand(params []string, containerName string, logger *log.Logger,
 	// Flatten params: split on spaces except for -c keep-alive command
 	flattened := []string{}
 	for i := 0; i < len(params); i++ {
-		if params[i] == "-c" && i+1 < len(params) {
+		if params[i] == "-c" && i+1 < len(params) { // Use && for logical AND
 			flattened = append(flattened, "-c", params[i+1])
 			i++ // skip next, already appended
 		} else {
 			parts := strings.Split(params[i], " ")
-			flattened = append(flattened, parts...)
+			for _, part := range parts {
+				trimmedPart := strings.TrimSpace(part)
+				if trimmedPart != "" {
+					flattened = append(flattened, trimmedPart)
+				}
+			}
 		}
 	}
 	if detached {
 		flattened = append([]string{"-d"}, flattened...)
 	}
 	cmdArgs := append([]string{"run", "--name", containerName}, flattened...)
-	logger.Printf("Running Docker command: docker %s", strings.Join(cmdArgs, " "))
+	logger.Printf("Constructed Docker command for container %s: docker %s", containerName, strings.Join(cmdArgs, " ")) // Log the full constructed command with container name
 	cmd := exec.Command("docker", cmdArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -468,7 +527,6 @@ func runDockerCommand(params []string, containerName string, logger *log.Logger,
 	}
 	logger.Printf("Successfully ran Docker command for container %s", containerName)
 	if detached {
-		// Wait for container to be running
 		if err := waitForContainerRunning(containerName, 15, logger); err != nil {
 			logger.Printf("Container %s did not reach running state: %v", containerName, err)
 			return err
@@ -476,6 +534,18 @@ func runDockerCommand(params []string, containerName string, logger *log.Logger,
 		logger.Printf("Container %s is running", containerName)
 	}
 	return nil
+}
+
+func waitForContainerRunning(containerName string, timeoutSeconds int, logger *log.Logger) error {
+	for i := 0; i < timeoutSeconds; i++ {
+		inspectCmd := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", containerName)
+		out, err := inspectCmd.CombinedOutput()
+		if err == nil && strings.TrimSpace(string(out)) == "true" {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("container %s did not reach running state within %d seconds", containerName, timeoutSeconds)
 }
 
 func dockerVolumeExists(volumeName string) bool {
@@ -515,4 +585,176 @@ func removeDockerContainer(name string, logger *log.Logger) error {
 	}
 	logger.Printf("Removed container: %s", name)
 	return nil
+}
+
+// getContainerName generates a consistent container name for a given task and patch file
+func getContainerName(taskID int, patchName string) string {
+	return fmt.Sprintf("task_%d_%s_container", taskID, strings.TrimSuffix(patchName, ".patch"))
+}
+
+// initializeContainerMap initializes the Triggers.Containers map with consistent container names
+func initializeContainerMap(taskID int, solutions []string) map[string]string {
+	containers := make(map[string]string)
+	for i := 1; i <= len(solutions); i++ {
+		patchName := fmt.Sprintf("solution%d.patch", i)
+		containers[patchName] = getContainerName(taskID, patchName)
+	}
+	return containers
+}
+
+// mapValues returns a slice of all values in the map
+func mapValues(m map[string]string) []string {
+	values := make([]string, 0, len(m))
+	for _, v := range m {
+		values = append(values, v)
+	}
+	return values
+}
+
+// applyGitCleanupAndPatch performs git cleanup and applies the solution patch and held_out_test_file in a container
+func applyGitCleanupAndPatch(containerName string, patchFile string, heldOutTestFile string, gradingSetupScript string, logger *log.Logger) error {
+	// Change to the app directory in the container
+	commands := []string{
+		"cd /app/ansible",
+		"git reset --hard HEAD",
+		"git checkout -- .",
+		"git clean -fd",
+	}
+
+	// If a grading setup script is provided, apply it first
+	if gradingSetupScript != "" {
+		if _, err := os.Stat(gradingSetupScript); err == nil {
+			// Copy the grading setup script to the container
+			copyCmd := exec.Command("docker", "cp", gradingSetupScript, fmt.Sprintf("%s:/tmp/grading_setup.patch", containerName))
+			if output, err := copyCmd.CombinedOutput(); err != nil {
+				logger.Printf("Failed to copy grading setup script to container %s: %v, output: %s", containerName, err, string(output))
+				return fmt.Errorf("failed to copy grading setup script: %w", err)
+			}
+
+			// Add grading setup script application command
+			commands = append(commands, "git apply /tmp/grading_setup.patch")
+		} else {
+			logger.Printf("Grading setup script %s not found, skipping", gradingSetupScript)
+		}
+	}
+
+	// If a patch file is provided, apply it
+	if patchFile != "" {
+		// Copy the patch file to the container
+		copyCmd := exec.Command("docker", "cp", patchFile, fmt.Sprintf("%s:/tmp/solution.patch", containerName))
+		if output, err := copyCmd.CombinedOutput(); err != nil {
+			logger.Printf("Failed to copy patch file to container %s: %v, output: %s", containerName, err, string(output))
+			return fmt.Errorf("failed to copy patch file: %w", err)
+		}
+
+		// Add patch application command
+		commands = append(commands, "git apply /tmp/solution.patch")
+	}
+
+	// Check if held_out_test_file is specified and exists in the current directory
+	if heldOutTestFile != "" {
+		if _, err := os.Stat(heldOutTestFile); err == nil {
+			// Copy held_out_test_file to the container
+			heldOutCopyCmd := exec.Command("docker", "cp", heldOutTestFile, fmt.Sprintf("%s:/tmp/held_out_test.patch", containerName))
+			if output, err := heldOutCopyCmd.CombinedOutput(); err != nil {
+				logger.Printf("Failed to copy %s to container %s: %v, output: %s", heldOutTestFile, containerName, err, string(output))
+				return fmt.Errorf("failed to copy %s: %w", heldOutTestFile, err)
+			}
+			// Add held_out_test_file application command
+			commands = append(commands, "git apply /tmp/held_out_test.patch")
+		} else {
+			logger.Printf("%s not found in current directory, skipping", heldOutTestFile)
+		}
+	}
+
+	// Execute all commands in the container
+	for _, cmd := range commands {
+		execCmd := exec.Command("docker", "exec", containerName, "bash", "-c", cmd)
+		if output, err := execCmd.CombinedOutput(); err != nil {
+			logger.Printf("Command failed in container %s: %s\nError: %v\nOutput: %s", containerName, cmd, err, string(output))
+			return fmt.Errorf("failed to execute command in container: %w", err)
+		}
+		logger.Printf("Executed in container %s: %s", containerName, cmd)
+	}
+
+	return nil
+}
+
+// shouldRecreateContainer checks if a container needs to be recreated based on image tag or ID changes
+func shouldRecreateContainer(containerName, expectedImageTag, expectedImageID string, logger *log.Logger) (bool, error) {
+	logger.Printf("Checking if container %s needs recreation (expected tag: %s, expected ID: %s)", 
+		containerName, expectedImageTag, expectedImageID)
+
+	// First check if container exists
+	exists, err := checkContainerExists(containerName)
+	if err != nil {
+		return false, fmt.Errorf("failed to check if container exists: %w", err)
+	}
+	if !exists {
+		logger.Printf("Container %s does not exist, needs recreation", containerName)
+		return true, nil
+	}
+
+	// Get the current container's image ID
+	cmd := exec.Command("docker", "inspect", "--format", "{{.Image}}", containerName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("failed to get container image: %w", err)
+	}
+	currentImageID := strings.TrimSpace(string(output))
+	logger.Printf("Container %s current image ID: %s", containerName, currentImageID)
+
+	// If we have an expected image ID, compare it with the current one
+	if expectedImageID != "" {
+		// Get the full image ID for the expected image
+		cmd = exec.Command("docker", "inspect", "--format", "{{.ID}}", expectedImageID)
+		expectedFullImageID, err := cmd.CombinedOutput()
+		if err != nil {
+			return false, fmt.Errorf("failed to get expected image ID: %w", err)
+		}
+		
+		trimmedExpectedID := strings.TrimSpace(string(expectedFullImageID))
+		logger.Printf("Comparing image IDs - Current: %s, Expected: %s", currentImageID, trimmedExpectedID)
+		
+		// Compare the full image IDs
+		if !strings.HasPrefix(trimmedExpectedID, currentImageID) {
+			logger.Printf("Container %s: Image ID changed from %s to %s", 
+				containerName, currentImageID, trimmedExpectedID)
+			return true, nil
+		}
+	}
+
+	// If we have an expected image tag, check if it matches the current container's image
+	if expectedImageTag != "" {
+		// Get the current container's image tag
+		cmd = exec.Command("docker", "inspect", "--format", "{{.Config.Image}}", containerName)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			return false, fmt.Errorf("failed to get container image tag: %w", err)
+		}
+		currentImageTag := strings.TrimSpace(string(output))
+		logger.Printf("Container %s current image tag: %s, expected: %s", 
+			containerName, currentImageTag, expectedImageTag)
+
+		// Compare the image tags
+		if currentImageTag != expectedImageTag {
+			logger.Printf("Container %s: Image tag changed from %s to %s", 
+				containerName, currentImageTag, expectedImageTag)
+			return true, nil
+		}
+	}
+
+	logger.Printf("Container %s is up-to-date, no need to recreate", containerName)
+	return false, nil
+}
+
+func checkContainerExists(containerName string) (bool, error) {
+	cmd := exec.Command("docker", "inspect", "--type=container", containerName)
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check container %s: %w", containerName, err)
+	}
+	return true, nil
 }

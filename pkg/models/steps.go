@@ -244,6 +244,8 @@ type DockerVolumePoolConfig struct {
 	ImageTag string `json:"image_tag"`
 	ContainerFolder string `json:"container_folder"`
 	Solutions []string `json:"solutions"`
+	HeldOutTestFile string `json:"held_out_test_file"`
+	GradingSetupScript string `json:"grading_setup_script"`
 	KeepForever bool `json:"keep_forever"`
 	Force bool `json:"force"`
 }

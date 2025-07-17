@@ -406,6 +406,12 @@ func ProcessSpecificStep(db *sql.DB, stepID int, force bool) error {
 	var stepExec models.StepExec
 	err := db.QueryRow("SELECT id, task_id, title, settings FROM steps WHERE id = $1", stepID).Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings)
 	if err != nil {
+		hostname, errHost := os.Hostname()
+		if errHost != nil {
+			log.Printf("Host error, failed to fetch step %d: %v", stepID, err)
+		} else {
+			log.Printf("Host: %s, failed to fetch step %d: %v", hostname, stepID, err)
+		}
 		return fmt.Errorf("failed to fetch step %d: %w", stepID, err)
 	}
 
@@ -413,6 +419,12 @@ func ProcessSpecificStep(db *sql.DB, stepID int, force bool) error {
 	var localPath, status string
 	err = db.QueryRow("SELECT local_path, status FROM tasks WHERE id = $1", stepExec.TaskID).Scan(&localPath, &status)
 	if err != nil {
+		hostname, errHost := os.Hostname()
+		if errHost != nil {
+			log.Printf("Host error, failed to fetch task local path/status for task ID %d: %v", stepExec.TaskID, err)
+		} else {
+			log.Printf("Host: %s, failed to fetch task local path/status for task ID %d: %v", hostname, stepExec.TaskID, err)
+		}
 		return fmt.Errorf("failed to fetch task local path/status for task ID %d: %w", stepExec.TaskID, err)
 	}
 	if status != "active" {

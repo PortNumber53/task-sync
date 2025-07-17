@@ -2,6 +2,8 @@ package internal
 
 import (
     "log"
+    "os"
+    "path/filepath"
     "testing"
     "github.com/PortNumber53/task-sync/pkg/models"
 )
@@ -16,5 +18,29 @@ func TestProcessDockerVolumePoolStep(t *testing.T) {
         if err != nil {
             t.Errorf("expected no error with force flag, got %v", err)
         }
+    })
+
+    // New test case for file hash change trigger
+    t.Run("FileHashChangeTrigger", func(t *testing.T) {
+        // Mock stepExec with file hash change scenario
+        stepExec := &models.StepExec{
+            TaskID: 1,
+            Settings: `{"docker_volume_pool":{"triggers":{"files":{"testfile.txt":"oldhash"}},"solutions":["solution1"]}}`,
+            LocalPath: "/tmp/testdir", // Use a temp dir for testing
+        }
+        // Simulate file change by creating a test file with different hash
+        testFilePath := filepath.Join("/tmp/testdir", "testfile.txt")
+        err := os.WriteFile(testFilePath, []byte("new content"), 0644)
+        if err != nil {
+            t.Fatalf("failed to create test file: %v", err)
+        }
+        defer os.Remove(testFilePath) // Clean up
+        
+        logger := log.New(log.Writer(), "", 0)
+        err = ProcessDockerVolumePoolStep(nil, stepExec, logger)
+        if err != nil {
+            t.Errorf("expected no error for file hash change, got %v", err)
+        }
+        // Add assertions for expected behavior, e.g., check if git ops were called (mocking may be needed)
     })
 }

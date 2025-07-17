@@ -28,7 +28,7 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	stepLogger.Printf("Unmarshaled settings: %+v", settings.DockerVolumePool)
 	stepLogger.Printf("Solutions loaded: %v", settings.DockerVolumePool.Solutions)
 	config := &settings.DockerVolumePool
-
+	
 	// Check for force flag
 	if config.Force {
 		stepLogger.Println("Force flag set; running step regardless of triggers")
@@ -52,7 +52,9 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	// Check image triggers
 	imageChanged, err := checkImageTriggers(db, stepExec, config, stepLogger)
 	if err != nil {
-		return err
+		stepLogger.Printf("Error checking image triggers: %v; treating as change and running step", err)
+		imageChanged = true // Treat error as a trigger to run
+		// Optionally, err = nil to avoid propagating, or handle specifically
 	}
 
 	// Check container existence
@@ -68,15 +70,23 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	}
 
 	// Decision logic
-	if imageChanged || !containersExist || !volumesExist {
-		stepLogger.Printf("[Trigger] Image changed: %v, Containers exist: %v, Volumes exist: %v", imageChanged, containersExist, volumesExist)
+	if imageChanged || !containersExist || !volumesExist || filesChanged {
+		stepLogger.Printf("[Trigger] Image changed: %v, Containers exist: %v, Volumes exist: %v, Files changed: %v", imageChanged, containersExist, volumesExist, filesChanged)
 		stepLogger.Println("Triggering full rebuild: recreate containers and volumes, run all steps")
 		return runDockerVolumePoolStep(db, stepExec, stepLogger)
 	}
 	if filesChanged {
-		stepLogger.Println("Triggering partial rebuild: files changed, redoing file/patch/git/volume steps, containers reused")
-		// TODO: Implement partial step (reuse containers/volumes, only redo file ops)
-		return runDockerVolumePoolStep(db, stepExec, stepLogger) // Placeholder: full run for now
+		stepLogger.Println("Triggering partial rebuild: files changed, redoing git operations")
+		for patch, container := range config.Triggers.Containers {
+			if containerExists, _ := checkContainerExists(container); containerExists {
+				if err := applyGitCleanupAndPatch(container, filepath.Join(stepExec.LocalPath, patch+".patch"), config.HeldOutTestFile, config.GradingSetupScript, stepLogger); err != nil {
+					return err
+				}
+			} else {
+				stepLogger.Printf("Container %s missing, skipping git ops for patch %s", container, patch)
+			}
+		}
+		return nil
 	}
 
 	stepLogger.Println("No triggers activated; skipping step execution")
@@ -86,14 +96,14 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 // Helper function to check file hash triggers
 func checkFileHashTriggers(db *sql.DB, stepExec *models.StepExec, config *models.DockerVolumePoolConfig, logger *log.Logger) (bool, error) {
 	runNeeded := false
-	for fileName, storedHash := range config.Triggers.Files {
+	for fileName := range config.Triggers.Files {
 		filePath := filepath.Join(stepExec.LocalPath, fileName)
-		currentHash, err := models.GetSHA256(filePath) // Use existing models.GetSHA256
+		currentHash, err := models.GetSHA256(filePath)
 		if err != nil {
 			logger.Printf("Error computing hash for %s: %v", filePath, err)
 			return true, err // Treat hash error as a trigger to run
 		}
-		if currentHash != storedHash {
+		if currentHash != config.Triggers.Files[fileName] {
 			runNeeded = true
 			// Update stored hash if needed, but for now just flag run
 		}
@@ -103,18 +113,28 @@ func checkFileHashTriggers(db *sql.DB, stepExec *models.StepExec, config *models
 
 // Helper function to check image triggers
 func checkImageTriggers(db *sql.DB, stepExec *models.StepExec, config *models.DockerVolumePoolConfig, logger *log.Logger) (bool, error) {
-	taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
-	if err != nil {
-		return false, fmt.Errorf("failed to get task settings: %w", err)
+	imageChanged := false
+	if config.Triggers.ImageTag != "" {
+		currentImageTag, err := getCurrentImageTag(config.Triggers.ImageTag) 
+		if err != nil {
+			logger.Printf("Error getting current image tag: %v; assuming change", err)
+			return true, nil // Return true and no error to trigger run
+		}
+		if currentImageTag != config.Triggers.ImageTag {
+			imageChanged = true
+		}
 	}
-	runNeeded := false
-	if config.Triggers.ImageID != "" && config.Triggers.ImageID != taskSettings.Docker.ImageID {
-		runNeeded = true
+	if config.Triggers.ImageID != "" {
+		currentImageID, err := getCurrentImageID(config.Triggers.ImageID) 
+		if err != nil {
+			logger.Printf("Error getting current image ID: %v; assuming change", err)
+			return true, nil // Return true and no error to trigger run
+		}
+		if currentImageID != config.Triggers.ImageID {
+			imageChanged = true
+		}
 	}
-	if config.Triggers.ImageTag != "" && config.Triggers.ImageTag != taskSettings.Docker.ImageTag {
-		runNeeded = true
-	}
-	return runNeeded, nil
+	return imageChanged, nil // Always return no error after handling
 }
 
 // Helper function to check container triggers
@@ -412,20 +432,45 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 		config.Artifacts["containers"] = config.Triggers.Containers
 	}
 
-	// Persist updated settings
-	settings.DockerVolumePool = *config
-	settingsJSON, err := json.Marshal(settings)
-	if err != nil {
-		return fmt.Errorf("error marshaling updated settings: %w", err)
+	// After successful execution, update stored hashes for triggers
+	if err == nil { // Ensure no errors occurred
+		var settings map[string]interface{}
+		if err := json.Unmarshal([]byte(stepExec.Settings), &settings); err != nil {
+			return fmt.Errorf("failed to unmarshal settings for hash update: %w", err)
+		}
+		configMap, ok := settings["docker_volume_pool"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("invalid docker_volume_pool config in settings")
+		}
+		triggersMap, ok := configMap["triggers"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("invalid triggers config in settings")
+		}
+		filesMap, ok := triggersMap["files"].(map[string]interface{})
+		if ok {
+			for fileName := range filesMap {
+				filePath := filepath.Join(stepExec.LocalPath, fileName)
+				currentHash, err := models.GetSHA256(filePath)
+				if err != nil {
+					logger.Printf("Error computing hash for %s: %v", filePath, err)
+					continue // Log and skip individual file errors, don't fail the whole update
+				}
+				filesMap[fileName] = currentHash
+			}
+		}
+		updatedSettings, err := json.Marshal(settings)
+		if err != nil {
+			return fmt.Errorf("failed to marshal updated settings: %w", err)
+		}
+		// Update the step settings in the database
+		if err := models.UpdateStepSettings(db, stepExec.StepID, string(updatedSettings)); err != nil { 
+			return fmt.Errorf("failed to update step settings: %w", err)
+		}
+		logger.Println("Updated stored file hashes in step settings")
 	}
-	if err := models.UpdateStepSettings(db, stepExec.StepID, string(settingsJSON)); err != nil {
-		return fmt.Errorf("error updating step settings: %w", err)
-	}
-
-	return nil
+	return err // Return any error from the main logic
 }
 
-// Helper function to fetch app_folder from docker_extract_volume dependency
 func fetchAppFolderFromDependency(db *sql.DB, stepExec *models.StepExec, config *models.DockerVolumePoolConfig, logger *log.Logger) (string, error) {
 	for _, depMap := range config.DependsOn {
 		// Get the step ID from the dependency map
@@ -749,6 +794,13 @@ func shouldRecreateContainer(containerName, expectedImageTag, expectedImageID st
 }
 
 func checkContainerExists(containerName string) (bool, error) {
+	hostname, errHost := os.Hostname()
+	if errHost != nil {
+		// Log error if hostname retrieval fails, but proceed
+		fmt.Printf("Error getting hostname: %v\n", errHost) // Use fmt for simplicity; consider passing logger if needed
+	} else {
+		fmt.Printf("Host: %s, Checking container existence for %s\n", hostname, containerName) // Add logging
+	}
 	cmd := exec.Command("docker", "inspect", "--type=container", containerName)
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
@@ -757,4 +809,22 @@ func checkContainerExists(containerName string) (bool, error) {
 		return false, fmt.Errorf("failed to check container %s: %w", containerName, err)
 	}
 	return true, nil
+}
+
+func getCurrentImageTag(imageTag string) (string, error) {
+	cmd := exec.Command("docker", "inspect", "--format", "{{.Config.Image}}", imageTag)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current image tag: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func getCurrentImageID(imageID string) (string, error) {
+	cmd := exec.Command("docker", "inspect", "--format", "{{.ID}}", imageID)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current image ID: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
 }

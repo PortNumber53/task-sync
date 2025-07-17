@@ -638,3 +638,14 @@ Executes a test command for a single rubric criterion. This step is generated au
 - `assign_containers`: A map of solution files to container names, inherited from the parent `dynamic_rubric` step.
 - `generated_by`: The ID of the parent step that created this step.
 - `depends_on`: A dependency on the parent step.
+
+## Rubric Import Logic Update
+
+As of the latest changes, the rubric import system now supports importing from a JSON file (rubrics.json) in addition to the traditional markdown file. When rubrics.json is present in the task directory, it is prioritized, and the markdown file is ignored. The JSON structure is mapped to the Criterion model as follows:
+- Counter: Generated from array index (starting at 1)
+- Title: From `rubricItemId`
+- Rubric: From `criterion`
+- HeldOutTest: From `forms.criterion_test_command`
+- Score and Required: Directly from their respective fields
+
+This change improves flexibility and allows for easier rubric definition.

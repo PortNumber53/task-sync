@@ -129,141 +129,296 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 		}
 	}
 
-	// 1. Parse the main rubric file to get the list of criteria.
-	markdownFilePath := filepath.Join(stepExec.LocalPath, config.File)
-	criteria, err := models.ParseRubric(markdownFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to parse rubric markdown: %w", err)
-	}
-	stepLogger.Printf("Found %d criteria in %s", len(criteria), markdownFilePath)
-
-	// 2. Fetch existing generated steps.
-	existingSteps, err := models.GetGeneratedSteps(db, stepExec.StepID)
-	if err != nil {
-		return fmt.Errorf("failed to get existing generated steps: %w", err)
-	}
-	stepLogger.Printf("Found %d existing generated steps for parent step %d.", len(existingSteps), stepExec.StepID)
-
-	// 3. Create a map of existing steps by criterion ID for efficient lookup.
-	existingStepsMap := make(map[string]models.Step)
-	for _, step := range existingSteps {
-		var stepSettings struct {
-			RubricShell models.RubricShellConfig `json:"rubric_shell"`
+	// Prioritize rubrics.json if it exists, otherwise use config.File
+	jsonPath := filepath.Join(stepExec.LocalPath, "rubrics.json")
+	if _, err := os.Stat(jsonPath); err == nil {
+		markdownFilePath := jsonPath
+		criteria, err := models.ParseRubric(markdownFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to parse rubric markdown: %w", err)
 		}
-		if err := json.Unmarshal([]byte(step.Settings), &stepSettings); err == nil {
-			existingStepsMap[stepSettings.RubricShell.CriterionID] = step
+		stepLogger.Printf("DEBUG: Parsing rubric from JSON file: %s", markdownFilePath)
+		for i, crit := range criteria {
+			stepLogger.Printf("DEBUG: Criterion %d - ID: %s, Rubric snippet: %s", i, crit.Title, crit.Rubric[:min(50, len(crit.Rubric))]) // Log first 50 chars of Rubric for inspection
 		}
-	}
+		stepLogger.Printf("Found %d criteria in %s", len(criteria), markdownFilePath)
 
-	// 4. Reconcile steps based on the rubric file.
-	updatedOrCreated := false
-	for _, criterion := range criteria {
-		title := fmt.Sprintf("Rubric %s: %s", criterion.Counter, criterion.Title)
-
-		newRubricShellSettings := models.RubricShellConfig{
-			Command:     criterion.HeldOutTest,
-			CriterionID: criterion.Title,
-			Counter:     criterion.Counter,
-			Score:       criterion.Score,
-			Required:    criterion.Required,
-			DependsOn:   []models.Dependency{{ID: stepExec.StepID}},
-			GeneratedBy: strconv.Itoa(stepExec.StepID),
+		// 2. Fetch existing generated steps.
+		existingSteps, err := models.GetGeneratedSteps(db, stepExec.StepID)
+		if err != nil {
+			return fmt.Errorf("failed to get existing generated steps: %w", err)
 		}
+		stepLogger.Printf("Found %d existing generated steps for parent step %d.", len(existingSteps), stepExec.StepID)
 
-		wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellSettings}
-		newSettingsBytes, _ := json.Marshal(wrappedSettings)
-
-		// Preserve last_run if present in the existing step
-		if existingStep, ok := existingStepsMap[criterion.Title]; ok {
-			var existingStepSettings struct {
+		// 3. Create a map of existing steps by criterion ID for efficient lookup.
+		existingStepsMap := make(map[string]models.Step)
+		for _, step := range existingSteps {
+			var stepSettings struct {
 				RubricShell models.RubricShellConfig `json:"rubric_shell"`
 			}
-			shouldUpdate := false
-			if err := json.Unmarshal([]byte(existingStep.Settings), &existingStepSettings); err == nil {
-				// Compare relevant fields
-				rsOld := existingStepSettings.RubricShell
-				rsNew := newRubricShellSettings
-				if rsOld.Command != rsNew.Command ||
-					rsOld.CriterionID != rsNew.CriterionID ||
-					rsOld.Counter != rsNew.Counter ||
-					rsOld.Score != rsNew.Score ||
-					rsOld.Required != rsNew.Required ||
-					len(rsOld.DependsOn) != len(rsNew.DependsOn) ||
-					rsOld.GeneratedBy != rsNew.GeneratedBy {
-					shouldUpdate = true
-				} else {
-					for i := range rsOld.DependsOn {
-						if rsOld.DependsOn[i] != rsNew.DependsOn[i] {
-							shouldUpdate = true
-							break
+			if err := json.Unmarshal([]byte(step.Settings), &stepSettings); err == nil {
+				existingStepsMap[stepSettings.RubricShell.CriterionID] = step
+			}
+		}
+
+		// 4. Reconcile steps based on the rubric file.
+		updatedOrCreated := false
+		for _, criterion := range criteria {
+			title := fmt.Sprintf("Rubric %s: %s", criterion.Counter, criterion.Title)
+
+			newRubricShellSettings := models.RubricShellConfig{
+				Command:     criterion.HeldOutTest,
+				CriterionID: criterion.Title,
+				Counter:     criterion.Counter,
+				Score:       criterion.Score,
+				Required:    criterion.Required,
+				DependsOn:   []models.Dependency{{ID: stepExec.StepID}},
+				GeneratedBy: strconv.Itoa(stepExec.StepID),
+			}
+
+			wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellSettings}
+			newSettingsBytes, _ := json.Marshal(wrappedSettings)
+
+			// Preserve last_run if present in the existing step
+			if existingStep, ok := existingStepsMap[criterion.Title]; ok {
+				var existingStepSettings struct {
+					RubricShell models.RubricShellConfig `json:"rubric_shell"`
+				}
+				shouldUpdate := false
+				if err := json.Unmarshal([]byte(existingStep.Settings), &existingStepSettings); err == nil {
+					// Compare relevant fields
+					rsOld := existingStepSettings.RubricShell
+					rsNew := newRubricShellSettings
+					if rsOld.Command != rsNew.Command ||
+						rsOld.CriterionID != rsNew.CriterionID ||
+						rsOld.Counter != rsNew.Counter ||
+						rsOld.Score != rsNew.Score ||
+						rsOld.Required != rsNew.Required ||
+						len(rsOld.DependsOn) != len(rsNew.DependsOn) ||
+						rsOld.GeneratedBy != rsNew.GeneratedBy {
+						shouldUpdate = true
+					} else {
+						for i := range rsOld.DependsOn {
+							if rsOld.DependsOn[i] != rsNew.DependsOn[i] {
+								shouldUpdate = true
+								break
+							}
 						}
 					}
-				}
-				if existingStep.Title != title {
-					shouldUpdate = true
-				}
-			} else {
-				shouldUpdate = true // Could not unmarshal, safest to update
-			}
-			if shouldUpdate {
-				if err := models.UpdateStep(db, existingStep.ID, title, string(newSettingsBytes)); err != nil {
-					stepLogger.Printf("Failed to update step %d for criterion '%s': %v", existingStep.ID, criterion.Title, err)
+					if existingStep.Title != title {
+						shouldUpdate = true
+					}
 				} else {
-					stepLogger.Printf("Updated step %d for criterion '%s'", existingStep.ID, criterion.Title)
+					shouldUpdate = true // Could not unmarshal, safest to update
+				}
+				if shouldUpdate {
+					if err := models.UpdateStep(db, existingStep.ID, title, string(newSettingsBytes)); err != nil {
+						stepLogger.Printf("Failed to update step %d for criterion '%s': %v", existingStep.ID, criterion.Title, err)
+					} else {
+						stepLogger.Printf("Updated step %d for criterion '%s'", existingStep.ID, criterion.Title)
+						updatedOrCreated = true
+					}
+				}
+				delete(existingStepsMap, criterion.Title) // Mark as processed
+			} else {
+				// Step doesn't exist, create it.
+				if _, err := models.CreateStep(db, strconv.Itoa(stepExec.TaskID), title, string(newSettingsBytes)); err != nil {
+					stepLogger.Printf("Failed to create new step for criterion '%s': %v", criterion.Title, err)
+				} else {
 					updatedOrCreated = true
 				}
 			}
-			delete(existingStepsMap, criterion.Title) // Mark as processed
-		} else {
-			// Step doesn't exist, create it.
-			if _, err := models.CreateStep(db, strconv.Itoa(stepExec.TaskID), title, string(newSettingsBytes)); err != nil {
-				stepLogger.Printf("Failed to create new step for criterion '%s': %v", criterion.Title, err)
+		}
+
+		// 5. Delete steps that are no longer in the rubric.
+		for _, stepToDelete := range existingStepsMap {
+			if err := models.DeleteStep(db, stepToDelete.ID); err != nil {
+				stepLogger.Printf("Failed to delete obsolete step %d: %v", stepToDelete.ID, err)
 			} else {
-				updatedOrCreated = true
+				stepLogger.Printf("Deleted obsolete step %d", stepToDelete.ID)
 			}
 		}
-	}
 
-	// 5. Delete steps that are no longer in the rubric.
-	for _, stepToDelete := range existingStepsMap {
-		if err := models.DeleteStep(db, stepToDelete.ID); err != nil {
-			stepLogger.Printf("Failed to delete obsolete step %d: %v", stepToDelete.ID, err)
+		// 6. Force re-run: set LastRun=nil for all upserted rubric_shell steps
+		generatedSteps, err := models.GetGeneratedSteps(db, stepExec.StepID)
+		if err != nil {
+			stepLogger.Printf("Failed to fetch generated rubric_shell steps for force re-run: %v", err)
 		} else {
-			stepLogger.Printf("Deleted obsolete step %d", stepToDelete.ID)
-		}
-	}
-
-	// 6. Force re-run: set LastRun=nil for all upserted rubric_shell steps
-	generatedSteps, err := models.GetGeneratedSteps(db, stepExec.StepID)
-	if err != nil {
-		stepLogger.Printf("Failed to fetch generated rubric_shell steps for force re-run: %v", err)
-	} else {
-		if len(generatedSteps) > 0 {
-			if updatedOrCreated {
-				for _, step := range generatedSteps {
-					var holder models.StepConfigHolder
-					if err := json.Unmarshal([]byte(step.Settings), &holder); err == nil && holder.RubricShell != nil {
-						holder.RubricShell.LastRun = nil
-						updatedSettings, err := json.Marshal(map[string]interface{}{ "rubric_shell": holder.RubricShell })
-						if err == nil {
-							if err := models.UpdateStepSettings(db, step.ID, string(updatedSettings)); err == nil {
-								stepLogger.Printf("Forced re-run: reset LastRun for rubric_shell step %d due to changes", step.ID)
+			if len(generatedSteps) > 0 {
+				if updatedOrCreated {
+					for _, step := range generatedSteps {
+						var holder models.StepConfigHolder
+						if err := json.Unmarshal([]byte(step.Settings), &holder); err == nil && holder.RubricShell != nil {
+							holder.RubricShell.LastRun = nil
+							updatedSettings, err := json.Marshal(map[string]interface{}{ "rubric_shell": holder.RubricShell })
+							if err == nil {
+								if err := models.UpdateStepSettings(db, step.ID, string(updatedSettings)); err == nil {
+									stepLogger.Printf("Forced re-run: reset LastRun for rubric_shell step %d due to changes", step.ID)
+								} else {
+									stepLogger.Printf("Failed to update settings for forced re-run of step %d: %v", step.ID, err)
+								}
 							} else {
-								stepLogger.Printf("Failed to update settings for forced re-run of step %d: %v", step.ID, err)
+								stepLogger.Printf("Failed to marshal settings for forced re-run of step %d: %v", step.ID, err)
 							}
-						} else {
-							stepLogger.Printf("Failed to marshal settings for forced re-run of step %d: %v", step.ID, err)
 						}
 					}
+				} else {
+					stepLogger.Printf("No changes detected, skipping LastRun reset")
 				}
 			} else {
-				stepLogger.Printf("No changes detected, skipping LastRun reset")
+				stepLogger.Printf("No generated steps to update")
 			}
-		} else {
-			stepLogger.Printf("No generated steps to update")
 		}
-	}
 
-	stepLogger.Println("Successfully reconciled rubric_set step.")
-	return nil
+		stepLogger.Println("Successfully reconciled rubric_set step.")
+		return nil
+	} else {
+		markdownFilePath := filepath.Join(stepExec.LocalPath, config.File)
+		criteria, err := models.ParseRubric(markdownFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to parse rubric markdown: %w", err)
+		}
+		stepLogger.Printf("DEBUG: Parsing rubric from file: %s", markdownFilePath)
+		for i, crit := range criteria {
+			stepLogger.Printf("DEBUG: Criterion %d - ID: %s, Rubric snippet: %s", i, crit.Title, crit.Rubric[:min(50, len(crit.Rubric))]) // Log first 50 chars of Rubric for inspection
+		}
+		stepLogger.Printf("Found %d criteria in %s", len(criteria), markdownFilePath)
+
+		// 2. Fetch existing generated steps.
+		existingSteps, err := models.GetGeneratedSteps(db, stepExec.StepID)
+		if err != nil {
+			return fmt.Errorf("failed to get existing generated steps: %w", err)
+		}
+		stepLogger.Printf("Found %d existing generated steps for parent step %d.", len(existingSteps), stepExec.StepID)
+
+		// 3. Create a map of existing steps by criterion ID for efficient lookup.
+		existingStepsMap := make(map[string]models.Step)
+		for _, step := range existingSteps {
+			var stepSettings struct {
+				RubricShell models.RubricShellConfig `json:"rubric_shell"`
+			}
+			if err := json.Unmarshal([]byte(step.Settings), &stepSettings); err == nil {
+				existingStepsMap[stepSettings.RubricShell.CriterionID] = step
+			}
+		}
+
+		// 4. Reconcile steps based on the rubric file.
+		updatedOrCreated := false
+		for _, criterion := range criteria {
+			title := fmt.Sprintf("Rubric %s: %s", criterion.Counter, criterion.Title)
+
+			newRubricShellSettings := models.RubricShellConfig{
+				Command:     criterion.HeldOutTest,
+				CriterionID: criterion.Title,
+				Counter:     criterion.Counter,
+				Score:       criterion.Score,
+				Required:    criterion.Required,
+				DependsOn:   []models.Dependency{{ID: stepExec.StepID}},
+				GeneratedBy: strconv.Itoa(stepExec.StepID),
+			}
+
+			wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellSettings}
+			newSettingsBytes, _ := json.Marshal(wrappedSettings)
+
+			// Preserve last_run if present in the existing step
+			if existingStep, ok := existingStepsMap[criterion.Title]; ok {
+				var existingStepSettings struct {
+					RubricShell models.RubricShellConfig `json:"rubric_shell"`
+				}
+				shouldUpdate := false
+				if err := json.Unmarshal([]byte(existingStep.Settings), &existingStepSettings); err == nil {
+					// Compare relevant fields
+					rsOld := existingStepSettings.RubricShell
+					rsNew := newRubricShellSettings
+					if rsOld.Command != rsNew.Command ||
+						rsOld.CriterionID != rsNew.CriterionID ||
+						rsOld.Counter != rsNew.Counter ||
+						rsOld.Score != rsNew.Score ||
+						rsOld.Required != rsNew.Required ||
+						len(rsOld.DependsOn) != len(rsNew.DependsOn) ||
+						rsOld.GeneratedBy != rsNew.GeneratedBy {
+						shouldUpdate = true
+					} else {
+						for i := range rsOld.DependsOn {
+							if rsOld.DependsOn[i] != rsNew.DependsOn[i] {
+								shouldUpdate = true
+								break
+							}
+						}
+					}
+					if existingStep.Title != title {
+						shouldUpdate = true
+					}
+				} else {
+					shouldUpdate = true // Could not unmarshal, safest to update
+				}
+				if shouldUpdate {
+					if err := models.UpdateStep(db, existingStep.ID, title, string(newSettingsBytes)); err != nil {
+						stepLogger.Printf("Failed to update step %d for criterion '%s': %v", existingStep.ID, criterion.Title, err)
+					} else {
+						stepLogger.Printf("Updated step %d for criterion '%s'", existingStep.ID, criterion.Title)
+						updatedOrCreated = true
+					}
+				}
+				delete(existingStepsMap, criterion.Title) // Mark as processed
+			} else {
+				// Step doesn't exist, create it.
+				if _, err := models.CreateStep(db, strconv.Itoa(stepExec.TaskID), title, string(newSettingsBytes)); err != nil {
+					stepLogger.Printf("Failed to create new step for criterion '%s': %v", criterion.Title, err)
+				} else {
+					updatedOrCreated = true
+				}
+			}
+		}
+
+		// 5. Delete steps that are no longer in the rubric.
+		for _, stepToDelete := range existingStepsMap {
+			if err := models.DeleteStep(db, stepToDelete.ID); err != nil {
+				stepLogger.Printf("Failed to delete obsolete step %d: %v", stepToDelete.ID, err)
+			} else {
+				stepLogger.Printf("Deleted obsolete step %d", stepToDelete.ID)
+			}
+		}
+
+		// 6. Force re-run: set LastRun=nil for all upserted rubric_shell steps
+		generatedSteps, err := models.GetGeneratedSteps(db, stepExec.StepID)
+		if err != nil {
+			stepLogger.Printf("Failed to fetch generated rubric_shell steps for force re-run: %v", err)
+		} else {
+			if len(generatedSteps) > 0 {
+				if updatedOrCreated {
+					for _, step := range generatedSteps {
+						var holder models.StepConfigHolder
+						if err := json.Unmarshal([]byte(step.Settings), &holder); err == nil && holder.RubricShell != nil {
+							holder.RubricShell.LastRun = nil
+							updatedSettings, err := json.Marshal(map[string]interface{}{ "rubric_shell": holder.RubricShell })
+							if err == nil {
+								if err := models.UpdateStepSettings(db, step.ID, string(updatedSettings)); err == nil {
+									stepLogger.Printf("Forced re-run: reset LastRun for rubric_shell step %d due to changes", step.ID)
+								} else {
+									stepLogger.Printf("Failed to update settings for forced re-run of step %d: %v", step.ID, err)
+								}
+							} else {
+								stepLogger.Printf("Failed to marshal settings for forced re-run of step %d: %v", step.ID, err)
+							}
+						}
+					}
+				} else {
+					stepLogger.Printf("No changes detected, skipping LastRun reset")
+				}
+			} else {
+				stepLogger.Printf("No generated steps to update")
+			}
+		}
+
+		stepLogger.Println("Successfully reconciled rubric_set step.")
+		return nil
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

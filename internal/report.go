@@ -228,9 +228,11 @@ func ReportTask(db *sql.DB, taskID int) error {
 			}
 			titleOut := formatRubricNum(node.Title)
 			if strings.Contains(node.Settings, "rubric_shell") {
-				fmt.Printf("%s%s%s%s-%s\n", prefix, connector, icons, idStr, titleOut)
+				outputStr := fmt.Sprintf("%s%s%s%s-%s\n", prefix, connector, icons, idStr, titleOut)
+				fmt.Print(outputStr)
 			} else {
-				fmt.Printf("%s%s%s-%s\n", prefix, connector, idStr, titleOut)
+				outputStr := fmt.Sprintf("%s%s%s-%s\n", prefix, connector, idStr, titleOut)
+				fmt.Print(outputStr)
 			}
 			print(node.Children, newPrefix)
 		}

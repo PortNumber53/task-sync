@@ -113,6 +113,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 
 	// Helper to run a command and log its execution and output.
 	runCmd := func(cmd *exec.Cmd, description string, logOutput bool) (string, error) {
+		stepLogger.Printf("DEBUG: Executing test command for criterion %s: %s", config.CriterionID, cmd.String())
 		stepLogger.Printf("Executing: %s", cmd.String())
 		output, err := cmd.CombinedOutput()
 		outputStr := string(output)

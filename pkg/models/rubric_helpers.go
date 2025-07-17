@@ -23,7 +23,7 @@ type Criterion struct {
 	Counter     string
 }
 
-// ParseRubric extracts rubric criteria from a markdown file.
+// ParseRubric extracts rubric criteria from a markdown or JSON file.
 // Each criterion is expected to be in a section that starts with a header like:
 // ### #1: d0aba505-cc93-489c-bc8b-da566a1f0af5
 func ParseRubric(filePath string) ([]Criterion, error) {
@@ -38,81 +38,121 @@ func ParseRubric(filePath string) ([]Criterion, error) {
 		return nil, err
 	}
 
-	text := string(content)
-	// Go's regexp engine doesn't support lookaheads. Instead, we find the start
-	// index of each delimiter and slice the text into sections manually.
-	re := regexp.MustCompile(`(?m)^\s*###\s*#\d+:\s*[a-fA-F0-9-]{36}`)
-	matches := re.FindAllStringIndex(text, -1)
-
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("no criteria sections found in %s", filePath)
-	}
-
-	var sections []string
-	for i := 0; i < len(matches); i++ {
-		start := matches[i][0]
-		var end int
-		if i+1 < len(matches) {
-			end = matches[i+1][0]
-		} else {
-			end = len(text)
+	if strings.HasSuffix(filePath, ".json") {
+		var jsonCriteria []struct {
+			RubricItemId string `json:"rubricItemId"`
+			Score        int    `json:"score"`
+			Criterion    string `json:"criterion"`
+			Required     bool   `json:"required"`
+			Forms        map[string]struct {
+				CriterionTestCommand string `json:"criterion_test_command"`
+			} `json:"forms"`
 		}
-		sections = append(sections, text[start:end])
-	}
+		if err := json.Unmarshal(content, &jsonCriteria); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal JSON rubric: %w", err)
+		}
+		var criteria []Criterion
+		for i, critJSON := range jsonCriteria {
+			var crit Criterion
+			crit.Counter = strconv.Itoa(i + 1)
+			crit.Title = critJSON.RubricItemId
+			crit.Score = critJSON.Score
+			crit.Rubric = critJSON.Criterion
+			crit.Required = critJSON.Required
+			// Extract HeldOutTest from forms, assuming the first key if multiple exist
+			if len(critJSON.Forms) > 0 {
+				for _, formValue := range critJSON.Forms {
+					if formValue.CriterionTestCommand != "" {
+						crit.HeldOutTest = formValue.CriterionTestCommand
+						break // Use the first non-empty command found
+					}
+				}
+			} else {
+				crit.HeldOutTest = ""
+			}
+			if crit.Title != "" && crit.HeldOutTest != "" {
+				criteria = append(criteria, crit)
+			}
+		}
+		return criteria, nil
+	} else {
+		// Existing markdown parsing logic starts here
+		text := string(content)
+		// Go's regexp engine doesn't support lookaheads. Instead, we find the start
+		// index of each delimiter and slice the text into sections manually.
+		re := regexp.MustCompile(`(?m)^\s*###\s*#\d+:\s*[a-fA-F0-9-]{36}`)
+		matches := re.FindAllStringIndex(text, -1)
 
-	var criteria []Criterion
-
-	// Regexes to parse components of a rubric section.
-	headerRe := regexp.MustCompile(`(?m)^\s*###\s*#(\d+):\s*([a-fA-F0-9-]{36})`)
-	scoreRe := regexp.MustCompile(`\*\*Score\*\*:\s*(\d+)`)
-	requiredRe := regexp.MustCompile(`\*\*Required\*\*:\s*(true|false)`)
-	criterionRe := regexp.MustCompile(`(?s)\*\*Criterion\*\*:\s*(.*?)(?:\n\n|$)`)
-	heldOutTestRe := regexp.MustCompile("(?s)\\*\\*Held-out tests\\*\\*:\\n```(?:bash)?\\n(.*?)\\n```")
-
-	for _, section := range sections {
-		if strings.TrimSpace(section) == "" {
-			continue
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("no criteria sections found in %s", filePath)
 		}
 
-		headerMatch := headerRe.FindStringSubmatch(section)
-		if len(headerMatch) < 3 {
-			continue // Not a valid criterion section
+		var sections []string
+		for i := 0; i < len(matches); i++ {
+			start := matches[i][0]
+			var end int
+			if i+1 < len(matches) {
+				end = matches[i+1][0]
+			} else {
+				end = len(text)
+			}
+			sections = append(sections, text[start:end])
 		}
 
-		crit := Criterion{
-			Counter: strings.TrimSpace(headerMatch[1]),
-			Title:   strings.TrimSpace(headerMatch[2]),
-		}
+		var criteria []Criterion
 
-		scoreMatch := scoreRe.FindStringSubmatch(section)
-		if len(scoreMatch) > 1 {
-			if score, err := strconv.Atoi(scoreMatch[1]); err == nil {
-				crit.Score = score
+		// Regexes to parse components of a rubric section.
+		headerRe := regexp.MustCompile(`(?m)^\s*###\s*#(\d+):\s*([a-fA-F0-9-]{36})`)
+		scoreRe := regexp.MustCompile(`\*\*Score\*\*:\s*(\d+)`)
+		requiredRe := regexp.MustCompile(`\*\*Required\*\*:\s*(true|false)`)
+		criterionRe := regexp.MustCompile(`(?s)\*\*Criterion\*\*:\s*(.*?)(?:\n\n|$)`)
+		heldOutTestRe := regexp.MustCompile("(?s)\\*\\*Held-out tests\\*\\*:\\n```(?:bash)?\\n(.*?)\\n```")
+
+		for _, section := range sections {
+			if strings.TrimSpace(section) == "" {
+				continue
+			}
+
+			headerMatch := headerRe.FindStringSubmatch(section)
+			if len(headerMatch) < 3 {
+				continue // Not a valid criterion section
+			}
+
+			crit := Criterion{
+				Counter: strings.TrimSpace(headerMatch[1]),
+				Title:   strings.TrimSpace(headerMatch[2]),
+			}
+
+			scoreMatch := scoreRe.FindStringSubmatch(section)
+			if len(scoreMatch) > 1 {
+				if score, err := strconv.Atoi(scoreMatch[1]); err == nil {
+					crit.Score = score
+				}
+			}
+
+			requiredMatch := requiredRe.FindStringSubmatch(section)
+			if len(requiredMatch) > 1 {
+				crit.Required = (requiredMatch[1] == "true")
+			}
+
+			criterionMatch := criterionRe.FindStringSubmatch(section)
+			if len(criterionMatch) > 1 {
+				crit.Rubric = strings.TrimSpace(criterionMatch[1])
+			}
+
+			heldOutTestMatch := heldOutTestRe.FindStringSubmatch(section)
+			if len(heldOutTestMatch) > 1 {
+				crit.HeldOutTest = strings.TrimSpace(heldOutTestMatch[1])
+			}
+
+			// Only add if we have the essential parts
+			if crit.Title != "" && crit.HeldOutTest != "" {
+				criteria = append(criteria, crit)
 			}
 		}
 
-		requiredMatch := requiredRe.FindStringSubmatch(section)
-		if len(requiredMatch) > 1 {
-			crit.Required = (requiredMatch[1] == "true")
-		}
-
-		criterionMatch := criterionRe.FindStringSubmatch(section)
-		 if len(criterionMatch) > 1 {
-			crit.Rubric = strings.TrimSpace(criterionMatch[1])
-		}
-
-		heldOutTestMatch := heldOutTestRe.FindStringSubmatch(section)
-		if len(heldOutTestMatch) > 1 {
-			crit.HeldOutTest = strings.TrimSpace(heldOutTestMatch[1])
-		}
-
-		// Only add if we have the essential parts
-		if crit.Title != "" && crit.HeldOutTest != "" {
-			criteria = append(criteria, crit)
-		}
+		return criteria, nil
 	}
-
-	return criteria, nil
 }
 
 // GetRubricSetFromDependencies recursively searches for a rubric_set step in the dependency tree.

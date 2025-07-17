@@ -69,6 +69,7 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 		models.StepLogger.Printf("DEBUG: Step %d: config: %+v\n", step.StepID, config)
 		models.StepLogger.Printf("DEBUG: Step %d: config.MHTMLFile: %s\n", step.StepID, config.MHTMLFile)
 		models.StepLogger.Printf("DEBUG: Step %d: config.MDFile: %s\n", step.StepID, config.MDFile)
+		models.StepLogger.Printf("DEBUG: Step %d: config.JSONFile: %s\n", step.StepID, config.JSONFile)
 
 		ok, err := models.CheckDependencies(db, &step)
 		if err != nil {
@@ -80,20 +81,29 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 			continue
 		}
 
-		mhtmlFile := filepath.Join(step.LocalPath, config.MHTMLFile)
-		mdFile := filepath.Join(step.LocalPath, config.MDFile)
-
-		models.StepLogger.Printf("Processing rubrics_import step: %s -> %s\n", mhtmlFile, mdFile)
-
-		err = models.ProcessRubricsMHTML(mhtmlFile, mdFile)
-		if err != nil {
-			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("failed to process MHTML file: %v", err)})
-			models.StepLogger.Printf("Step %d: failed to process MHTML file: %v\n", step.StepID, err)
-			continue
+		if config.JSONFile != "" {
+			jsonPath := filepath.Join(step.LocalPath, config.JSONFile)
+			criteria, err := models.ParseRubric(jsonPath)
+			if err != nil {
+				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("failed to parse JSON rubric: %v", err)})
+				continue
+			}
+			models.StepLogger.Printf("DEBUG: Parsed JSON criteria for step %d: %+v", step.StepID, criteria)
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "message": "JSON rubric processed successfully"})
+		} else if config.MHTMLFile != "" {
+			mhtmlFile := filepath.Join(step.LocalPath, config.MHTMLFile)
+			mdFile := filepath.Join(step.LocalPath, config.MDFile)
+			models.StepLogger.Printf("Processing rubrics_import step: %s -> %s\n", mhtmlFile, mdFile)
+			err = models.ProcessRubricsMHTML(mhtmlFile, mdFile)
+			if err != nil {
+				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("failed to process MHTML file: %v", err)})
+				continue
+			}
+		} else if config.MDFile != "" {
+			// Handle MD file logic if needed
+		} else {
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "No rubric file specified"})
 		}
-
-		models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "message": "Successfully processed rubrics_import step."})
-		models.StepLogger.Printf("Step %d: Successfully processed rubrics_import step.\n", step.StepID)
 	}
 	return nil
 }

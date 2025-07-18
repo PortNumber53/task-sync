@@ -52,7 +52,7 @@ func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *l
 		"rubric_set": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			// If a specific step is provided (from ProcessSpecificStep), run only that.
 			if se != nil && se.StepID != 0 {
-				return ProcessRubricSetStep(db, se, logger)
+				return ProcessRubricSetStep(db, se, logger, force)
 			}
 			// Otherwise (from executePendingSteps), run all rubric_set steps.
 			return processAllRubricSetSteps(db, logger)

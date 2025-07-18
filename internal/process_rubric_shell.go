@@ -243,16 +243,16 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 				return
 			}
 
-			// 1. Fully clean the repo status inside the container
+			// Ensure a single cleanup block before patch application
 			cleanupCmds := [][]string{
 				{"docker", "exec", containerName, "git", "checkout", "--", "."},
-				{"docker", "exec", containerName, "git", "clean", "-fd"},
-				{"docker", "exec", containerName, "git", "reset", "--hard"},
+				{"docker", "exec", containerName, "git", "clean", "-fdx"},
+				{"docker", "exec", containerName, "git", "reset", "--hard", "HEAD"},
 			}
 			var cleanupOutputBuilder strings.Builder
 			for _, args := range cleanupCmds {
 				cmd := exec.Command(args[0], args[1:]...)
-				output, err := runCmd(cmd, "cleanup repo", false)
+				output, err := runCmd(cmd, "cleanup repo", true)
 				cleanupOutputBuilder.WriteString(output + "\n")
 				if err != nil {
 					overallErrorBuilder.WriteString(fmt.Sprintf("cleanup error: %v; ", err))
@@ -265,7 +265,11 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 			prePatchFile := "pre_patch.patch"
 			prePatchPath := filepath.Join(stepExec.LocalPath, prePatchFile)
 			info, err := os.Stat(prePatchPath)
-			if err == nil && !info.IsDir() && info.Size() > 0 {
+			if err == nil && info.Size() == 0 {
+				stepLogger.Printf("pre_patch.patch is empty, skipping execution")
+			} else if err != nil {
+				stepLogger.Printf("Warning: could not stat pre_patch.patch: %v", err)
+			} else {
 				destPrePatch := "/tmp/pre_patch.patch"
 				cmdCpPrePatch := exec.Command("docker", "cp", prePatchPath, fmt.Sprintf("%s:%s", containerName, destPrePatch))
 				output, err := runCmd(cmdCpPrePatch, "copy pre_patch.patch", false)
@@ -381,6 +385,20 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 				if err != nil && ctx.Err() != context.DeadlineExceeded {
 					result["command_error"] = err.Error()
 					overallErrorBuilder.WriteString(fmt.Sprintf("command error: %v; ", err))
+				}
+
+				// After executing the rubric command, reset the rerun flag to false and update the step settings in the database
+				if err == nil {
+					result["status"] = "success"
+				} else {
+					result["status"] = "failure"
+				}
+				updatedConfig := config // Copy the config
+				updatedConfig.Rerun = false
+				updatedSettings, _ := json.Marshal(map[string]interface{}{ "rubric_shell": updatedConfig })
+				_, errUpdate := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), stepExec.StepID)
+				if errUpdate != nil {
+					stepLogger.Printf("Warning: failed to update rerun flag for step %d: %v", stepExec.StepID, errUpdate)
 				}
 			}
 

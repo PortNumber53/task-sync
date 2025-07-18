@@ -35,7 +35,7 @@ func processAllRubricSetSteps(db *sql.DB, logger *log.Logger) error {
 
 		stepLogger := log.New(os.Stdout, fmt.Sprintf("STEP %d [rubric_set]: ", stepExec.StepID), log.Ldate|log.Ltime|log.Lshortfile)
 
-		if err := ProcessRubricSetStep(db, &stepExec, stepLogger); err != nil {
+		if err := ProcessRubricSetStep(db, &stepExec, stepLogger, false); err != nil {
 			logger.Printf("failed to process rubric_set step %d: %v", stepExec.StepID, err)
 		}
 	}
@@ -46,7 +46,7 @@ func processAllRubricSetSteps(db *sql.DB, logger *log.Logger) error {
 // ProcessRubricSetStep handles the execution of a rubric_set step.
 // It parses the main rubric file, updates the task-level settings with container assignments,
 // and then creates, updates, or deletes child rubric_shell steps to match the rubric criteria.
-func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
+func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger, force bool) error {
 	var rerunNeeded bool
 
 	var settings struct {
@@ -172,6 +172,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 				Counter:     criterion.Counter,
 				Score:       criterion.Score,
 				Required:    criterion.Required,
+				Rerun:       force,
 				DependsOn:   []models.Dependency{{ID: stepExec.StepID}},
 				GeneratedBy: strconv.Itoa(stepExec.StepID),
 			}
@@ -313,6 +314,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 				Counter:     criterion.Counter,
 				Score:       criterion.Score,
 				Required:    criterion.Required,
+				Rerun:       force,
 				DependsOn:   []models.Dependency{{ID: stepExec.StepID}},
 				GeneratedBy: strconv.Itoa(stepExec.StepID),
 			}

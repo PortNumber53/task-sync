@@ -201,6 +201,7 @@ type RubricShellConfig struct {
 	ContainerName    string            `json:"container_name,omitempty"`
 	LastRun          map[string]string `json:"last_run,omitempty"`
 	Files            map[string]string `json:"files,omitempty"`
+	Rerun            bool              `json:"rerun,omitempty"`
 }
 
 func (c *RubricShellConfig) GetImageTag() string      { return c.ImageTag }

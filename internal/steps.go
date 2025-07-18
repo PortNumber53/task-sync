@@ -220,13 +220,16 @@ func ClearStepResults(db *sql.DB, stepID int) error {
 	if err != nil {
 		return fmt.Errorf("error clearing step results: %w", err)
 	}
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("error checking affected rows: %w", err)
 	}
+
 	if rowsAffected == 0 {
 		return fmt.Errorf("no step found with ID %d", stepID)
 	}
+
 	return nil
 }
 
@@ -562,10 +565,10 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	logger.Printf("Command succeeded: volume created %s", volumeName)
 
 	appHostPath := filepath.Join(se.LocalPath, "original/") + "/"
-	solution1Path := filepath.Join(se.LocalPath, "solution1_volume/") + "/"
-	solution2Path := filepath.Join(se.LocalPath, "solution2_volume/") + "/"
-	solution3Path := filepath.Join(se.LocalPath, "solution3_volume/") + "/"
-	solution4Path := filepath.Join(se.LocalPath, "solution4_volume/") + "/"
+	solution1Path := filepath.Join(se.LocalPath, "volume_solution1/") + "/"
+	solution2Path := filepath.Join(se.LocalPath, "volume_solution2/") + "/"
+	solution3Path := filepath.Join(se.LocalPath, "volume_solution3/") + "/"
+	solution4Path := filepath.Join(se.LocalPath, "volume_solution4/") + "/"
 	containerName := fmt.Sprintf("extract_vol_container_%d", se.StepID)
 	cmd = CommandFunc("docker", "run", "-d", "--platform", "linux/amd64", "--name", containerName, "-v", volumeName+":/original_volume", "-v", appHostPath+":/original", "-v", solution1Path+":/solution1", "-v", solution2Path+":/solution2", "-v", solution3Path+":/solution3", "-v", solution4Path+":/solution4", imageID, "tail", "-f", "/dev/null")
 	logger.Printf("Executing command: docker run -d --platform linux/amd64 --name %s -v %s:/original_volume -v %s:/orignal -v %s:/solution1 -v %s:/solution2 -v %s:/solution3 -v %s:/solution4 %s tail -f /dev/null", containerName, volumeName, appHostPath, solution1Path, solution2Path, solution3Path, solution4Path, imageID)

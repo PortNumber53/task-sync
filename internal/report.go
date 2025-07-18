@@ -9,6 +9,20 @@ import (
 	"strings"
 )
 
+// Function to add thousand separators to numbers
+func addCommas(n int64) string {
+	in := strconv.FormatInt(n, 10)
+	out := &strings.Builder{}
+	lenIn := len(in)
+	for i, c := range in {
+		if i > 0 && (lenIn-i)%3 == 0 {
+			out.WriteRune(',')
+		}
+		out.WriteRune(c)
+	}
+	return out.String()
+}
+
 // ReportTask prints a step tree for a given task ID, showing rubric_shell results as icons.
 func ReportTask(db *sql.DB, taskID int) error {
 	// Load config for custom PASS/FAIL markers
@@ -116,6 +130,24 @@ func ReportTask(db *sql.DB, taskID int) error {
 	}
 	// Sort root nodes
 	// (optional: implement sorting if needed)
+
+	// Calculate output sizes per solution
+	sizeMap := make(map[string]int64)
+	for _, step := range steps {
+		if strings.Contains(step.Settings, "rubric_shell") {
+			if step.Results.Valid {
+				var results map[string]map[string]interface{}
+				if err := json.Unmarshal([]byte(step.Results.String), &results); err == nil {
+					for patch, res := range results {
+						if cmdOut, ok := res["command_output"].(string); ok {
+							solKey := patch
+							sizeMap[solKey] += int64(len(cmdOut))
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// 4. Print tree with rubric_shell icons
 	var print func(nodes []*stepNode, prefix string)
@@ -238,5 +270,14 @@ func ReportTask(db *sql.DB, taskID int) error {
 		}
 	}
 	print(rootNodes, "")
+
+	// After the print function call, add summary of output sizes
+	for patch, size := range sizeMap {
+		solNumStr := strings.TrimPrefix(strings.TrimSuffix(patch, ".patch"), "solution")
+		solNum, err := strconv.Atoi(solNumStr)
+		if err == nil {
+			fmt.Printf("Solution %d combined output: %s bytes\n", solNum, addCommas(size))
+		}
+	}
 	return nil
 }

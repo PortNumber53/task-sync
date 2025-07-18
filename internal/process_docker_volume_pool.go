@@ -278,7 +278,7 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 	}
 
 	// Check if volumes exist - we only care about the solution1_volume since that's what we're using
-	solutionVolumePath := filepath.Join(stepExec.LocalPath, "solution1_volume")
+	solutionVolumePath := filepath.Join(stepExec.LocalPath, "volume_solution1")
 	if _, err := os.Stat(solutionVolumePath); os.IsNotExist(err) {
 		recreateNeeded = true
 		logger.Printf("Volume directory %s doesn't exist, will recreate containers", solutionVolumePath)
@@ -303,7 +303,7 @@ func runDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, logger *log.
 			config.Triggers.Containers[solutionFile] = containerName
 			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
 		}
-		solutionVolumePath := filepath.Join(stepExec.LocalPath, fmt.Sprintf("solution%d_volume", solutionNum))
+		solutionVolumePath := filepath.Join(stepExec.LocalPath, fmt.Sprintf("volume_solution%d", solutionNum))
 
 		// Remove existing container if it exists
 		if exists, _ := checkContainerExists(containerName); exists {

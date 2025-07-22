@@ -499,12 +499,20 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 		return fmt.Errorf("failed to unmarshal settings: %w", err)
 	}
 	var config models.DockerExtractVolumeConfig
-	configData, ok := settings["docker_extract_volume"]
-	if !ok {
-		return fmt.Errorf("docker_extract_volume config not found")
+	if err := json.Unmarshal(settings["docker_extract_volume"], &config); err != nil {
+		return fmt.Errorf("failed to unmarshal docker_extract_volume settings: %w", err)
 	}
-	if err := json.Unmarshal(configData, &config); err != nil {
-		return fmt.Errorf("failed to unmarshal docker_extract_volume config: %w", err)
+
+	// Add hash check logic using utility function
+	if len(config.Triggers.Files) > 0 {
+		changed, err := models.CheckFileHashChanges(se.LocalPath, config.Triggers.Files, logger)
+		if err != nil {
+			return fmt.Errorf("error checking file hashes: %w", err)
+		}
+		if !changed {
+			logger.Printf("Step %d: No changes detected in triggers.files. Skipping execution.", se.StepID)
+			return nil
+		}
 	}
 
 	// Log the step configuration for debugging
@@ -656,6 +664,13 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		logger.Printf("Failed to remove container %s: %v, output: %s", containerName, err, string(output))
+	}
+
+	// After successful execution, update file hashes
+	if err := models.UpdateFileHashes(db, se.StepID, se.LocalPath, config.Triggers.Files, logger); err != nil {
+		logger.Printf("Error updating file hashes for step %d: %v", se.StepID, err)
+	} else {
+		logger.Printf("File hashes updated successfully for step %d", se.StepID)
 	}
 
 	return nil

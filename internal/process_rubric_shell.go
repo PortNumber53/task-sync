@@ -314,7 +314,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 			heldOutTestPatchPath := filepath.Join(stepExec.LocalPath, heldOutTestPatch)
 			destTestPath := filepath.Join("/app", heldOutTestPatch)
 			cmdCpTest := exec.Command("docker", "cp", heldOutTestPatchPath, fmt.Sprintf("%s:%s", containerName, destTestPath))
-			output, err := runCmd(cmdCpTest, "copy held-out test patch", false)
+			output, err := runCmd(cmdCpTest, fmt.Sprintf("copy held-out test patch for %s", containerName), false)
 			if err != nil {
 				overallErrorBuilder.WriteString(fmt.Sprintf("held_out_patch copy error: %v; ", err))
 				result["held_out_patch_error"] = err.Error()
@@ -395,7 +395,7 @@ func ProcessRubricShellStep(db *sql.DB, stepExec *models.StepExec, stepLogger *l
 				}
 				updatedConfig := config // Copy the config
 				updatedConfig.Rerun = false
-				updatedSettings, _ := json.Marshal(map[string]interface{}{ "rubric_shell": updatedConfig })
+				updatedSettings, _ := json.Marshal(map[string]interface{}{"rubric_shell": updatedConfig})
 				_, errUpdate := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), stepExec.StepID)
 				if errUpdate != nil {
 					stepLogger.Printf("Warning: failed to update rerun flag for step %d: %v", stepExec.StepID, errUpdate)

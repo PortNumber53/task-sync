@@ -7,12 +7,14 @@ import (
 
 // DockerBuildConfig represents the configuration for a docker_build step.
 type DockerBuildConfig struct {
-	Dockerfile string            `json:"dockerfile,omitempty"`
-	ImageID    string            `json:"image_id,omitempty"`
-	ImageTag   string            `json:"image_tag,omitempty"`
+	Dockerfile string `json:"dockerfile,omitempty"`
+	ImageID    string `json:"image_id,omitempty"`
+	ImageTag   string `json:"image_tag,omitempty"`
 	DependsOn  []Dependency      `json:"depends_on,omitempty"`
-	Files      map[string]string `json:"files,omitempty"`
-	Parameters []string          `json:"parameters,omitempty"`
+	Triggers   struct {
+		Files map[string]string `json:"files,omitempty"`
+	} `json:"triggers,omitempty"`
+	Parameters []string `json:"parameters,omitempty"`
 }
 
 func (c *DockerBuildConfig) GetImageTag() string      { return c.ImageTag }
@@ -98,6 +100,21 @@ func (c *DockerRubricsConfig) GetImageTag() string      { return c.DockerRubrics
 func (c *DockerRubricsConfig) GetImageID() string       { return c.DockerRubrics.ImageID }
 func (c *DockerRubricsConfig) HasImage() bool           { return c.DockerRubrics.ImageTag != "" && c.DockerRubrics.ImageID != "" }
 func (c *DockerRubricsConfig) GetDependsOn() []Dependency { return c.DockerRubrics.DependsOn }
+
+type DockerExtractVolumeConfig struct {
+	VolumeName string `json:"volume_name"`
+	ImageID    string `json:"image_id"`
+	AppFolder  string `json:"app_folder"`
+	Triggers   struct {
+		Files map[string]string `json:"files,omitempty"`
+	} `json:"triggers,omitempty"`
+	DependsOn []Dependency `json:"depends_on,omitempty"`
+}
+
+func (c *DockerExtractVolumeConfig) GetImageTag() string { return "" }
+func (c *DockerExtractVolumeConfig) GetImageID() string { return c.ImageID }
+func (c *DockerExtractVolumeConfig) HasImage() bool { return c.ImageID != "" }
+func (c *DockerExtractVolumeConfig) GetDependsOn() []Dependency { return c.DependsOn }
 
 // FindImageDetailsRecursive recursively finds image details for a step.
 func FindImageDetailsRecursive(db *sql.DB, stepID int, logger *log.Logger) (string, string, error) {

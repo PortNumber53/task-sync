@@ -32,7 +32,6 @@ type StepConfigHolder struct {
 	DockerBuild          *DockerBuildConfig          `json:"docker_build,omitempty"`
 	DockerShell          *DockerShellConfig          `json:"docker_shell,omitempty"`
 	DockerVolumePool     *DockerVolumePoolConfig     `json:"docker_volume_pool,omitempty"`
-	DockerExtractVolume  *DockerExtractVolumeConfig  `json:"docker_extract_volume,omitempty"`
 }
 
 // StepConfig is an interface that all step configurations should implement.
@@ -250,19 +249,6 @@ type DockerVolumePoolConfig struct {
 	KeepForever bool `json:"keep_forever"`
 	Force bool `json:"force"`
 }
-
-// DockerExtractVolumeConfig represents the configuration for a docker_extract_volume step.
-type DockerExtractVolumeConfig struct {
-	VolumeName string `json:"volume_name"`
-	ImageID    string `json:"image_id"`
-	AppFolder  string `json:"app_folder"`
-	DependsOn  []Dependency `json:"depends_on,omitempty"`
-}
-
-func (c *DockerExtractVolumeConfig) GetImageTag() string { return "" }
-func (c *DockerExtractVolumeConfig) GetImageID() string { return c.ImageID }
-func (c *DockerExtractVolumeConfig) HasImage() bool { return c.ImageID != "" }
-func (c *DockerExtractVolumeConfig) GetDependsOn() []Dependency { return c.DependsOn }
 
 // stepLogger is a global logger for step-related messages.
 var StepLogger *log.Logger

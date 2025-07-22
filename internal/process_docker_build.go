@@ -78,10 +78,10 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 			continue
 		}
 
-		if dockerfile, ok := config.Files["Dockefile"]; ok {
-			delete(config.Files, "Dockefile")
-			config.Files["Dockerfile"] = dockerfile
-			stepLogger.Printf("Step %d: Corrected 'Dockefile' to 'Dockerfile' in files map\n", step.StepID)
+		if dockerfile, ok := config.Triggers.Files["Dockefile"]; ok {
+			delete(config.Triggers.Files, "Dockefile")
+			config.Triggers.Files["Dockerfile"] = dockerfile
+			stepLogger.Printf("Step %d: Corrected 'Dockefile' to 'Dockerfile' in triggers.files map\n", step.StepID)
 		}
 
 		taskSettings, err := models.GetTaskSettings(db, step.TaskID)
@@ -130,26 +130,10 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 			}
 		}
 
-		filesChanged := false
-		for filePath, oldHash := range config.Files {
-			fullPath := filepath.Join(step.LocalPath, filePath)
-			currentHash, err := models.GetSHA256(fullPath)
-			if err != nil {
-				stepLogger.Printf("Step %d: File %s: could not compute hash (error: %v). Marking as changed.", step.StepID, filePath, err)
-				filesChanged = true
-				break
-			}
-			if oldHash == "" {
-				stepLogger.Printf("Step %d: File %s: stored hash is empty. Marking as changed.", step.StepID, filePath)
-				filesChanged = true
-				break
-			}
-			if currentHash != oldHash {
-				stepLogger.Printf("Step %d: File %s: hash mismatch. Marking as changed.", step.StepID, filePath)
-				filesChanged = true
-				break
-			}
-			stepLogger.Printf("Step %d: File %s: stored hash = %s, current hash = %s", step.StepID, filePath, oldHash, currentHash)
+		filesChanged, err := models.CheckFileHashChanges(step.LocalPath, config.Triggers.Files, stepLogger)
+		if err != nil {
+			stepLogger.Printf("Step %d: Error checking file hashes: %v. Triggering build.", step.StepID, err)
+			buildNeeded = true
 		}
 		if filesChanged {
 			buildNeeded = true
@@ -170,21 +154,19 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 			}
 
 			// After successful build, update file hashes and persist to step settings
-			for filePath := range config.Files {
+			for filePath := range config.Triggers.Files {
 				fullPath := filepath.Join(step.LocalPath, filePath)
 				hash, err := models.GetSHA256(fullPath)
 				if err != nil {
 					stepLogger.Printf("Step %d: Warning: could not compute hash for %s: %v\n", step.StepID, filePath, err)
 					continue
 				}
-				config.Files[filePath] = hash
+				config.Triggers.Files[filePath] = hash
 			}
-			persistMap := map[string]interface{}{
-				"files":      config.Files,
-				"depends_on": config.DependsOn,
-				"parameters": config.Parameters,
-				// add any other allowed fields here
-			}
+			// Prepare persistMap with only files hashes
+			persistMap := make(map[string]interface{})
+			persistMap["triggers"] = map[string]interface{}{ "files": config.Triggers.Files }
+			// add any other allowed fields here
 			settingsMap["docker_build"], _ = json.Marshal(persistMap)
 			updatedSettings, _ := json.Marshal(settingsMap)
 			_, err := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), step.StepID)

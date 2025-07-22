@@ -43,4 +43,21 @@ func TestProcessDockerVolumePoolStep(t *testing.T) {
         }
         // Add assertions for expected behavior, e.g., check if git ops were called (mocking may be needed)
     })
+
+    // Test case for image ID change trigger
+    t.Run("ImageIDChangeTrigger", func(t *testing.T) {
+        // Mock setup with known image ID
+        stepExec := &models.StepExec{
+            TaskID: 1,
+            Settings: `{"docker_volume_pool":{"triggers":{"image_id":"old_image_id","image_tag":"test_image"},"solutions":["solution1"],"force":false}}`,
+            LocalPath: "/tmp/testdir",
+        }
+        // Simulate Docker commands (in a real test, use mocks)
+        logger := log.New(os.Stdout, "", 0)
+        err := ProcessDockerVolumePoolStep(nil, stepExec, logger)
+        if err != nil {
+            t.Errorf("expected no error, got %v", err)
+        }
+        // Add assertion to check if image ID was updated in settings or logs (mocking needed for full test)
+    })
 }

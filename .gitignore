@@ -9,7 +9,8 @@ pre_patch.patch
 PROMPT.md
 report*.json
 rubrics.json
-
+volume_solution?
+original/
 tmp/
 
 # Created by https://www.toptal.com/developers/gitignore/api/linux

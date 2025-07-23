@@ -505,7 +505,7 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 
 	// Add hash check logic using utility function
 	if len(config.Triggers.Files) > 0 {
-		changed, err := models.CheckFileHashChanges(se.LocalPath, config.Triggers.Files, logger)
+		changed, err := models.CheckFileHashChanges("/home/grimlock/go/task-sync/", config.Triggers.Files, logger)
 		if err != nil {
 			return fmt.Errorf("error checking file hashes: %w", err)
 		}
@@ -572,11 +572,11 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	}
 	logger.Printf("Command succeeded: volume created %s", volumeName)
 
-	appHostPath := filepath.Join(se.LocalPath, "original/") + "/"
-	solution1Path := filepath.Join(se.LocalPath, "volume_solution1/") + "/"
-	solution2Path := filepath.Join(se.LocalPath, "volume_solution2/") + "/"
-	solution3Path := filepath.Join(se.LocalPath, "volume_solution3/") + "/"
-	solution4Path := filepath.Join(se.LocalPath, "volume_solution4/") + "/"
+	appHostPath := filepath.Join("/home/grimlock/go/task-sync/", "original/") + "/"
+	solution1Path := filepath.Join("/home/grimlock/go/task-sync/", "volume_solution1/") + "/"
+	solution2Path := filepath.Join("/home/grimlock/go/task-sync/", "volume_solution2/") + "/"
+	solution3Path := filepath.Join("/home/grimlock/go/task-sync/", "volume_solution3/") + "/"
+	solution4Path := filepath.Join("/home/grimlock/go/task-sync/", "volume_solution4/") + "/"
 	containerName := fmt.Sprintf("extract_vol_container_%d", se.StepID)
 	cmd = CommandFunc("docker", "run", "-d", "--platform", "linux/amd64", "--name", containerName, "-v", volumeName+":/original_volume", "-v", appHostPath+":/original", "-v", solution1Path+":/solution1", "-v", solution2Path+":/solution2", "-v", solution3Path+":/solution3", "-v", solution4Path+":/solution4", imageID, "tail", "-f", "/dev/null")
 	logger.Printf("Executing command: docker run -d --platform linux/amd64 --name %s -v %s:/original_volume -v %s:/orignal -v %s:/solution1 -v %s:/solution2 -v %s:/solution3 -v %s:/solution4 %s tail -f /dev/null", containerName, volumeName, appHostPath, solution1Path, solution2Path, solution3Path, solution4Path, imageID)

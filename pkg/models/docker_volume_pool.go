@@ -114,7 +114,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	// Check if volumes exist - we only care about the solution1_volume since that's what we're using
-	solutionVolumePath := filepath.Join(stepExec.LocalPath, "volume_solution1")
+	solutionVolumePath := filepath.Join("/home/grimlock/go/task-sync/", "volume_solution1")
 	if _, err := os.Stat(solutionVolumePath); os.IsNotExist(err) {
 		recreateNeeded = true
 		logger.Printf("Volume directory %s doesn't exist, will recreate containers", solutionVolumePath)
@@ -130,15 +130,14 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	// Create containers for each solution
-	for i, solutionFile := range config.Solutions {
-		solutionNum := i + 1
+	for _, solutionFile := range config.Solutions {
 		containerName, ok := config.Triggers.Containers[solutionFile]
 		if !ok || containerName == "" {
 			containerName = GenerateDVContainerName(stepExec.TaskID, solutionFile) 
 			config.Triggers.Containers[solutionFile] = containerName
 			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
 		}
-		solutionVolumePath := filepath.Join(stepExec.LocalPath, fmt.Sprintf("volume_solution%d", solutionNum))
+		solutionVolumePath := filepath.Join("/home/grimlock/go/task-sync/", fmt.Sprintf("volume_%s", solutionFile))
 
 		// Remove existing container if it exists
 		if exists, _ := CheckContainerExists(containerName); exists {
@@ -246,7 +245,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		// Prepare patch file path if it exists
 		patchFile := ""
 		if solutionFile != "" {
-			patchFile = filepath.Join(stepExec.LocalPath, solutionFile)
+			patchFile = filepath.Join("/home/grimlock/go/task-sync/", solutionFile)
 			if _, err := os.Stat(patchFile); os.IsNotExist(err) {
 				logger.Printf("Patch file not found: %s, skipping patch application", patchFile)
 				patchFile = ""
@@ -257,7 +256,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 
 		// Apply git cleanup and patches to the container
 		logger.Printf("Applying git cleanup and patches to container %s", containerName)
-		if err := ApplyGitCleanupAndPatch(containerName, solutionFile, config.HeldOutTestFile, config.GradingSetupScript, logger); err != nil {
+		if err := ApplyGitCleanupAndPatch(containerName, patchFile, config.HeldOutTestFile, config.GradingSetupScript, logger); err != nil {
 			return fmt.Errorf("failed to apply git cleanup and patches to container %s: %w", containerName, err)
 		}
 
@@ -604,7 +603,7 @@ func InitializeContainerMap(taskID int, solutions []string) map[string]string {
 func CheckFileHashTriggers(db *sql.DB, stepExec *StepExec, config *DockerVolumePoolConfig, logger *log.Logger) (bool, error) {
 	runNeeded := false
 	for fileName := range config.Triggers.Files {
-		filePath := filepath.Join(stepExec.LocalPath, fileName)
+		filePath := filepath.Join("/home/grimlock/go/task-sync/", fileName)
 		currentHash, err := GetSHA256(filePath)
 		if err != nil {
 			logger.Printf("Error computing hash for %s: %v", filePath, err)

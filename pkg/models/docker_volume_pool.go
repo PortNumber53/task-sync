@@ -114,7 +114,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	// Check if volumes exist - we only care about the solution1_volume since that's what we're using
-	solutionVolumePath := filepath.Join("/home/grimlock/go/task-sync/", "volume_solution1")
+	solutionVolumePath := filepath.Join(stepExec.LocalPath, "volume_solution1")
 	if _, err := os.Stat(solutionVolumePath); os.IsNotExist(err) {
 		recreateNeeded = true
 		logger.Printf("Volume directory %s doesn't exist, will recreate containers", solutionVolumePath)
@@ -137,7 +137,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			config.Triggers.Containers[solutionFile] = containerName
 			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
 		}
-		solutionVolumePath := filepath.Join("/home/grimlock/go/task-sync/", fmt.Sprintf("volume_%s", solutionFile))
+		solutionVolumePath := filepath.Join(stepExec.LocalPath, fmt.Sprintf("volume_%s", solutionFile))
 
 		// Remove existing container if it exists
 		if exists, _ := CheckContainerExists(containerName); exists {
@@ -245,7 +245,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		// Prepare patch file path if it exists
 		patchFile := ""
 		if solutionFile != "" {
-			patchFile = filepath.Join("/home/grimlock/go/task-sync/", solutionFile)
+			patchFile = filepath.Join(stepExec.LocalPath, solutionFile)
 			if _, err := os.Stat(patchFile); os.IsNotExist(err) {
 				logger.Printf("Patch file not found: %s, skipping patch application", patchFile)
 				patchFile = ""
@@ -600,10 +600,10 @@ func InitializeContainerMap(taskID int, solutions []string) map[string]string {
 }
 
 // CheckFileHashTriggers checks if file hashes have changed for Docker volume pool steps
-func CheckFileHashTriggers(db *sql.DB, stepExec *StepExec, config *DockerVolumePoolConfig, logger *log.Logger) (bool, error) {
+func CheckFileHashTriggers(basePath string, config *DockerVolumePoolConfig, logger *log.Logger) (bool, error) {
 	runNeeded := false
 	for fileName := range config.Triggers.Files {
-		filePath := filepath.Join("/home/grimlock/go/task-sync/", fileName)
+		filePath := filepath.Join(basePath, fileName)
 		currentHash, err := GetSHA256(filePath)
 		if err != nil {
 			logger.Printf("Error computing hash for %s: %v", filePath, err)

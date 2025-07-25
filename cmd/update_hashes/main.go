@@ -12,7 +12,9 @@ import (
 	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
-const projectBasePath = "/home/grimlock/go/task-sync/"
+// basePath should be set from task settings or CLI argument in a real system
+// TODO: Replace with dynamic lookup from task.settings.local_path or CLI argument
+var basePath string // Set this via flag, config, or task context
 
 func main() {
 	pgURL, err := internal.GetPgURLFromEnv()
@@ -61,7 +63,7 @@ func main() {
 				log.Printf("Updating hashes for step %d, type %s", stepID, stepType)
 				newHashes := make(map[string]string)
 				for fileName := range config.Triggers.Files {
-					filePath := filepath.Join(projectBasePath, fileName)
+					filePath := filepath.Join(basePath, fileName)
 					newHash, err := models.GetSHA256(filePath)
 					if err != nil {
 						log.Printf("Error getting hash for %s: %v", filePath, err)

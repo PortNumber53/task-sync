@@ -26,12 +26,16 @@ func addCommas(n int64) string {
 // ReportTask prints a step tree for a given task ID, showing rubric_shell results as icons.
 func ReportTask(db *sql.DB, taskID int) error {
 	// Load config for custom PASS/FAIL markers
-	cfg, _ := LoadConfig()
+	cfg, errCfg := LoadConfig()
+	if errCfg != nil {
+		fmt.Printf("Debug: Failed to load config: %v\n", errCfg)
+		cfg = &Config{} // Fallback to default config
+	}
 	passMarker := cfg.PassMarker
-	failMarker := cfg.FailMarker
 	if passMarker == "" {
 		passMarker = "#__PASS__#"
 	}
+	failMarker := cfg.FailMarker
 	if failMarker == "" {
 		failMarker = "#__FAIL__#"
 	}
@@ -199,73 +203,50 @@ func ReportTask(db *sql.DB, taskID int) error {
 				connector = "╰── "
 				newPrefix = prefix + "    "
 			}
-			// Always show 4 icons for rubric_shell steps
 			var icons string
 			if strings.Contains(node.Settings, "rubric_shell") {
-				var results map[string]map[string]interface{}
-				if node.Results.Valid {
-					_ = json.Unmarshal([]byte(node.Results.String), &results)
-				}
-				patches := []string{"solution1.patch", "solution2.patch", "solution3.patch", "solution4.patch"}
-				for _, patch := range patches {
-					icon := "❔"
-					if results != nil {
-						if res, ok := results[patch]; ok {
-							// Use emoji field if present
-							if emoji, ok := res["emoji"].(string); ok && emoji != "" {
-								icon = emoji
-							} else if out, ok := res["output"].(string); ok {
-								// Fallback to old logic
-								if strings.Contains(out, "errorlevel=127") || strings.Contains(out, "exit status 127") || strings.Contains(out, "command not found") || strings.Contains(out, "No such file or directory") {
-									icon = "💀"
-								} else if strings.Contains(out, passMarker) {
-									icon = "✅"
-								} else if strings.Contains(out, failMarker) {
-									icon = "❌"
+				var settingsMap map[string]interface{}
+				if err := json.Unmarshal([]byte(node.Settings), &settingsMap); err == nil {
+					if rubricShell, ok := settingsMap["rubric_shell"].(map[string]interface{}); ok {
+						if resultsRaw, ok := rubricShell["results"].(map[string]interface{}); ok {
+							resultMap := make(map[string]string)
+							for k, v := range resultsRaw {
+								if str, ok := v.(string); ok {
+									resultMap[k] = str
 								}
 							}
+							counter := 0
+							for _, patch := range []string{"solution1.patch", "solution2.patch", "solution3.patch", "solution4.patch"} {
+								if counter >= 4 {
+									break
+								}
+								if output, ok := resultMap[patch]; ok {
+									if strings.Contains(output, passMarker) {
+										icons += "✅ "
+									} else if strings.Contains(output, failMarker) {
+										icons += "❌ "
+									} else {
+										icons += "❔ "
+									}
+								} else {
+									icons += "❔ "
+								}
+								counter++
+							}
+						} else {
+							icons = "❔ ❔ ❔ ❔ "
 						}
+					} else {
+						icons = "❔ ❔ ❔ ❔ "
 					}
-					icons += icon + " "
+				} else {
+					icons = "❔ ❔ ❔ ❔ "
 				}
+			} else {
+				icons = ""
 			}
 			idStr := fmt.Sprintf("%*d", maxIDWidth, node.ID)
-			// Right-align rubric numbers in titles
-			rubricNumWidth := 0
-			for _, n := range nodes {
-				if idx := strings.Index(n.Title, "Rubric "); idx != -1 {
-					title := n.Title[idx+7:]
-					end := strings.Index(title, ":")
-					if end > 0 {
-						numStr := strings.TrimSpace(title[:end])
-						if len(numStr) > rubricNumWidth {
-							rubricNumWidth = len(numStr)
-						}
-					}
-				}
-			}
-			formatRubricNum := func(title string) string {
-				idx := strings.Index(title, "Rubric ")
-				if idx == -1 {
-					return title
-				}
-				tail := title[idx+7:]
-				end := strings.Index(tail, ":")
-				if end <= 0 {
-					return title
-				}
-				numStr := strings.TrimSpace(tail[:end])
-				rightNum := fmt.Sprintf("%*s", rubricNumWidth, numStr)
-				return title[:idx+7] + rightNum + tail[end:]
-			}
-			titleOut := formatRubricNum(node.Title)
-			if strings.Contains(node.Settings, "rubric_shell") {
-				outputStr := fmt.Sprintf("%s%s%s%s-%s\n", prefix, connector, icons, idStr, titleOut)
-				fmt.Print(outputStr)
-			} else {
-				outputStr := fmt.Sprintf("%s%s%s-%s\n", prefix, connector, idStr, titleOut)
-				fmt.Print(outputStr)
-			}
+			fmt.Printf("%s%s%s %s\n", prefix, connector, icons, idStr+" "+node.Title)
 			print(node.Children, newPrefix)
 		}
 	}

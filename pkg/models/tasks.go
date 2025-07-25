@@ -19,6 +19,7 @@ type TaskSettings struct {
 	AssignedContainers map[string]string `json:"assigned_containers"`
 	VolumeName string `json:"volume_name"`
 	AppFolder string `json:"app_folder"` // Stores the application folder path for docker_extract_volume
+	Containers []ContainerInfo `json:"containers"` // Stores container names and IDs
 	// Add other fields as needed based on project requirements
 }
 

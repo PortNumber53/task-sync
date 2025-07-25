@@ -81,7 +81,7 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	}
 
 	// Check file hash triggers
-	filesChanged, err := models.CheckFileHashChanges("/home/grimlock/go/task-sync/", config.Triggers.Files, stepLogger) // Corrected arguments to match function signature
+	filesChanged, err := models.CheckFileHashChanges(stepExec.LocalPath, config.Triggers.Files, stepLogger)
 	if err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 		stepLogger.Println("Triggering partial rebuild: files changed, redoing git operations")
 		for patch, container := range config.Triggers.Containers {
 			if containerExists, _ := models.CheckContainerExists(container); containerExists {
-				if err := models.ApplyGitCleanupAndPatch(container, filepath.Join("/home/grimlock/go/task-sync/", patch+".patch"), config.HeldOutTestFile, config.GradingSetupScript, stepLogger); err != nil {
+				if err := models.ApplyGitCleanupAndPatch(container, filepath.Join(stepExec.LocalPath, patch+".patch"), config.HeldOutTestFile, config.GradingSetupScript, stepLogger); err != nil {
 					return err
 				}
 			} else {

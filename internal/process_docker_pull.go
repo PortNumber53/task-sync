@@ -19,10 +19,10 @@ func processDockerPullSteps(db *sql.DB, stepID int) {
 	var err error
 
 	if stepID != 0 {
-		query = `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1 AND s.settings ? 'docker_pull'`
+		query = `SELECT s.id, s.task_id, s.settings, t.base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1 AND s.settings ? 'docker_pull'`
 		rows, err = db.Query(query, stepID)
 	} else {
-		query = `SELECT s.id, s.task_id, s.settings, t.local_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND s.settings ? 'docker_pull'`
+		query = `SELECT s.id, s.task_id, s.settings, t.base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND s.settings ? 'docker_pull'`
 		rows, err = db.Query(query)
 	}
 
@@ -34,7 +34,7 @@ func processDockerPullSteps(db *sql.DB, stepID int) {
 
 	for rows.Next() {
 		var step models.StepExec
-		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.BasePath); err != nil {
 			models.StepLogger.Printf("Error scanning docker_pull step: %v\n", err)
 			continue
 		}

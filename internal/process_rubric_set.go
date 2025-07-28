@@ -15,7 +15,7 @@ import (
 // processAllRubricSetSteps finds and executes all rubric_set steps.
 func processAllRubricSetSteps(db *sql.DB, logger *log.Logger) error {
 	query := `
-		SELECT s.id, s.task_id, s.title, s.settings, t.local_path
+		SELECT s.id, s.task_id, s.title, s.settings, t.base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE s.settings ? 'rubric_set'
@@ -28,7 +28,7 @@ func processAllRubricSetSteps(db *sql.DB, logger *log.Logger) error {
 
 	for rows.Next() {
 		var stepExec models.StepExec
-		if err := rows.Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings, &stepExec.LocalPath); err != nil {
+		if err := rows.Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings, &stepExec.BasePath); err != nil {
 			logger.Printf("failed to scan rubric_set step: %v", err)
 			continue
 		}
@@ -64,7 +64,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	mainPath := config.File
 	mainFileName := filepath.Base(config.File)
 	if !filepath.IsAbs(mainPath) {
-		mainPath = filepath.Join(stepExec.LocalPath, mainPath)
+		mainPath = filepath.Join(stepExec.BasePath, mainPath)
 	}
 	stepLogger.Printf("DEBUG: main rubric file fullPath=%s", mainPath)
 	mainInfo, err := os.Stat(mainPath)
@@ -90,7 +90,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	for fileName := range config.Files {
 		filePath := fileName
 		if !filepath.IsAbs(filePath) {
-			filePath = filepath.Join(stepExec.LocalPath, filePath)
+			filePath = filepath.Join(stepExec.BasePath, filePath)
 		}
 		stepLogger.Printf("DEBUG: fileName=%s filePath=%s", fileName, filePath)
 		info, err := os.Stat(filePath)
@@ -160,7 +160,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	}
 
 	// Prioritize rubrics.json if it exists, otherwise use config.File
-	jsonPath := filepath.Join(stepExec.LocalPath, "rubrics.json")
+	jsonPath := filepath.Join(stepExec.BasePath, "rubrics.json")
 	if _, err := os.Stat(jsonPath); err == nil {
 		markdownFilePath := jsonPath
 		criteria, err := models.ParseRubric(markdownFilePath)
@@ -297,7 +297,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 		stepLogger.Println("Successfully reconciled rubric_set step.")
 		return nil
 	} else {
-		markdownFilePath := filepath.Join(stepExec.LocalPath, config.File)
+		markdownFilePath := filepath.Join(stepExec.BasePath, config.File)
 		criteria, err := models.ParseRubric(markdownFilePath)
 		if err != nil {
 			return fmt.Errorf("failed to parse rubric markdown: %w", err)

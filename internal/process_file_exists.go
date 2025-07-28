@@ -25,7 +25,7 @@ func processAllFileExistsSteps(db *sql.DB, logger *log.Logger) error {
 
 	for rows.Next() {
 		var step models.StepExec
-		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.BasePath); err != nil {
 			logger.Println("Row scan error:", err)
 			continue // Continue to next step
 		}
@@ -90,7 +90,7 @@ func ProcessFileExistsStep(db *sql.DB, step *models.StepExec, logger *log.Logger
 	updatedFiles := make(map[string]interface{})
 
 	for path := range filesMap {
-		absPath := filepath.Join(step.LocalPath, path)
+		absPath := filepath.Join(step.BasePath, path)
 		fileInfo, err := os.Stat(absPath)
 		if err != nil {
 			if os.IsNotExist(err) {

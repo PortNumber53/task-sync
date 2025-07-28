@@ -26,7 +26,7 @@ func TestProcessDockerVolumePoolStep(t *testing.T) {
         stepExec := &models.StepExec{
             TaskID: 1,
             Settings: `{"docker_volume_pool":{"triggers":{"files":{"testfile.txt":"oldhash"}},"solutions":["solution1"]}}`,
-            LocalPath: "/tmp/testdir", // Use a temp dir for testing
+            BasePath: "/tmp/testdir", // Use a temp dir for testing
         }
         // Simulate file change by creating a test file with different hash
         testFilePath := filepath.Join("/tmp/testdir", "testfile.txt")
@@ -50,7 +50,7 @@ func TestProcessDockerVolumePoolStep(t *testing.T) {
         stepExec := &models.StepExec{
             TaskID: 1,
             Settings: `{"docker_volume_pool":{"triggers":{"image_id":"old_image_id","image_tag":"test_image"},"solutions":["solution1"],"force":false}}`,
-            LocalPath: "/tmp/testdir",
+            BasePath: "/tmp/testdir",
         }
         // Simulate Docker commands (in a real test, use mocks)
         logger := log.New(os.Stdout, "", 0)

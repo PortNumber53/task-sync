@@ -60,7 +60,7 @@ func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *l
 		"rubric_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			// If a specific step is provided (from ProcessSpecificStep), run only that.
 			if se != nil && se.StepID != 0 {
-				return ProcessRubricShellStep(db, models.Step{ID: se.StepID, TaskID: se.TaskID, Title: se.Title, Settings: se.Settings, LocalPath: "", Results: "", CreatedAt: "", UpdatedAt: ""}, logger)  // Adjusted to pass models.Step with available fields from StepExec
+				return ProcessRubricShellStep(db, se, logger)
 			}
 			// Otherwise (from executePendingSteps), run all rubric_shell steps.
 			return processAllRubricShellSteps(db, logger)
@@ -407,7 +407,7 @@ func printChildren(nodes []*StepNode, prefix string) {
 func ProcessSpecificStep(db *sql.DB, stepID int, force bool) error {
 	// Fetch the full step details including task_id
 	var stepExec models.StepExec
-	err := db.QueryRow("SELECT id, task_id, title, settings FROM steps WHERE id = $1", stepID).Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings)
+	err := db.QueryRow("SELECT s.id, s.task_id, s.title, s.settings, t.base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1", stepID).Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings, &stepExec.BasePath)
 	if err != nil {
 		hostname, errHost := os.Hostname()
 		if errHost != nil {
@@ -418,23 +418,22 @@ func ProcessSpecificStep(db *sql.DB, stepID int, force bool) error {
 		return fmt.Errorf("failed to fetch step %d: %w", stepID, err)
 	}
 
-	// Fetch the LocalPath and Status from the tasks table using taskID
-	var localPath, status string
-	err = db.QueryRow("SELECT local_path, status FROM tasks WHERE id = $1", stepExec.TaskID).Scan(&localPath, &status)
+	// Fetch the Status from the tasks table using taskID
+	var status string
+	err = db.QueryRow("SELECT status FROM tasks WHERE id = $1", stepExec.TaskID).Scan(&status)
 	if err != nil {
 		hostname, errHost := os.Hostname()
 		if errHost != nil {
-			log.Printf("Host error, failed to fetch task local path/status for task ID %d: %v", stepExec.TaskID, err)
+			log.Printf("Host error, failed to fetch task base path/status for task ID %d: %v", stepExec.TaskID, err)
 		} else {
-			log.Printf("Host: %s, failed to fetch task local path/status for task ID %d: %v", hostname, stepExec.TaskID, err)
+			log.Printf("Host: %s, failed to fetch task base path/status for task ID %d: %v", hostname, stepExec.TaskID, err)
 		}
-		return fmt.Errorf("failed to fetch task local path/status for task ID %d: %w", stepExec.TaskID, err)
+		return fmt.Errorf("failed to fetch task base path/status for task ID %d: %w", stepExec.TaskID, err)
 	}
 	if status != "active" {
 		log.Printf("STEP %d: Skipping execution because parent task %d status is not active (status=%q)", stepID, stepExec.TaskID, status)
 		return nil
 	}
-	stepExec.LocalPath = localPath
 
 	// Determine the step type from settings
 	var settings map[string]json.RawMessage
@@ -505,7 +504,7 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 
 	// Add hash check logic using utility function
 	if len(config.Triggers.Files) > 0 {
-		changed, err := models.CheckFileHashChanges(se.LocalPath, config.Triggers.Files, logger)
+		changed, err := models.CheckFileHashChanges(se.BasePath, config.Triggers.Files, logger)
 		if err != nil {
 			return fmt.Errorf("error checking file hashes: %w", err)
 		}
@@ -572,11 +571,11 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	}
 	logger.Printf("Command succeeded: volume created %s", volumeName)
 
-	appHostPath := filepath.Join(se.LocalPath, "original/") + "/"
-	solution1Path := filepath.Join(se.LocalPath, "volume_solution1/") + "/"
-	solution2Path := filepath.Join(se.LocalPath, "volume_solution2/") + "/"
-	solution3Path := filepath.Join(se.LocalPath, "volume_solution3/") + "/"
-	solution4Path := filepath.Join(se.LocalPath, "volume_solution4/") + "/"
+	appHostPath := filepath.Join(se.BasePath, "original/") + "/"
+	solution1Path := filepath.Join(se.BasePath, "volume_solution1/") + "/"
+	solution2Path := filepath.Join(se.BasePath, "volume_solution2/") + "/"
+	solution3Path := filepath.Join(se.BasePath, "volume_solution3/") + "/"
+	solution4Path := filepath.Join(se.BasePath, "volume_solution4/") + "/"
 	containerName := fmt.Sprintf("extract_vol_container_%d", se.StepID)
 	cmd = CommandFunc("docker", "run", "-d", "--platform", "linux/amd64", "--name", containerName, "-v", volumeName+":/original_volume", "-v", appHostPath+":/original", "-v", solution1Path+":/solution1", "-v", solution2Path+":/solution2", "-v", solution3Path+":/solution3", "-v", solution4Path+":/solution4", imageID, "tail", "-f", "/dev/null")
 	logger.Printf("Executing command: docker run -d --platform linux/amd64 --name %s -v %s:/original_volume -v %s:/orignal -v %s:/solution1 -v %s:/solution2 -v %s:/solution3 -v %s:/solution4 %s tail -f /dev/null", containerName, volumeName, appHostPath, solution1Path, solution2Path, solution3Path, solution4Path, imageID)
@@ -667,7 +666,7 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	}
 
 	// After successful execution, update file hashes
-	if err := models.UpdateFileHashes(db, se.StepID, se.LocalPath, config.Triggers.Files, logger); err != nil {
+	if err := models.UpdateFileHashes(db, se.StepID, se.BasePath, config.Triggers.Files, logger); err != nil {
 		logger.Printf("Error updating file hashes for step %d: %v", se.StepID, err)
 	} else {
 		logger.Printf("File hashes updated successfully for step %d", se.StepID)

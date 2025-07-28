@@ -17,7 +17,7 @@ import (
 func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 	// Query for all steps of type 'rubric_shell'.
 	query := `
-		SELECT s.id, s.task_id, s.title, s.settings, t.local_path
+		SELECT s.id, s.task_id, s.title, s.settings, t.base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE s.settings ? 'rubric_shell'
@@ -31,13 +31,13 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 
 	for rows.Next() {
 		var step models.Step
-		if err := rows.Scan(&step.ID, &step.TaskID, &step.Title, &step.Settings, &step.LocalPath); err != nil {
+		if err := rows.Scan(&step.ID, &step.TaskID, &step.Title, &step.Settings, &step.BasePath); err != nil {
 			logger.Printf("failed to scan rubric_shell step: %v", err)
 			continue
 		}
 
 		// Call the original processor for the individual step.
-		if err := ProcessRubricShellStep(db, step, logger); err != nil {
+		if err := ProcessRubricShellStep(db, &models.StepExec{StepID: step.ID, TaskID: step.TaskID, Title: step.Title, Settings: step.Settings, BasePath: step.BasePath}, logger); err != nil {
 			logger.Printf("failed to process rubric_shell step %d: %v", step.ID, err)
 			// Continue processing other steps even if one fails.
 		}
@@ -47,15 +47,15 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger) error {
 }
 
 // ProcessRubricShellStep handles the execution of a rubric_shell step.
-func ProcessRubricShellStep(db *sql.DB, step models.Step, logger *log.Logger) error {
+func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 	// Defensive: Check parent task status before running
 	var status string
-	err := db.QueryRow("SELECT status FROM tasks WHERE id = $1", step.TaskID).Scan(&status)
+	err := db.QueryRow("SELECT status FROM tasks WHERE id = $1", se.TaskID).Scan(&status)
 	if err != nil {
-		return fmt.Errorf("failed to fetch parent task status for step %d: %w", step.ID, err)
+		return fmt.Errorf("failed to fetch parent task status for step %d: %w", se.StepID, err)
 	}
 	if status != "active" {
-		logger.Printf("Skipping execution because parent task %d status is not active (status=\"%s\")", step.TaskID, status)
+		logger.Printf("Skipping execution because parent task %d status is not active (status=\"%s\")", se.TaskID, status)
 		return nil
 	}
 
@@ -63,21 +63,24 @@ func ProcessRubricShellStep(db *sql.DB, step models.Step, logger *log.Logger) er
 	var config struct {
 		RubricShell models.RubricShellConfig `json:"rubric_shell"`
 	}
-	if err := json.Unmarshal([]byte(step.Settings), &config); err != nil {
+	if err := json.Unmarshal([]byte(se.Settings), &config); err != nil {
 		return fmt.Errorf("failed to unmarshal settings: %w", err)
 	}
 	rsConfig := config.RubricShell
 
 	// Debug logging for assignment unmarshaling and count
-	logger.Printf("Debug: Unmarshaled RubricShellConfig for step %d with %d assignments", step.ID, len(rsConfig.Assignments))
+	logger.Printf("Debug: Unmarshaled RubricShellConfig for step %d with %d assignments", se.StepID, len(rsConfig.Assignments))
 
 	// After unmarshaling rsConfig, log the Files map for debugging
 	logger.Printf("Debug: rsConfig.Files contents: %v", rsConfig.Files)
 
 	// Add a warning log if rsConfig.Files is empty
 	if len(rsConfig.Files) == 0 {
-		logger.Printf("Warning: rsConfig.Files is empty for step %d", step.ID)
+		logger.Printf("Warning: rsConfig.Files is empty for step %d", se.StepID)
 	}
+
+	// Add debug log for base_path
+	logger.Printf("Debug: Using base_path '%s' for step %d", se.BasePath, se.StepID)
 
 	// Initialize results storage, e.g., a map to hold results per solution
 	cfg, err := LoadConfig()
@@ -92,7 +95,7 @@ func ProcessRubricShellStep(db *sql.DB, step models.Step, logger *log.Logger) er
 		logger.Printf("Processing solution patch %s in container %s for criterion %s", assignment.Patch, assignment.Container, rsConfig.CriterionID)
 
 		// Perform the test sequence: reset git, apply solution patch, apply held-out tests patch, run command
-		output, err := runTestSequence(step.LocalPath, rsConfig, assignment.Container, assignment.Patch, rsConfig.Command, logger)
+		output, err := runTestSequence(se.BasePath, rsConfig, assignment.Container, assignment.Patch, rsConfig.Command, logger)
 		status := "Unknown"
 		if strings.Contains(output, cfg.PassMarker) {
 			status = "Pass"
@@ -114,7 +117,7 @@ func ProcessRubricShellStep(db *sql.DB, step models.Step, logger *log.Logger) er
 	if err != nil {
 		return fmt.Errorf("failed to marshal updated settings: %w", err)
 	}
-	if err := models.UpdateStep(db, step.ID, step.Title, string(updatedSettings)); err != nil {
+	if err := models.UpdateStep(db, se.StepID, se.Title, string(updatedSettings)); err != nil {
 		return fmt.Errorf("failed to update step with results: %w", err)
 	}
 
@@ -123,11 +126,15 @@ func ProcessRubricShellStep(db *sql.DB, step models.Step, logger *log.Logger) er
 }
 
 // Helper function to run the test sequence (adapt based on existing code)
-func runTestSequence(localPath string, rsConfig models.RubricShellConfig, container string, patch string, command string, logger *log.Logger) (string, error) {
+func runTestSequence(basePath string, rsConfig models.RubricShellConfig, container string, patch string, command string, logger *log.Logger) (string, error) {
+	// Add debug log for base_path
+	logger.Printf("Debug: runTestSequence base_path '%s' for patch %s", basePath, patch)
+
 	// Ensure a single cleanup block before patch application
 	cleanupCmds := [][]string{
 		{"docker", "exec", container, "git", "apply", "-R", "--ignore-whitespace", "/app/held_out_tests.patch"},
 		{"docker", "exec", container, "git", "reset", "--hard", "HEAD"},
+		{"docker", "exec", container, "git", "checkout", "--", "."},
 		{"docker", "exec", container, "git", "clean", "-fdx"},
 	}
 	for _, c := range cleanupCmds {
@@ -138,9 +145,8 @@ func runTestSequence(localPath string, rsConfig models.RubricShellConfig, contai
 
 	// Apply pre_patch.patch if it exists
 	if _, ok := rsConfig.Files["pre_patch.patch"]; ok {
-		fullPrePatchPath := filepath.Join(localPath, "pre_patch.patch")  // Use file name key
 		tmpPrePatchPath := "/tmp/pre_patch.patch"
-		cmd := exec.Command("docker", "cp", fullPrePatchPath, fmt.Sprintf("%s:%s", container, tmpPrePatchPath))
+		cmd := exec.Command("docker", "cp", filepath.Join(basePath, "pre_patch.patch"), fmt.Sprintf("%s:%s", container, tmpPrePatchPath))
 		if _, err := runCmd(cmd, "copy pre_patch.patch", false, logger); err != nil {
 			return "", fmt.Errorf("copy pre_patch.patch failed: %w", err)
 		} else {
@@ -153,15 +159,15 @@ func runTestSequence(localPath string, rsConfig models.RubricShellConfig, contai
 
 	// Apply solution patch
 	if _, ok := rsConfig.Files[patch]; ok {
-		fullSolutionPatchPath := filepath.Join(localPath, patch)
 		containerPatchPath := "/app/" + patch
-		cmd := exec.Command("docker", "cp", fullSolutionPatchPath, fmt.Sprintf("%s:%s", container, containerPatchPath))
+		cmd := exec.Command("docker", "cp", filepath.Join(basePath, patch), fmt.Sprintf("%s:%s", container, containerPatchPath))
 		if _, err := runCmd(cmd, "copy solution patch", false, logger); err != nil {
 			return "", fmt.Errorf("copy solution patch failed: %w", err)
 		} else {
-			cmd = exec.Command("docker", "exec", container, "git", "apply", containerPatchPath)
-			if _, err := runCmd(cmd, "apply solution patch", true, logger); err != nil {
-				return "", fmt.Errorf("apply solution patch failed: %w", err)
+			applyPatchCmd := exec.Command("docker", "exec", container, "git", "apply", containerPatchPath)
+			if err := applyPatchCmd.Run(); err != nil {
+				logger.Printf("ERROR: Patch apply failed for criterion %s: %v", rsConfig.CriterionID, err)
+				return "", fmt.Errorf("patch apply failed: %w", err)
 			}
 		}
 	} else {
@@ -171,7 +177,7 @@ func runTestSequence(localPath string, rsConfig models.RubricShellConfig, contai
 
 	// Apply held-out tests patch
 	if _, ok := rsConfig.Files["held_out_tests.patch"]; ok {
-		fullHeldOutTestsPath := filepath.Join(localPath, "held_out_tests.patch")
+		fullHeldOutTestsPath := filepath.Join(basePath, "held_out_tests.patch")
 		if _, err := os.Stat(fullHeldOutTestsPath); os.IsNotExist(err) {
 			return "", fmt.Errorf("held_out_tests.patch does not exist at %s", fullHeldOutTestsPath)
 		} else if err != nil {
@@ -184,8 +190,9 @@ func runTestSequence(localPath string, rsConfig models.RubricShellConfig, contai
 			return "", fmt.Errorf("copy held-out tests patch failed: %w", err)
 		} else {
 			cmd = exec.Command("docker", "exec", container, "git", "apply", containerHeldOutTestsPatchPath)
-			if _, err := runCmd(cmd, "apply held-out test patch", true, logger); err != nil {
-				return "", fmt.Errorf("apply held-out tests patch failed: %w", err)
+			if err := cmd.Run(); err != nil {
+				logger.Printf("ERROR: Patch apply failed for criterion %s: %v", rsConfig.CriterionID, err)
+				return "", fmt.Errorf("patch apply failed: %w", err)
 			}
 		}
 	} else {
@@ -195,19 +202,11 @@ func runTestSequence(localPath string, rsConfig models.RubricShellConfig, contai
 
 	// Run the test command
 	fullCmd := escapeSingleQuotes(command)
-	logger.Printf("Debug: Executing rubric command: %s", fullCmd)  // Added logging for command
+	logger.Printf("Debug: Executing rubric command: %s", fullCmd) // Added logging for command
 	cmd := exec.Command("docker", "exec", container, "bash", "-c", fullCmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.Printf("Command error details: %s failed with error %v and output %s", cmd, err, string(output))
-		logger.Printf("Command failed, attempting to cat the file: cat /app/ansible/lib/ansible/plugins/strategy/free.py")
-		debugCmd := exec.Command("docker", "exec", container, "cat", "/app/ansible/lib/ansible/plugins/strategy/free.py")
-		debugOutput, debugErr := debugCmd.CombinedOutput()
-		if debugErr != nil {
-			logger.Printf("Failed to cat file: %v, output: %s", debugErr, string(debugOutput))
-		} else {
-			logger.Printf("File content: %s", string(debugOutput))
-		}
 		return string(output), err
 	}
 	return string(output), nil

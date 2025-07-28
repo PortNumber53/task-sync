@@ -72,7 +72,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 			continue
 		}
 
-		newHashes, changed, err := dynamicLabRun(step.LocalPath, files, config.DynamicLab.Hashes)
+		newHashes, changed, err := dynamicLabRun(step.BasePath, files, config.DynamicLab.Hashes)
 		if err != nil {
 			log.Printf("Error running dynamic_lab for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": err.Error()}
@@ -197,7 +197,7 @@ func processDynamicLabSteps(db *sql.DB) error {
 			continue
 		}
 
-		criteria, newRubricHash, _, err := rubricParserImpl.RunRubric(step.LocalPath, config.DynamicLab.RubricFile, "") // Pass empty hash to force re-parse
+		criteria, newRubricHash, _, err := rubricParserImpl.RunRubric(step.BasePath, config.DynamicLab.RubricFile, "") // Pass empty hash to force re-parse
 		if err != nil {
 			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": err.Error()}

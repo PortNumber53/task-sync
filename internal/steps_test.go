@@ -678,7 +678,7 @@ func TestProcessDockerExtractVolumeStep(t *testing.T) {
 		StepID:   1,
 		TaskID:   1,
 		Settings: `{"docker_extract_volume":{"volume_name":"task_1_volume","image_id":"test-image","app_folder":"/path/to/app"}}`,
-		LocalPath: "/task/path",
+		BasePath: "/task/path",
 	}
 	logger := log.New(io.Discard, "", 0)
 

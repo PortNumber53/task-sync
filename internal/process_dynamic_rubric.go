@@ -37,7 +37,7 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 	if config.DynamicRubric.Files != nil {
 		
 		for file := range config.DynamicRubric.Files {
-		filePath := filepath.Join(stepExec.LocalPath, file)
+		filePath := filepath.Join(stepExec.BasePath, file)
 		newHash, err := models.GetSHA256(filePath)
 		if err != nil {
 			if errors.Is(err, models.ErrEmptyFile) {
@@ -63,7 +63,7 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 		return fmt.Errorf("no rubric files specified in step %d", stepExec.StepID)
 	}
 	rubricFile := config.DynamicRubric.Rubrics[0] // Assuming the first one is the main one
-	criteria, newRubricHash, rubricChanged, err := models.RunRubric(stepExec.LocalPath, rubricFile, config.DynamicRubric.Hash)
+	criteria, newRubricHash, rubricChanged, err := models.RunRubric(stepExec.BasePath, rubricFile, config.DynamicRubric.Hash)
 	if err != nil {
 		return fmt.Errorf("error running dynamic_rubric for step %d: %w", stepExec.StepID, err)
 	}

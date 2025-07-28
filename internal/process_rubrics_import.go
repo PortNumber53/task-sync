@@ -16,18 +16,18 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 	var err error
 
 	if stepID != 0 {
-		query = `SELECT s.id, s.task_id, s.settings, t.local_path
+		query = `SELECT s.id, s.task_id, s.settings, t.base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE s.id = $1 AND s.settings ? 'rubrics_import'`
 		rows, err = db.Query(query, stepID)
 	} else {
-		query = `SELECT s.id, s.task_id, s.settings, t.local_path
+		query = `SELECT s.id, s.task_id, s.settings, t.base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE t.status = 'active'
-		AND t.local_path IS NOT NULL
-		AND t.local_path <> ''
+		AND t.base_path IS NOT NULL
+		AND t.base_path <> ''
 		AND s.settings ? 'rubrics_import'`
 		rows, err = db.Query(query)
 	}
@@ -40,7 +40,7 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 
 	for rows.Next() {
 		var step models.StepExec
-		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.BasePath); err != nil {
 			models.StepLogger.Println("Row scan error:", err)
 			continue
 		}
@@ -82,7 +82,7 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 		}
 
 		if config.JSONFile != "" {
-			jsonPath := filepath.Join(step.LocalPath, config.JSONFile)
+			jsonPath := filepath.Join(step.BasePath, config.JSONFile)
 			criteria, err := models.ParseRubric(jsonPath)
 			if err != nil {
 				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("failed to parse JSON rubric: %v", err)})
@@ -91,8 +91,8 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 			models.StepLogger.Printf("DEBUG: Parsed JSON criteria for step %d: %+v", step.StepID, criteria)
 			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "message": "JSON rubric processed successfully"})
 		} else if config.MHTMLFile != "" {
-			mhtmlFile := filepath.Join(step.LocalPath, config.MHTMLFile)
-			mdFile := filepath.Join(step.LocalPath, config.MDFile)
+			mhtmlFile := filepath.Join(step.BasePath, config.MHTMLFile)
+			mdFile := filepath.Join(step.BasePath, config.MDFile)
 			models.StepLogger.Printf("Processing rubrics_import step: %s -> %s\n", mhtmlFile, mdFile)
 			err = models.ProcessRubricsMHTML(mhtmlFile, mdFile)
 			if err != nil {

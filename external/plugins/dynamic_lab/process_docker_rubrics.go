@@ -72,12 +72,12 @@ func calculateFileHash(filePath string) (string, error) {
 
 // processDockerRubricsSteps processes docker rubrics steps for active tasks
 func processDockerRubricsSteps(db *sql.DB) {
-	query := `SELECT s.id, s.task_id, s.settings, t.local_path
+	query := `SELECT s.id, s.task_id, s.settings, t.base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE t.status = 'active'
-		AND t.local_path IS NOT NULL
-		AND t.local_path <> ''
+		AND t.base_path IS NOT NULL
+		AND t.base_path <> ''
 		AND s.settings::text LIKE '%docker_rubrics%'`
 
 	rows, err := db.Query(query)
@@ -89,7 +89,7 @@ func processDockerRubricsSteps(db *sql.DB) {
 
 	for rows.Next() {
 		var step models.StepExec
-		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.BasePath); err != nil {
 			models.StepLogger.Println("Row scan error:", err)
 			continue
 		}
@@ -169,7 +169,7 @@ func processDockerRubricsSteps(db *sql.DB) {
 		// Check if files have changed
 		shouldRun := false
 		for _, file := range config.DockerRubrics.Files {
-			filePath := filepath.Join(step.LocalPath, file)
+			filePath := filepath.Join(step.BasePath, file)
 
 			if _, err := os.Stat(filePath); os.IsNotExist(err) {
 				models.StepLogger.Printf("Step %d: file not found: %s\n", step.StepID, filePath)
@@ -212,7 +212,7 @@ func processDockerRubricsSteps(db *sql.DB) {
 	CommandProcessingLoop:
 		for _, file := range config.DockerRubrics.Files {
 			if strings.HasSuffix(file, "TASK_DATA.md") {
-				filePath := filepath.Join(step.LocalPath, file)
+				filePath := filepath.Join(step.BasePath, file)
 				content, err := os.ReadFile(filePath)
 				if err != nil {
 					models.StepLogger.Printf("Step %d: error reading file %s: %v\n", step.StepID, file, err)

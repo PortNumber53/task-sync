@@ -92,7 +92,7 @@ func TestProcessFileExistsStep(t *testing.T) {
 				StepID:    tc.stepID,
 				TaskID:    1,
 				Settings:  string(settingsBytes),
-				LocalPath: tempDir,
+				BasePath:  tempDir,
 			}
 
 			if tc.expectSettingsUpdate {

@@ -19,12 +19,12 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 	if stepID != 0 {
 		var step models.StepExec
 		query := `
-            SELECT s.id, s.task_id, s.title, s.settings, t.local_path
+            SELECT s.id, s.task_id, s.title, s.settings, t.base_path
             FROM steps s
             JOIN tasks t ON s.task_id = t.id
             WHERE s.id = $1 AND s.settings ? 'docker_build'
         `
-		err = db.QueryRow(query, stepID).Scan(&step.StepID, &step.TaskID, &step.Title, &step.Settings, &step.LocalPath)
+		err = db.QueryRow(query, stepID).Scan(&step.StepID, &step.TaskID, &step.Title, &step.Settings, &step.BasePath)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				stepLogger.Printf("Step %d not found or not a docker_build step.", stepID)
@@ -36,7 +36,7 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 		steps = append(steps, step)
 	} else {
 		query := `
-            SELECT s.id, s.task_id, s.title, s.settings, t.local_path
+            SELECT s.id, s.task_id, s.title, s.settings, t.base_path
             FROM steps s
             JOIN tasks t ON s.task_id = t.id
             WHERE t.status = 'active' AND s.settings ? 'docker_build'
@@ -51,7 +51,7 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 
 		for rows.Next() {
 			var step models.StepExec
-			if err := rows.Scan(&step.StepID, &step.TaskID, &step.Title, &step.Settings, &step.LocalPath); err != nil {
+			if err := rows.Scan(&step.StepID, &step.TaskID, &step.Title, &step.Settings, &step.BasePath); err != nil {
 				stepLogger.Printf("Failed to scan step: %v", err)
 				continue
 			}
@@ -130,7 +130,7 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 			}
 		}
 
-		filesChanged, err := models.CheckFileHashChanges(step.LocalPath, config.Triggers.Files, stepLogger)
+		filesChanged, err := models.CheckFileHashChanges(step.BasePath, config.Triggers.Files, stepLogger)
 		if err != nil {
 			stepLogger.Printf("Step %d: Error checking file hashes: %v. Triggering build.", step.StepID, err)
 			buildNeeded = true
@@ -141,7 +141,7 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 
 		if buildNeeded {
 			stepLogger.Printf("Step %d: Building image %s:%s\n", step.StepID, config.ImageTag, config.ImageID)
-			if err := executeDockerBuild(step.LocalPath, &config, step.StepID, db, stepLogger); err != nil {
+			if err := executeDockerBuild(step.BasePath, &config, step.StepID, db, stepLogger); err != nil {
 				stepLogger.Printf("Step %d: docker build failed: %v\n", step.StepID, err)
 				continue
 			}
@@ -155,7 +155,7 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 
 			// After successful build, update file hashes and persist to step settings
 			for filePath := range config.Triggers.Files {
-				fullPath := filepath.Join(step.LocalPath, filePath)
+				fullPath := filepath.Join(step.BasePath, filePath)
 				hash, err := models.GetSHA256(fullPath)
 				if err != nil {
 					stepLogger.Printf("Step %d: Warning: could not compute hash for %s: %v\n", step.StepID, filePath, err)

@@ -17,18 +17,18 @@ func processDockerRunSteps(db *sql.DB, stepID int) error {
 	var err error
 
 	if stepID != 0 {
-		query = `SELECT s.id, s.task_id, s.settings, t.local_path
+		query = `SELECT s.id, s.task_id, s.settings, t.base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE s.id = $1 AND s.settings ? 'docker_run'`
 		rows, err = db.Query(query, stepID)
 	} else {
-		query = `SELECT s.id, s.task_id, s.settings, t.local_path
+		query = `SELECT s.id, s.task_id, s.settings, t.base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE t.status = 'active'
-		AND t.local_path IS NOT NULL
-		AND t.local_path <> ''
+		AND t.base_path IS NOT NULL
+		AND t.base_path <> ''
 		AND s.settings ? 'docker_run'`
 		rows, err = db.Query(query)
 	}
@@ -41,7 +41,7 @@ func processDockerRunSteps(db *sql.DB, stepID int) error {
 
 	for rows.Next() {
 		var step models.StepExec
-		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.LocalPath); err != nil {
+		if err := rows.Scan(&step.StepID, &step.TaskID, &step.Settings, &step.BasePath); err != nil {
 			models.StepLogger.Println("Row scan error:", err)
 			continue
 		}

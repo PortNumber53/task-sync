@@ -114,7 +114,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	// Check if volumes exist - we only care about the solution1_volume since that's what we're using
-	solutionVolumePath := filepath.Join(stepExec.LocalPath, "volume_solution1")
+	solutionVolumePath := filepath.Join(stepExec.BasePath, "volume_solution1")
 	if _, err := os.Stat(solutionVolumePath); os.IsNotExist(err) {
 		recreateNeeded = true
 		logger.Printf("Volume directory %s doesn't exist, will recreate containers", solutionVolumePath)
@@ -137,7 +137,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			config.Triggers.Containers[solutionFile] = containerName
 			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
 		}
-		solutionVolumePath := filepath.Join(stepExec.LocalPath, fmt.Sprintf("volume_%s", solutionFile))
+		solutionVolumePath := filepath.Join(stepExec.BasePath, fmt.Sprintf("volume_%s", solutionFile))
 
 		// Remove existing container if it exists
 		if exists, _ := CheckContainerExists(containerName); exists {
@@ -245,7 +245,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		// Prepare patch file path if it exists
 		patchFile := ""
 		if solutionFile != "" {
-			patchFile = filepath.Join(stepExec.LocalPath, solutionFile)
+			patchFile = filepath.Join(stepExec.BasePath, solutionFile)
 			if _, err := os.Stat(patchFile); os.IsNotExist(err) {
 				logger.Printf("Patch file not found: %s, skipping patch application", patchFile)
 				patchFile = ""

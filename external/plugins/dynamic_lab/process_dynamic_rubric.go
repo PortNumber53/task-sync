@@ -37,7 +37,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 		if config.DynamicRubric.Files != nil {
 			
 			for file := range config.DynamicRubric.Files {
-			filePath := filepath.Join(step.LocalPath, file)
+			filePath := filepath.Join(step.BasePath, file)
 			newHash, err := models.GetSHA256(filePath)
 			if err != nil {
 				log.Printf("Error hashing file %s for step %d: %v", file, step.StepID, err)
@@ -58,7 +58,7 @@ func processDynamicRubricSteps(db *sql.DB) error {
 			return fmt.Errorf("no rubric files specified in step %d", step.StepID)
 		}
 		rubricFile := config.DynamicRubric.Rubrics[0] // Use the first rubric file
-		criteria, newRubricHash, rubricChanged, err := models.RunRubric(step.LocalPath, rubricFile, config.DynamicRubric.Hash)
+		criteria, newRubricHash, rubricChanged, err := models.RunRubric(step.BasePath, rubricFile, config.DynamicRubric.Hash)
 		if err != nil {
 			log.Printf("Error running dynamic_rubric for step %d: %v", step.StepID, err)
 			results := map[string]interface{}{"result": "error", "error": err.Error()}

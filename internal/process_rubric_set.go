@@ -8,8 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"github.com/PortNumber53/task-sync/pkg/models"
 	"strconv"
+
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 // processAllRubricSetSteps finds and executes all rubric_set steps.
@@ -58,7 +59,6 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	config := &settings.RubricSet
 
 	stepLogger.Printf("Debug: Unmarshaled RubricSetConfig: %+v", config)
-	stepLogger.Printf("Debug: RubricSetConfig AssignContainers: %+v", config.AssignContainers)
 
 	// Hash the main rubric file and store in Files map under the rubric file name
 	mainPath := config.File
@@ -121,42 +121,14 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 
 	// If any hash changed, or hashes were missing, update and persist
 	if rerunNeeded {
-		stepLogger.Printf("File hashes changed or missing; will update and persist hashes.")
-
-		// Persist updated hashes to step settings
-		wrapped := map[string]interface{}{ "rubric_set": config }
-		if updated, err := json.Marshal(wrapped); err == nil {
-			stepLogger.Printf("DEBUG: Marshaled settings: %s", string(updated))
-			_, _ = db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(updated), stepExec.StepID)
-		} else {
-			stepLogger.Printf("ERROR: Failed to marshal settings for step %d: %v", stepExec.StepID, err)
+		stepLogger.Printf("Debug: Rerun needed, updating settings for step %d", stepExec.StepID)
+		updatedSettings, err := json.Marshal(settings)
+		if err != nil {
+			return fmt.Errorf("failed to marshal updated settings: %w", err)
 		}
-	}
-
-	// Get or assign containers for solution files
-	containers, err := getTaskContainers(db, stepExec.TaskID, stepLogger)
-	if err != nil {
-		stepLogger.Printf("Warning: failed to get task containers: %v", err)
-	}
-
-	// If no containers are assigned, try to auto-assign from available containers
-	if len(config.AssignContainers) == 0 && len(containers) > 0 {
-		assignments := assignContainersToSolutions(config, containers, stepLogger)
-		config.AssignContainers = assignments
-		stepLogger.Printf("Debug: Assignments after assignContainersToSolutions: %+v", assignments)
-		
-		// Update the step settings with the new container assignments
-		if len(config.AssignContainers) > 0 {
-			wrapped := map[string]interface{}{ "rubric_set": config }
-			if updated, err := json.Marshal(wrapped); err == nil {
-				stepLogger.Printf("Updating step with auto-assigned containers")
-				_, _ = db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(updated), stepExec.StepID)
-			}
+		if _, err := db.Exec(`UPDATE steps SET settings = $1 WHERE id = $2`, string(updatedSettings), stepExec.StepID); err != nil {
+			return fmt.Errorf("failed to update step settings in db: %w", err)
 		}
-	}
-
-	if len(config.AssignContainers) == 0 {
-		return fmt.Errorf("no containers available for assignment and none explicitly assigned")
 	}
 
 	// Prioritize rubrics.json if it exists, otherwise use config.File
@@ -216,25 +188,36 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 			currentCriterionIDs[crit.Title] = struct{}{}
 		}
 
+		// Fetch rubric hashes from task settings
+		settingsObj, err := models.GetTaskSettings(db, stepExec.TaskID)
+		var rubricHashes map[string]string
+		if err == nil && settingsObj != nil && settingsObj.Rubrics != nil {
+			rubricHashes = settingsObj.Rubrics
+		} else {
+			rubricHashes = map[string]string{}
+		}
+
 		// Reconcile each criterion: ensure only one step exists and is correct
 		for _, crit := range criteria {
 			criterionID := crit.Title
 			steps, exists := existingStepsByCriterion[criterionID]
-			assignments := make([]models.SolutionAssignment, 0, len(config.AssignContainers))
-			for patch, container := range config.AssignContainers {
-				assignments = append(assignments, models.SolutionAssignment{Patch: patch, Container: container})
-			}
+			// Calculate current hash for this criterion
+			currentHash := models.CalcRubricCriterionHash(crit.Score, crit.Rubric, crit.Required, crit.HeldOutTest)
+			storedHash, hashExists := rubricHashes[criterionID]
+			shouldUpsert := !hashExists || storedHash != currentHash || force
+
 			newRubricShellConfig := models.RubricShellConfig{
 				Command:     crit.HeldOutTest,
 				CriterionID: crit.Title,
 				Counter:     crit.Counter,
 				Score:       crit.Score,
 				Required:    crit.Required,
-				Rerun:       force,
+				Rubric:      crit.Rubric,
+				Rerun:       force || shouldUpsert, // Always set Rerun true if force is true
 				DependsOn:   []models.Dependency{{ID: stepExec.StepID}},
 				GeneratedBy: fmt.Sprintf("%d", stepExec.StepID),
-				Assignments: assignments,
-				Files:       config.Files,  // Inherit Files map from RubricSetConfig
+				Assignments: []models.RubricShellAssignment{},
+				Files:       config.Files, // Inherit Files map from RubricSetConfig
 			}
 			wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellConfig}
 			childSettingsJSON, err := json.Marshal(wrappedSettings)
@@ -243,11 +226,15 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 			}
 			if !exists || len(steps) == 0 {
 				// No step exists, create a new one
+				stepLogger.Printf("[TRACE] Creating rubric_shell step for criterion %s: rerun=%v, settings=%s", criterionID, newRubricShellConfig.Rerun, string(childSettingsJSON))
 				stepID, err := models.CreateStep(db, strconv.Itoa(stepExec.TaskID), criterionID, string(childSettingsJSON))
 				if err != nil {
 					return fmt.Errorf("create error: %w", err)
 				}
 				stepLogger.Printf("Created step %d for criterion %s", stepID, criterionID)
+				// Immediately update the map so future logic sees only the canonical step
+				newStep := models.Step{ID: stepID, Title: criterionID, Settings: string(childSettingsJSON)}
+				existingStepsByCriterion[criterionID] = []models.Step{newStep}
 			} else {
 				// Steps exist, keep the first one and delete duplicates if any
 				keepStep := steps[0]
@@ -260,23 +247,76 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 						}
 					}
 				}
-				// Now update the kept step if config differs
-				var existingConfig models.RubricShellConfig
-				if err := json.Unmarshal([]byte(keepStep.Settings), &existingConfig); err == nil {
-					if !reflect.DeepEqual(existingConfig, newRubricShellConfig) {
+				// Now update the kept step if config differs or hash changed
+				var existingWrapped map[string]models.RubricShellConfig
+				if err := json.Unmarshal([]byte(keepStep.Settings), &existingWrapped); err == nil {
+					existingConfig := existingWrapped["rubric_shell"]
+					// Preserve results if present in the existing config and not intentionally resetting
+					if existingConfig.Results == nil && newRubricShellConfig.Results == nil {
+						// Try to load from results column
+						var resultsJSON sql.NullString
+						err := db.QueryRow("SELECT results FROM steps WHERE id = $1", keepStep.ID).Scan(&resultsJSON)
+						if err == nil && resultsJSON.Valid && resultsJSON.String != "" && resultsJSON.String != "null" {
+							var resultsCol map[string]interface{}
+							if err := json.Unmarshal([]byte(resultsJSON.String), &resultsCol); err == nil && len(resultsCol) > 0 {
+								resultsStr := make(map[string]string, len(resultsCol))
+								allString := true
+								for k, v := range resultsCol {
+									strVal, ok := v.(string)
+									if ok {
+										resultsStr[k] = strVal
+									} else {
+										allString = false
+										stepLogger.Printf("[WARN] Non-string result value for key '%s' in results column for step %d", k, keepStep.ID)
+									}
+								}
+								if allString {
+									newRubricShellConfig.Results = resultsStr
+									stepLogger.Printf("[TRACE] Merged results from results column for step %d", keepStep.ID)
+								} else {
+									stepLogger.Printf("[WARN] Skipped merging results column for step %d due to non-string values", keepStep.ID)
+								}
+							}
+						}
+					} else if existingConfig.Results != nil && newRubricShellConfig.Results == nil {
+						newRubricShellConfig.Results = existingConfig.Results
+						stepLogger.Printf("[TRACE] Merged results from settings for step %d", keepStep.ID)
+					}
+					// Preserve rerun:true if it was set in the existing config
+					if existingConfig.Rerun {
+						newRubricShellConfig.Rerun = true
+					}
+					wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellConfig}
+					childSettingsJSON, err := json.Marshal(wrappedSettings)
+					if err != nil {
+						return fmt.Errorf("marshal error: %w", err)
+					}
+					if shouldUpsert || !reflect.DeepEqual(existingConfig, newRubricShellConfig) || force {
+						stepLogger.Printf("[TRACE] Updating rubric_shell step %d for criterion %s: rerun=%v, settings=%s", keepStep.ID, criterionID, newRubricShellConfig.Rerun, string(childSettingsJSON))
 						_, err = db.Exec("UPDATE steps SET settings = $1, title = $2, updated_at = NOW() WHERE id = $3", string(childSettingsJSON), criterionID, keepStep.ID)
 						if err != nil {
 							return fmt.Errorf("update error: %w", err)
 						}
 						stepLogger.Printf("Updated step %d for criterion %s", keepStep.ID, criterionID)
+						// Update the map so only the canonical step is present
+						keepStep.Settings = string(childSettingsJSON)
+						existingStepsByCriterion[criterionID] = []models.Step{keepStep}
 					}
 				} else {
 					// Handle unmarshal error by updating anyway (should not happen after pre-pass)
+					wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellConfig}
+					childSettingsJSON, err := json.Marshal(wrappedSettings)
+					if err != nil {
+						return fmt.Errorf("marshal error: %w", err)
+					}
 					_, err = db.Exec("UPDATE steps SET settings = $1, title = $2, updated_at = NOW() WHERE id = $3", string(childSettingsJSON), criterionID, keepStep.ID)
 					if err != nil {
 						return fmt.Errorf("update error due to unmarshal: %w", err)
 					}
 					stepLogger.Printf("Updated step %d for criterion %s due to unmarshal error", keepStep.ID, criterionID)
+					// Update the map so only the canonical step is present
+					keepStep.Settings = string(childSettingsJSON)
+					existingStepsByCriterion[criterionID] = []models.Step{keepStep}
 				}
 			}
 		}
@@ -295,153 +335,19 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 		}
 
 		stepLogger.Println("Successfully reconciled rubric_set step.")
-		return nil
-	} else {
-		markdownFilePath := filepath.Join(stepExec.BasePath, config.File)
-		criteria, err := models.ParseRubric(markdownFilePath)
-		if err != nil {
-			return fmt.Errorf("failed to parse rubric markdown: %w", err)
-		}
-		stepLogger.Printf("DEBUG: Parsing rubric from file: %s", markdownFilePath)
-		for i, crit := range criteria {
-			rubricSnippet := crit.Rubric
-			if len(rubricSnippet) > 50 {
-				rubricSnippet = rubricSnippet[:50]
-			}
-			stepLogger.Printf("DEBUG: Criterion %d - ID: %s, Rubric snippet: %s", i, crit.Title, rubricSnippet)
-		}
-		stepLogger.Printf("Found %d criteria in %s", len(criteria), markdownFilePath)
-
-		// 2. Fetch existing generated steps.
-		existingSteps, err := models.GetGeneratedSteps(db, stepExec.StepID)
-		if err != nil {
-			return fmt.Errorf("failed to get existing generated steps: %w", err)
-		}
-		stepLogger.Printf("Found %d existing generated steps for parent step %d.", len(existingSteps), stepExec.StepID)
-
-		// After fetching existing steps, clean up any with invalid settings
-		for _, step := range existingSteps {
-			var settings struct {
-				RubricShell models.RubricShellConfig `json:"rubric_shell"`
-			}
-			if err := json.Unmarshal([]byte(step.Settings), &settings); err != nil {
-				if err := models.DeleteStep(db, step.ID); err != nil {
-					stepLogger.Printf("Delete error for invalid step %d: %v", step.ID, err)
-				} else {
-					stepLogger.Printf("Deleted invalid step %d due to unmarshal error", step.ID)
-				}
-			}
-		}
-
-		// Now build the map of valid existing steps grouped by CriterionID
-		existingStepsByCriterion := make(map[string][]models.Step)
-		for _, step := range existingSteps {
-			var settings struct {
-				RubricShell models.RubricShellConfig `json:"rubric_shell"`
-			}
-			if err := json.Unmarshal([]byte(step.Settings), &settings); err == nil {
-				criterionID := settings.RubricShell.CriterionID
-				existingStepsByCriterion[criterionID] = append(existingStepsByCriterion[criterionID], step)
-			}
-		}
-
-		// Make a set of current CriterionIDs for quick lookup
-		currentCriterionIDs := make(map[string]struct{})
-		for _, crit := range criteria {
-			currentCriterionIDs[crit.Title] = struct{}{}
-		}
-
-		// Reconcile each criterion: ensure only one step exists and is correct
-		for _, crit := range criteria {
-			criterionID := crit.Title
-			steps, exists := existingStepsByCriterion[criterionID]
-			assignments := make([]models.SolutionAssignment, 0, len(config.AssignContainers))
-			for patch, container := range config.AssignContainers {
-				assignments = append(assignments, models.SolutionAssignment{Patch: patch, Container: container})
-			}
-			newRubricShellConfig := models.RubricShellConfig{
-				Command:     crit.HeldOutTest,
-				CriterionID: crit.Title,
-				Counter:     crit.Counter,
-				Score:       crit.Score,
-				Required:    crit.Required,
-				Rerun:       force,
-				DependsOn:   []models.Dependency{{ID: stepExec.StepID}},
-				GeneratedBy: fmt.Sprintf("%d", stepExec.StepID),
-				Assignments: assignments,
-				Files:       config.Files,  // Inherit Files map from RubricSetConfig
-			}
-			wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellConfig}
-			childSettingsJSON, err := json.Marshal(wrappedSettings)
-			if err != nil {
-				return fmt.Errorf("marshal error: %w", err)
-			}
-			if !exists || len(steps) == 0 {
-				// No step exists, create a new one
-				stepID, err := models.CreateStep(db, strconv.Itoa(stepExec.TaskID), criterionID, string(childSettingsJSON))
-				if err != nil {
-					return fmt.Errorf("create error: %w", err)
-				}
-				stepLogger.Printf("Created step %d for criterion %s", stepID, criterionID)
-			} else {
-				// Steps exist, keep the first one and delete duplicates if any
-				keepStep := steps[0]
-				if len(steps) > 1 {
-					for _, dupStep := range steps[1:] {
-						if err := models.DeleteStep(db, dupStep.ID); err != nil {
-							stepLogger.Printf("Delete error for duplicate step %d: %v", dupStep.ID, err)
-						} else {
-							stepLogger.Printf("Deleted duplicate step %d for criterion %s", dupStep.ID, criterionID)
-						}
-					}
-				}
-				// Now update the kept step if config differs
-				var existingConfig models.RubricShellConfig
-				if err := json.Unmarshal([]byte(keepStep.Settings), &existingConfig); err == nil {
-					if !reflect.DeepEqual(existingConfig, newRubricShellConfig) {
-						_, err = db.Exec("UPDATE steps SET settings = $1, title = $2, updated_at = NOW() WHERE id = $3", string(childSettingsJSON), criterionID, keepStep.ID)
-						if err != nil {
-							return fmt.Errorf("update error: %w", err)
-						}
-						stepLogger.Printf("Updated step %d for criterion %s", keepStep.ID, criterionID)
-					}
-				} else {
-					// Handle unmarshal error by updating anyway (should not happen after pre-pass)
-					_, err = db.Exec("UPDATE steps SET settings = $1, title = $2, updated_at = NOW() WHERE id = $3", string(childSettingsJSON), criterionID, keepStep.ID)
-					if err != nil {
-						return fmt.Errorf("update error due to unmarshal: %w", err)
-					}
-					stepLogger.Printf("Updated step %d for criterion %s due to unmarshal error", keepStep.ID, criterionID)
-				}
-			}
-		}
-
-		// Delete steps for CriterionIDs not in current set
-		for criterionID, steps := range existingStepsByCriterion {
-			if _, ok := currentCriterionIDs[criterionID]; !ok {
-				for _, step := range steps {
-					if err := models.DeleteStep(db, step.ID); err != nil {
-						stepLogger.Printf("Delete error for obsolete step %d: %v", step.ID, err)
-					} else {
-						stepLogger.Printf("Deleted obsolete step %d for criterion %s", step.ID, criterionID)
-					}
-				}
-			}
-		}
-
-		stepLogger.Println("Successfully reconciled rubric_set step.")
-		return nil
 	}
+
+	return nil
 }
 
 // Helper function to check if slice contains string
 func contains(slice []string, item string) bool {
-    for _, s := range slice {
-        if s == item {
-            return true
-        }
-    }
-    return false
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
 
 // getTaskContainers and assignContainersToSolutions are now in process_rubric_set_helpers.go

@@ -17,6 +17,18 @@ import (
 // ErrEmptyFile is returned when a file is empty.
 var ErrEmptyFile = errors.New("file is empty")
 
+// SHA256String returns the SHA256 hex digest of the input string.
+func SHA256String(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// CalcRubricCriterionHash returns the SHA256 hex digest for rubric criterion fields.
+func CalcRubricCriterionHash(score int, criterion string, required bool, criterionTestCommand string) string {
+	str := fmt.Sprintf("%d|%s|%t|%s", score, criterion, required, criterionTestCommand)
+	return SHA256String(str)
+}
+
 // GetSHA256 computes the SHA256 hash of a file.
 func GetSHA256(filePath string) (string, error) {
 	f, err := os.Open(filePath)
@@ -89,4 +101,122 @@ func GenerateRandomString(length int) (string, error) {
 // InitStepLogger initializes the package-level step logger.
 func InitStepLogger(writer io.Writer) {
 	StepLogger = log.New(writer, "[StepExecutor] ", log.LstdFlags)
+}
+
+// GetAssignedContainersForStep returns a map of solution patch/assignment name to ContainerInfo for a step, checking step settings first, then falling back to task settings.
+// - stepSettings: the raw JSON settings for the step (usually StepExec.Settings)
+// - taskSettings: the parsed TaskSettings for the parent task
+// Returns: map[patchName]ContainerInfo, error
+func GetAssignedContainersForStep(stepSettings string, taskSettings *TaskSettings, logger *log.Logger) (map[string]ContainerInfo, error) {
+	// Try step-level assign_containers or assigned_containers
+	var stepMap map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stepSettings), &stepMap); err != nil {
+		return nil, err
+	}
+
+	// Try to find assign_containers or assigned_containers in any config block
+	var assignMap map[string]string
+	for _, v := range stepMap {
+		var inner struct {
+			AssignContainers   map[string]string `json:"assign_containers"`
+			AssignedContainers map[string]string `json:"assigned_containers"`
+		}
+		if err := json.Unmarshal(v, &inner); err == nil {
+			if len(inner.AssignContainers) > 0 {
+				assignMap = inner.AssignContainers
+				break
+			}
+			if len(inner.AssignedContainers) > 0 {
+				assignMap = inner.AssignedContainers
+				break
+			}
+		}
+	}
+
+	// If not found at step level, try task-level
+	if assignMap == nil && taskSettings != nil {
+		if len(taskSettings.AssignContainers) > 0 {
+			assignMap = taskSettings.AssignContainers
+		} else if len(taskSettings.AssignedContainers) > 0 {
+			assignMap = taskSettings.AssignedContainers
+		}
+	}
+
+	result := make(map[string]ContainerInfo)
+	// If we have a mapping (patch/solution → container name), resolve to ContainerInfo
+	if assignMap != nil && len(assignMap) > 0 {
+		// Build a lookup table for container name → ContainerInfo
+		containerLookup := make(map[string]ContainerInfo)
+		if taskSettings != nil {
+			for _, c := range taskSettings.Containers {
+				containerLookup[c.ContainerName] = c
+			}
+		}
+		for patch, contName := range assignMap {
+			if cinfo, ok := containerLookup[contName]; ok {
+				result[patch] = cinfo
+			} else {
+				// Fallback: just provide name if no ID
+				result[patch] = ContainerInfo{ContainerName: contName}
+			}
+		}
+		if logger != nil {
+			logger.Printf("DEBUG: Assignment map for step: %+v", result)
+		}
+		return result, nil
+	}
+
+	// If no assign_containers mapping, fallback to taskSettings.Containers (by order)
+	if taskSettings != nil && len(taskSettings.Containers) > 0 {
+		for i, c := range taskSettings.Containers {
+			key := fmt.Sprintf("container_%d", i)
+			result[key] = c
+		}
+		if logger != nil {
+			logger.Printf("DEBUG: Fallback assignment map for step: %+v", result)
+		}
+		return result, nil
+	}
+
+	return nil, fmt.Errorf("no container assignments found in step or task settings")
+}
+
+// GetPatchFileForContainerAssignments returns a map of container name to the patch file name to use, given assignments and files.
+// - assignments: slice of RubricShellAssignment (container, patch)
+// - files: map of available files (file name → hash)
+// Returns: map[container_name]patch_file_name
+func GetPatchFileForContainerAssignments(assignments []RubricShellAssignment, files map[string]string) map[string]string {
+	result := make(map[string]string)
+	for _, assign := range assignments {
+		patch := assign.Patch
+		// If patch exists directly in files, use it
+		if _, ok := files[patch]; ok {
+			result[assign.Container] = patch
+			continue
+		}
+		// If patch is a synthetic key like "container_2", try to map to solution2.patch or solution_2.patch
+		var idx int
+		if n, err := fmt.Sscanf(patch, "container_%d", &idx); n == 1 && err == nil {
+			candidates := []string{
+				fmt.Sprintf("solution%d.patch", idx+1), // 1-based (solution1.patch)
+				fmt.Sprintf("solution_%d.patch", idx+1),
+				fmt.Sprintf("solution%d.patch", idx),   // 0-based fallback
+				fmt.Sprintf("solution_%d.patch", idx),
+			}
+			found := false
+			for _, candidate := range candidates {
+				if _, ok := files[candidate]; ok {
+					result[assign.Container] = candidate
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+		}
+		// Not found: log or skip
+		result[assign.Container] = "" // Or omit key if you prefer
+	}
+	return result
 }

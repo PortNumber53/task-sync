@@ -14,15 +14,6 @@ import (
 
 // ProcessDynamicRubricStep handles the execution of a single dynamic_rubric step.
 func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger) error {
-	cfg, _ := LoadConfig()
-	passMarker := cfg.PassMarker
-	failMarker := cfg.FailMarker
-	if passMarker == "" {
-		passMarker = "#__PASS__#"
-	}
-	if failMarker == "" {
-		failMarker = "#__FAIL__#"
-	}
 	stepLogger.Printf("Processing dynamic_rubric step ID %d", stepExec.StepID)
 
 	var config models.DynamicRubricConfig
@@ -30,32 +21,36 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 		return fmt.Errorf("failed to unmarshal dynamic_rubric settings for step %d: %w", stepExec.StepID, err)
 	}
 
+	// Check if there are containers assigned to solutions
+	if len(config.DynamicRubric.AssignContainers) == 0 {
+		stepLogger.Printf("Warning: No containers assigned in dynamic_rubric step %d. Nothing to process.", stepExec.StepID)
+		return nil
+	}
 
 	var overallChanged bool
 
 	// 1. Check hashes of associated files
 	if config.DynamicRubric.Files != nil {
-		
 		for file := range config.DynamicRubric.Files {
-		filePath := filepath.Join(stepExec.BasePath, file)
-		newHash, err := models.GetSHA256(filePath)
-		if err != nil {
-			if errors.Is(err, models.ErrEmptyFile) {
-				stepLogger.Printf("Warning: Treating empty file as changed: %s in step %d", filePath, stepExec.StepID)
-				newHash = ""
-			} else {
-				stepLogger.Printf("Error hashing file %s for step %d: %v", file, stepExec.StepID, err)
-				continue // Skip this file on other errors
+			filePath := filepath.Join(stepExec.BasePath, file)
+			newHash, err := models.GetSHA256(filePath)
+			if err != nil {
+				if errors.Is(err, models.ErrEmptyFile) {
+					stepLogger.Printf("Warning: Treating empty file as changed: %s in step %d", filePath, stepExec.StepID)
+					newHash = ""
+				} else {
+					stepLogger.Printf("Error hashing file %s for step %d: %v", file, stepExec.StepID, err)
+					continue // Skip this file on other errors
+				}
 			}
-		}
 
-		storedHash, ok := config.DynamicRubric.Files[file]
-		if !ok || storedHash != newHash {
-			stepLogger.Printf("File %s changed for step %d. Old hash: '%s', New hash: '%s'", file, stepExec.StepID, storedHash, newHash)
-			overallChanged = true
+			storedHash, ok := config.DynamicRubric.Files[file]
+			if !ok || storedHash != newHash {
+				stepLogger.Printf("File %s changed for step %d. Old hash: '%s', New hash: '%s'", file, stepExec.StepID, storedHash, newHash)
+				overallChanged = true
+			}
+			config.DynamicRubric.Files[file] = newHash
 		}
-		config.DynamicRubric.Files[file] = newHash
-	}
 	}
 
 	// 2. Check the main rubric file
@@ -86,7 +81,6 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 			stepLogger.Printf("Rubric or associated files changed for step %d. Deleting old steps and generating new ones.", stepExec.StepID)
 		}
 
-		// Delete all previously generated steps
 		if err := models.DeleteGeneratedSteps(db, stepExec.StepID); err != nil {
 			return fmt.Errorf("failed to delete generated steps for step %d: %w", stepExec.StepID, err)
 		}
@@ -94,8 +88,25 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 
 		dependencyOnParent := models.Dependency{ID: stepExec.StepID}
 
-		// Create new steps for each criterion
+		// Create new steps for each criterion for each solution-container assignment
 		for _, crit := range criteria {
+			var assignments []models.RubricShellAssignment
+			for solution, container := range config.DynamicRubric.AssignContainers {
+				if container == "" {
+					stepLogger.Printf("Warning: Skipping solution '%s' for criterion '%s' because no container is assigned.", solution, crit.Title)
+					continue
+				}
+				assignments = append(assignments, models.RubricShellAssignment{
+					Patch:     solution,
+					Container: container,
+				})
+			}
+
+			if len(assignments) == 0 {
+				stepLogger.Printf("Warning: No valid container assignments found for criterion '%s'. Skipping step creation.", crit.Title)
+				continue
+			}
+
 			title := fmt.Sprintf("Rubric %s: %s", crit.Counter, crit.Title)
 			rubricShellSettings := models.RubricShellConfig{
 				Command:     crit.HeldOutTest,
@@ -103,8 +114,11 @@ func ProcessDynamicRubricStep(db *sql.DB, stepExec *models.StepExec, stepLogger 
 				Counter:     crit.Counter,
 				Score:       crit.Score,
 				Required:    crit.Required,
+				Rubric:      crit.Rubric,
 				DependsOn:   []models.Dependency{dependencyOnParent},
 				GeneratedBy: strconv.Itoa(stepExec.StepID),
+				Assignments: assignments,
+				Files:       config.DynamicRubric.Files, // Pass down the files map
 			}
 
 			wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": rubricShellSettings}

@@ -215,11 +215,7 @@ func ReportTask(db *sql.DB, taskID int) error {
 									resultMap[k] = str
 								}
 							}
-							counter := 0
 							for _, patch := range []string{"solution1.patch", "solution2.patch", "solution3.patch", "solution4.patch"} {
-								if counter >= 4 {
-									break
-								}
 								if output, ok := resultMap[patch]; ok {
 									if strings.Contains(output, passMarker) {
 										icons += "✅ "
@@ -231,7 +227,6 @@ func ReportTask(db *sql.DB, taskID int) error {
 								} else {
 									icons += "❔ "
 								}
-								counter++
 							}
 						} else {
 							icons = "❔ ❔ ❔ ❔ "

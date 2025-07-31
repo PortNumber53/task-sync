@@ -21,6 +21,7 @@ type TaskSettings struct {
 	AppFolder string `json:"app_folder"` // Stores the application folder path for docker_extract_volume
 	Containers []ContainerInfo `json:"containers"` // Stores container names and IDs
 	BasePath string `json:"base_path,omitempty"` // Renamed from LocalPath
+	Rubrics map[string]string `json:"rubrics,omitempty"` // Stores rubric UUID -> hash
 	// Add other fields as needed based on project requirements
 }
 

@@ -40,6 +40,7 @@ func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *l
 		},
 		"docker_volume_pool":    ProcessDockerVolumePoolStep,
 		"docker_extract_volume": ProcessDockerExtractVolumeStep,
+		"model_task_check":      ProcessModelTaskCheckStep,
 		"file_exists": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			if se != nil && se.StepID != 0 {
 				return ProcessFileExistsStep(db, se, logger)
@@ -60,10 +61,10 @@ func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *l
 		"rubric_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			// If a specific step is provided (from ProcessSpecificStep), run only that.
 			if se != nil && se.StepID != 0 {
-				return ProcessRubricShellStep(db, se, logger)
+				return ProcessRubricShellStep(db, se, logger, force)
 			}
 			// Otherwise (from executePendingSteps), run all rubric_shell steps.
-			return processAllRubricShellSteps(db, logger)
+			return processAllRubricShellSteps(db, logger, force)
 		},
 		"dynamic_rubric": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			if se != nil && se.StepID != 0 {

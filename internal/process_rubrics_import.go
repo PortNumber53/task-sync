@@ -89,6 +89,26 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 				continue
 			}
 			models.StepLogger.Printf("DEBUG: Parsed JSON criteria for step %d: %+v", step.StepID, criteria)
+
+			// --- Begin rubric hash logic ---
+			rubricHashes := make(map[string]string)
+			for _, crit := range criteria {
+				hash := models.CalcRubricCriterionHash(crit.Score, crit.Rubric, crit.Required, crit.HeldOutTest)
+				rubricHashes[crit.Title] = hash
+			}
+			// Fetch, update, and persist task settings
+			ts, err := models.GetTaskSettings(db, step.TaskID)
+			if err != nil {
+				models.StepLogger.Printf("Step %d: failed to fetch task settings: %v", step.StepID, err)
+			} else {
+				ts.Rubrics = rubricHashes
+				err = models.UpdateTaskSettings(db, step.TaskID, ts)
+				if err != nil {
+					models.StepLogger.Printf("Step %d: failed to update task settings with rubric hashes: %v", step.StepID, err)
+				}
+			}
+			// --- End rubric hash logic ---
+
 			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "message": "JSON rubric processed successfully"})
 		} else if config.MHTMLFile != "" {
 			mhtmlFile := filepath.Join(step.BasePath, config.MHTMLFile)

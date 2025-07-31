@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log"
 	"sort"
-
-	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
 // getTaskContainers retrieves all running containers for the task
@@ -63,33 +61,3 @@ func getTaskContainers(db *sql.DB, taskID int, stepLogger *log.Logger) ([]string
 	return containers, nil
 }
 
-// assignContainersToSolutions automatically assigns solution files to available containers
-func assignContainersToSolutions(config *models.RubricSetConfig, containers []string, stepLogger *log.Logger) map[string]string {
-	assignments := make(map[string]string)
-
-	// Extract solution files from config
-	var solutionFiles []string
-	if config.Solution1 != "" {
-		solutionFiles = append(solutionFiles, config.Solution1)
-	}
-	if config.Solution2 != "" {
-		solutionFiles = append(solutionFiles, config.Solution2)
-	}
-	if config.Solution3 != "" {
-		solutionFiles = append(solutionFiles, config.Solution3)
-	}
-	if config.Solution4 != "" {
-		solutionFiles = append(solutionFiles, config.Solution4)
-	}
-
-	// Assign containers to solution files in a round-robin fashion
-	if len(containers) > 0 && len(solutionFiles) > 0 {
-		for i, solutionFile := range solutionFiles {
-			containerIdx := i % len(containers)
-			assignments[solutionFile] = containers[containerIdx]
-			stepLogger.Printf("Assigned container %s to solution %s", containers[containerIdx], solutionFile)
-		}
-	}
-
-	return assignments
-}

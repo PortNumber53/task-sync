@@ -80,8 +80,36 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 			models.StepLogger.Printf("Step %d: waiting for dependencies to complete\n", step.StepID)
 			continue
 		}
-
-		if config.JSONFile != "" {
+		// File change trigger logic
+		filesToCheck := config.Triggers.Files
+		if filesToCheck != nil && len(filesToCheck) > 0 {
+			filesChanged, err := models.CheckFileHashChanges(step.BasePath, filesToCheck, models.StepLogger)
+			if err != nil {
+				msg := fmt.Sprintf("error checking file hash changes: %v", err)
+				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": msg})
+				models.StepLogger.Printf("Step %d: %s\n", step.StepID, msg)
+				continue
+			}
+			if !filesChanged {
+				msg := "skipped: no relevant file changes detected"
+				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "skipped", "message": msg})
+				models.StepLogger.Printf("Step %d: %s\n", step.StepID, msg)
+				continue
+			}
+		}
+		// After successful import, update file hashes and persist to step settings if triggers.files is set
+		if filesToCheck != nil && len(filesToCheck) > 0 {
+			for filePath := range filesToCheck {
+				fullPath := filepath.Join(step.BasePath, filePath)
+				hash, err := models.GetSHA256(fullPath)
+				if err != nil {
+					models.StepLogger.Printf("Step %d: Warning: could not compute hash for %s: %v\n", step.StepID, filePath, err)
+					continue
+				}
+				filesToCheck[filePath] = hash
+			}
+			// Persist updated hashes to step settings
+			settingsMap["rubrics_import"], _ = json.Marshal(config)
 			jsonPath := filepath.Join(step.BasePath, config.JSONFile)
 			criteria, err := models.ParseRubric(jsonPath)
 			if err != nil {
@@ -89,7 +117,6 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 				continue
 			}
 			models.StepLogger.Printf("DEBUG: Parsed JSON criteria for step %d: %+v", step.StepID, criteria)
-
 			// --- Begin rubric hash logic ---
 			rubricHashes := make(map[string]string)
 			for _, crit := range criteria {
@@ -108,7 +135,26 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 				}
 			}
 			// --- End rubric hash logic ---
-
+			if filesToCheck != nil && len(filesToCheck) > 0 {
+				for filePath := range filesToCheck {
+					fullPath := filepath.Join(step.BasePath, filePath)
+					hash, err := models.GetSHA256(fullPath)
+					if err != nil {
+						models.StepLogger.Printf("Step %d: Warning: could not compute hash for %s: %v\n", step.StepID, filePath, err)
+						continue
+					}
+					filesToCheck[filePath] = hash
+				}
+				// Persist updated hashes to step settings
+				settingsMap["rubrics_import"], _ = json.Marshal(config)
+				updatedSettings, _ := json.Marshal(settingsMap)
+				_, err := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), step.StepID)
+				if err != nil {
+					models.StepLogger.Printf("Step %d: Failed to persist updated file hashes to step settings: %v\n", step.StepID, err)
+				} else {
+					models.StepLogger.Printf("Step %d: Updated file hashes in step settings after import.", step.StepID)
+				}
+			}
 			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "message": "JSON rubric processed successfully"})
 		} else if config.MHTMLFile != "" {
 			mhtmlFile := filepath.Join(step.BasePath, config.MHTMLFile)

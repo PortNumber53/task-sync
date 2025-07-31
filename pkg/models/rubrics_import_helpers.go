@@ -6,7 +6,8 @@ type RubricsImportConfig struct {
     MDFile    string `json:"md_file"`
     JSONFile  string `json:"json_file"`
     DependsOn []Dependency `json:"depends_on,omitempty"`
-}  // Added JSONFile field to support JSON rubric imports
+    Triggers  Triggers     `json:"triggers,omitempty"`
+}  // Added Triggers field for file change detection
 
 func (c *RubricsImportConfig) GetImageTag() string      { return "" }
 func (c *RubricsImportConfig) GetImageID() string       { return "" }

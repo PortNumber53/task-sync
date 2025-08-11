@@ -251,37 +251,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 				var existingWrapped map[string]models.RubricShellConfig
 				if err := json.Unmarshal([]byte(keepStep.Settings), &existingWrapped); err == nil {
 					existingConfig := existingWrapped["rubric_shell"]
-					// Preserve results if present in the existing config and not intentionally resetting
-					if existingConfig.Results == nil && newRubricShellConfig.Results == nil {
-						// Try to load from results column
-						var resultsJSON sql.NullString
-						err := db.QueryRow("SELECT results FROM steps WHERE id = $1", keepStep.ID).Scan(&resultsJSON)
-						if err == nil && resultsJSON.Valid && resultsJSON.String != "" && resultsJSON.String != "null" {
-							var resultsCol map[string]interface{}
-							if err := json.Unmarshal([]byte(resultsJSON.String), &resultsCol); err == nil && len(resultsCol) > 0 {
-								resultsStr := make(map[string]string, len(resultsCol))
-								allString := true
-								for k, v := range resultsCol {
-									strVal, ok := v.(string)
-									if ok {
-										resultsStr[k] = strVal
-									} else {
-										allString = false
-										stepLogger.Printf("[WARN] Non-string result value for key '%s' in results column for step %d", k, keepStep.ID)
-									}
-								}
-								if allString {
-									newRubricShellConfig.Results = resultsStr
-									stepLogger.Printf("[TRACE] Merged results from results column for step %d", keepStep.ID)
-								} else {
-									stepLogger.Printf("[WARN] Skipped merging results column for step %d due to non-string values", keepStep.ID)
-								}
-							}
-						}
-					} else if existingConfig.Results != nil && newRubricShellConfig.Results == nil {
-						newRubricShellConfig.Results = existingConfig.Results
-						stepLogger.Printf("[TRACE] Merged results from settings for step %d", keepStep.ID)
-					}
+					// Results are now stored only in the dedicated results column, no need to preserve them in settings
 					// Preserve rerun:true if it was set in the existing config
 					if existingConfig.Rerun {
 						newRubricShellConfig.Rerun = true

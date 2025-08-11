@@ -81,6 +81,31 @@ se.Settings = freshSettings
 	rsConfig := settings.RubricShell
 	logger.Printf("[DEEPDEBUG] After unmarshal: step %d rsConfig.Rerun=%v, full struct=%+v", se.StepID, rsConfig.Rerun, rsConfig)
 
+	// TEMPORARY CLEANUP: Remove any legacy 'results' field from settings
+	// This ensures our database is clean after migrating to the dedicated results column
+	var rawSettings map[string]interface{}
+	if err := json.Unmarshal([]byte(se.Settings), &rawSettings); err == nil {
+		if rubricShellRaw, ok := rawSettings["rubric_shell"].(map[string]interface{}); ok {
+			if _, hasResults := rubricShellRaw["results"]; hasResults {
+				logger.Printf("[CLEANUP] Removing legacy 'results' field from settings for step %d", se.StepID)
+				delete(rubricShellRaw, "results")
+				// Update the settings in the database
+				cleanedSettings, err := json.Marshal(rawSettings)
+				if err == nil {
+					_, err = db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(cleanedSettings), se.StepID)
+					if err != nil {
+						logger.Printf("[WARN] Failed to update cleaned settings for step %d: %v", se.StepID, err)
+					} else {
+						logger.Printf("[CLEANUP] Successfully removed legacy 'results' field from step %d settings", se.StepID)
+						se.Settings = string(cleanedSettings) // Update our local copy
+					}
+				} else {
+					logger.Printf("[WARN] Failed to marshal cleaned settings for step %d: %v", se.StepID, err)
+				}
+			}
+		}
+	}
+
 	// Treat rerun:true as equivalent to --force for skip logic
 	effectiveForce := force || rsConfig.Rerun
 	logger.Printf("[TRACE] Step %d effectiveForce=%v (force=%v, rerun=%v)", se.StepID, effectiveForce, force, rsConfig.Rerun)
@@ -243,7 +268,7 @@ se.Settings = freshSettings
 		logger.Printf("Processing solution patch %s (resolved file: %s) in container %s for criterion %s", assignment.Patch, patchFile, assignment.Container, rsConfig.CriterionID)
 
 		// Perform the test sequence: reset git, apply solution patch, apply held-out tests patch, run command
-		output, err := runTestSequence(se.BasePath, rsConfig, assignment.Container, patchFile, rsConfig.Command, logger)
+		output, err := runTestSequence(se.BasePath, rsConfig, assignment.Container, patchFile, rsConfig.Command, rsConfig.Rerun, logger)
 		if err != nil {
 			logger.Printf("ERROR: Test sequence failed for patch %s: %v", patchFile, err)
 			results[patchFile] = fmt.Sprintf("Error: %v\nOutput:\n%s", err, output)
@@ -261,30 +286,23 @@ se.Settings = freshSettings
 		}
 	}
 
-	// Store aggregated results back in the step, e.g., serialize results map to JSON and update step settings
-	updatedConfig := rsConfig
+	// Store results only in the dedicated results column (not in settings)
 	// Remove any 'container_N' keys from results
 	for k := range results {
 		if strings.HasPrefix(k, "container_") {
 			delete(results, k)
 		}
 	}
-	updatedConfig.Results = results // Only patch file keys remain
-	logger.Printf("[TRACE] Persisting results for step %d: rerun=%v, settings=%s", se.StepID, updatedConfig.Rerun, func() string { bs, _ := json.Marshal(map[string]models.RubricShellConfig{"rubric_shell": updatedConfig}); return string(bs) }())
-	updatedSettings, err := json.Marshal(map[string]models.RubricShellConfig{"rubric_shell": updatedConfig})
-	if err != nil {
-		return fmt.Errorf("failed to marshal updated settings: %w", err)
-	}
-	if err := models.UpdateStep(db, se.StepID, se.Title, string(updatedSettings)); err != nil {
-		return fmt.Errorf("failed to update step with results: %w", err)
-	}
-	logger.Printf("[TRACE] Also persisting results for step %d in results column", se.StepID)
+	
+	// Store results in the dedicated results column
+	logger.Printf("[TRACE] Persisting results for step %d in results column", se.StepID)
 	resultsIface := make(map[string]interface{}, len(results))
 	for k, v := range results {
 		resultsIface[k] = v
 	}
 	if err := models.StoreStepResult(db, se.StepID, resultsIface); err != nil {
 		logger.Printf("[ERROR] Failed to persist results in results column for step %d: %v", se.StepID, err)
+		return fmt.Errorf("failed to store step results: %w", err)
 	} else {
 		logger.Printf("[TRACE] Successfully persisted results in results column for step %d", se.StepID)
 	}
@@ -310,55 +328,79 @@ se.Settings = freshSettings
 }
 
 // Helper function to run the test sequence (adapt based on existing code)
-func runTestSequence(basePath string, rsConfig models.RubricShellConfig, container string, patch string, command string, logger *log.Logger) (string, error) {
+func runTestSequence(basePath string, rsConfig models.RubricShellConfig, container string, patch string, command string, rerun bool, logger *log.Logger) (string, error) {
 	// Add debug log for base_path
 	logger.Printf("Debug: runTestSequence base_path '%s' for patch %s", basePath, patch)
 
-	// Ensure a single cleanup block before patch application
+	// Step 1: Ensure clean git state in the container
+	// Execute git cleanup commands in proper order
+	// When rerun=true, be more aggressive with cleanup
 	cleanupCmds := [][]string{
-		{"docker", "exec", container, "git", "apply", "-R", "--ignore-whitespace", "/app/held_out_tests.patch"},
+		{"docker", "exec", container, "git", "clean", "-fdx"},
 		{"docker", "exec", container, "git", "reset", "--hard", "HEAD"},
 		{"docker", "exec", container, "git", "checkout", "--", "."},
-		{"docker", "exec", container, "git", "clean", "-fdx"},
 	}
-	for _, c := range cleanupCmds {
+	
+	// When rerun=true, add additional cleanup steps
+	if rerun {
+		logger.Printf("[RERUN] Performing enhanced git cleanup for forced rerun in container %s", container)
+		// Add more aggressive cleanup commands for rerun
+		additionalCleanup := [][]string{
+			{"docker", "exec", container, "git", "stash", "clear"},
+			{"docker", "exec", container, "find", "/app", "-name", "*.orig", "-delete"},
+			{"docker", "exec", container, "find", "/app", "-name", "*.rej", "-delete"},
+		}
+		cleanupCmds = append(cleanupCmds, additionalCleanup...)
+	} else {
+		logger.Printf("[NORMAL] Performing standard git cleanup in container %s", container)
+	}
+	
+	for i, c := range cleanupCmds {
 		cmd := exec.Command(c[0], c[1:]...)
-		_ = cmd.Run()
+		if err := cmd.Run(); err != nil {
+			if rerun {
+				// For rerun, log cleanup failures as warnings but continue
+				logger.Printf("Warning: enhanced cleanup command %d failed during rerun: %v", i+1, err)
+			} else {
+				logger.Printf("Warning: cleanup command %d failed: %v", i+1, err)
+			}
+			// Continue with other cleanup commands even if one fails
+		}
 	}
 
-	// Apply pre_patch.patch if it exists
+	// Step 2: Apply PREPATCH (if it exists) - run as script
 	if _, ok := rsConfig.Files["pre_patch.patch"]; ok {
 		tmpPrePatchPath := "/tmp/pre_patch.patch"
 		cmd := exec.Command("docker", "cp", filepath.Join(basePath, "pre_patch.patch"), fmt.Sprintf("%s:%s", container, tmpPrePatchPath))
 		if err := cmd.Run(); err != nil {
 			return "", fmt.Errorf("copy pre_patch.patch failed: %w", err)
-		} else {
-			cmd = exec.Command("docker", "exec", container, "bash", "-c", escapeSingleQuotes("bash "+tmpPrePatchPath))
-			if err := cmd.Run(); err != nil {
-				return "", fmt.Errorf("execute pre_patch.patch failed: %w", err)
-			}
 		}
+		cmd = exec.Command("docker", "exec", container, "bash", "-c", escapeSingleQuotes("bash "+tmpPrePatchPath))
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("execute pre_patch.patch failed: %w", err)
+		}
+		logger.Printf("Applied pre_patch.patch in container %s", container)
 	}
 
-	// Apply solution patch
+	// Step 3: Apply solution patch using git apply
 	if _, ok := rsConfig.Files[patch]; ok {
 		containerPatchPath := "/app/" + patch
 		cmd := exec.Command("docker", "cp", filepath.Join(basePath, patch), fmt.Sprintf("%s:%s", container, containerPatchPath))
 		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("copy solution patch failed: %w", err)
-		} else {
-			applyPatchCmd := exec.Command("docker", "exec", container, "git", "apply", containerPatchPath)
-			if err := applyPatchCmd.Run(); err != nil {
-				logger.Printf("ERROR: Patch apply failed for criterion %s: %v", rsConfig.CriterionID, err)
-				return "", fmt.Errorf("patch apply failed: %w", err)
-			}
+			return "", fmt.Errorf("copy solution patch %s failed: %w", patch, err)
 		}
+		applyPatchCmd := exec.Command("docker", "exec", container, "git", "apply", containerPatchPath)
+		if err := applyPatchCmd.Run(); err != nil {
+			logger.Printf("ERROR: Solution patch %s apply failed for criterion %s: %v", patch, rsConfig.CriterionID, err)
+			return "", fmt.Errorf("solution patch %s apply failed: %w", patch, err)
+		}
+		logger.Printf("Applied solution patch %s in container %s", patch, container)
 	} else {
 		logger.Printf("Solution patch '%s' not found in rsConfig.Files", patch)
 		return "", fmt.Errorf("solution patch '%s' not found in rsConfig.Files", patch)
 	}
 
-	// Apply held-out tests patch
+	// Step 4: Apply held-out tests patch using git apply
 	if _, ok := rsConfig.Files["held_out_tests.patch"]; ok {
 		fullHeldOutTestsPath := filepath.Join(basePath, "held_out_tests.patch")
 		if _, err := os.Stat(fullHeldOutTestsPath); os.IsNotExist(err) {
@@ -371,19 +413,19 @@ func runTestSequence(basePath string, rsConfig models.RubricShellConfig, contain
 		cmd := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath))
 		if err := cmd.Run(); err != nil {
 			return "", fmt.Errorf("copy held-out tests patch failed: %w", err)
-		} else {
-			cmd = exec.Command("docker", "exec", container, "git", "apply", containerHeldOutTestsPatchPath)
-			if err := cmd.Run(); err != nil {
-				logger.Printf("ERROR: Patch apply failed for criterion %s: %v", rsConfig.CriterionID, err)
-				return "", fmt.Errorf("patch apply failed: %w", err)
-			}
 		}
+		cmd = exec.Command("docker", "exec", container, "git", "apply", containerHeldOutTestsPatchPath)
+		if err := cmd.Run(); err != nil {
+			logger.Printf("ERROR: Held-out tests patch apply failed for criterion %s: %v", rsConfig.CriterionID, err)
+			return "", fmt.Errorf("held-out tests patch apply failed: %w", err)
+		}
+		logger.Printf("Applied held_out_tests.patch in container %s", container)
 	} else {
 		logger.Println("held_out_tests.patch not found in rsConfig.Files")
 		return "", fmt.Errorf("held_out_tests.patch not found in rsConfig.Files")
 	}
 
-	// Run the test command
+	// Step 5: Run the rubric test command and capture output
 	// Create a temporary script file to hold the command.
 	scriptFile, err := os.CreateTemp("", "rubric-script-*.sh")
 	if err != nil {

@@ -102,6 +102,19 @@ func main() {
 		cmd.HandleTask()
 	case "migrate":
 		cmd.HandleMigrate()
+	case "cleanup":
+		pgURL, err := internal.GetPgURLFromEnv()
+		if err != nil {
+			fmt.Printf("Database configuration error: %v\n", err)
+			os.Exit(1)
+		}
+		db, err := models.OpenDB(pgURL)
+		if err != nil {
+			fmt.Printf("Database connection error: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+		cmd.HandleCleanup(db)
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
 		help.PrintMainHelp()

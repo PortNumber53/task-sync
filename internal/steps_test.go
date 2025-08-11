@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -306,7 +305,7 @@ func TestGetStepInfo(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		rows := sqlmock.NewRows([]string{"id", "task_id", "title", "settings", "results", "created_at", "updated_at"}).
 			AddRow(1, 101, "Step 1", `{"key":"val"}`, `{"res":"ok"}`, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+s\.id,\s+s\.task_id,\s+s\.title,\s+s\.settings::text,\s+s\.results::text,\s+s\.created_at,\s+s\.updated_at\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*\$1`)).
+		mock.ExpectQuery(`SELECT s.id, s.task_id, s.title, s.settings::text, s.results::text, s.created_at, s.updated_at FROM steps s WHERE s.id = \$1`).
 			WithArgs(1).
 			WillReturnRows(rows)
 		info, err := GetStepInfo(db, 1)
@@ -322,7 +321,7 @@ func TestGetStepInfo(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+s\.id,\s+s\.task_id,\s+s\.title,\s+s\.settings::text,\s+s\.results::text,\s+s\.created_at,\s+s\.updated_at\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*\$1`)).
+		mock.ExpectQuery(`SELECT s.id, s.task_id, s.title, s.settings::text, s.results::text, s.created_at, s.updated_at FROM steps s WHERE s.id = \$1`).
 			WithArgs(999).
 			WillReturnError(sql.ErrNoRows)
 		info, err := GetStepInfo(db, 999)
@@ -338,7 +337,7 @@ func TestGetStepInfo(t *testing.T) {
 	})
 
 	t.Run("db error", func(t *testing.T) {
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+s\.id,\s+s\.task_id,\s+s\.title,\s+s\.settings::text,\s+s\.results::text,\s+s\.created_at,\s+s\.updated_at\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*\$1`)).
+		mock.ExpectQuery(`SELECT s.id, s.task_id, s.title, s.settings::text, s.results::text, s.created_at, s.updated_at FROM steps s WHERE s.id = \$1`).
 			WithArgs(2).
 			WillReturnError(sql.ErrConnDone)
 		info, err := GetStepInfo(db, 2)
@@ -363,13 +362,13 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("successful copy", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
+		mock.ExpectQuery(`SELECT EXISTS \( SELECT 1 FROM tasks WHERE id = \$1 \)`).
 			WithArgs(101).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
 		rows := sqlmock.NewRows([]string{"title", "settings"}).
 			AddRow("test_step", "{\"key\":\"val\"}")
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`)).
+		mock.ExpectQuery(`SELECT title, settings FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnRows(rows)
 
@@ -392,7 +391,7 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("target task not found", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
+		mock.ExpectQuery(`SELECT EXISTS \( SELECT 1 FROM tasks WHERE id = \$1 \)`).
 			WithArgs(999).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectRollback()
@@ -411,11 +410,11 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("source step not found", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
+		mock.ExpectQuery(`SELECT EXISTS \( SELECT 1 FROM tasks WHERE id = \$1 \)`).
 			WithArgs(101).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`)).
+		mock.ExpectQuery(`SELECT title, settings FROM steps WHERE id = \$1`).
 			WithArgs(99).
 			WillReturnError(sql.ErrNoRows)
 		mock.ExpectRollback()
@@ -434,13 +433,13 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("insert fails", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
+		mock.ExpectQuery(`SELECT EXISTS \( SELECT 1 FROM tasks WHERE id = \$1 \)`).
 			WithArgs(101).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
 		rows := sqlmock.NewRows([]string{"title", "settings"}).
 			AddRow("test_step", "{\"key\":\"val\"}")
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`)).
+		mock.ExpectQuery(`SELECT title, settings FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnRows(rows)
 
@@ -463,11 +462,11 @@ func TestCopyStep(t *testing.T) {
 
 	t.Run("query fails", func(t *testing.T) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+tasks\s+WHERE\s+id\s*=\s*\$1\s*\)`)).
+		mock.ExpectQuery(`SELECT EXISTS \( SELECT 1 FROM tasks WHERE id = \$1 \)`).
 			WithArgs(101).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+title,\s+settings\s+FROM\s+steps\s+WHERE\s+id\s*=\s*\$1`)).
+		mock.ExpectQuery(`SELECT title, settings FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnError(fmt.Errorf("query failed"))
 		mock.ExpectRollback()
@@ -493,7 +492,7 @@ func TestCheckDependencies(t *testing.T) {
 	defer db.Close()
 
 	t.Run("no dependencies", func(t *testing.T) {
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
+		mock.ExpectQuery(`SELECT COALESCE\(\(SELECT value FROM jsonb_each\(settings\) WHERE key = 'depends_on'\), '\[\]'::jsonb\)::text FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(`[]`))
 
@@ -512,11 +511,11 @@ func TestCheckDependencies(t *testing.T) {
 
 	t.Run("dependencies met", func(t *testing.T) {
 		dependsOnJSON := `[{"id": 2}, {"id": 3}]`
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
+		mock.ExpectQuery(`SELECT COALESCE\(\(SELECT value FROM jsonb_each\(settings\) WHERE key = 'depends_on'\), '\[\]'::jsonb\)::text FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(dependsOnJSON))
 
-		query := regexp.MustCompile(`SELECT\s+NOT\s+EXISTS\(\s*SELECT\s+1\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*ANY\(\$1::int\[\]\)\s+AND\s+\(s\.results->>'result'\s+IS\s+NULL\s+OR\s+s\.results->>'result'\s+!=\s+'success'\)\)`)
+		query := `SELECT NOT EXISTS\( SELECT 1 FROM steps s WHERE s.id = ANY\(\$1::int\[\]\) AND \(s.results->>'result' IS NULL OR s.results->>'result' != 'success'\)\)`
 		mock.ExpectQuery(query).
 			WithArgs(pq.Array([]int{2, 3})).
 			WillReturnRows(sqlmock.NewRows([]string{"not_exists"}).AddRow(true))
@@ -536,11 +535,11 @@ func TestCheckDependencies(t *testing.T) {
 
 	t.Run("dependencies not met (one failed)", func(t *testing.T) {
 		dependsOnJSON := `[{"id": 2}, {"id": 3}]`
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
+		mock.ExpectQuery(`SELECT COALESCE\(\(SELECT value FROM jsonb_each\(settings\) WHERE key = 'depends_on'\), '\[\]'::jsonb\)::text FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(dependsOnJSON))
 
-		query := regexp.MustCompile(`SELECT\s+NOT\s+EXISTS\(\s*SELECT\s+1\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*ANY\(\$1::int\[\]\)\s+AND\s+\(s\.results->>'result'\s+IS\s+NULL\s+OR\s+s\.results->>'result'\s+!=\s+'success'\)\)`)
+		query := `SELECT NOT EXISTS\( SELECT 1 FROM steps s WHERE s.id = ANY\(\$1::int\[\]\) AND \(s.results->>'result' IS NULL OR s.results->>'result' != 'success'\)\)`
 		mock.ExpectQuery(query).
 			WithArgs(pq.Array([]int{2, 3})).
 			WillReturnRows(sqlmock.NewRows([]string{"not_exists"}).AddRow(false))
@@ -560,11 +559,11 @@ func TestCheckDependencies(t *testing.T) {
 
 	t.Run("db error on dependency query", func(t *testing.T) {
 		dependsOnJSON := `[{"id": 2}]`
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
+		mock.ExpectQuery(`SELECT COALESCE\(\(SELECT value FROM jsonb_each\(settings\) WHERE key = 'depends_on'\), '\[\]'::jsonb\)::text FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(dependsOnJSON))
 
-		query := regexp.MustCompile(`SELECT\s+NOT\s+EXISTS\(\s*SELECT\s+1\s+FROM\s+steps\s+s\s+WHERE\s+s\.id\s*=\s*ANY\(\$1::int\[\]\)\s+AND\s+\(s\.results->>'result'\s+IS\s+NULL\s+OR\s+s\.results->>'result'\s+!=\s+'success'\)\)`)
+		query := `SELECT NOT EXISTS\( SELECT 1 FROM steps s WHERE s.id = ANY\(\$1::int\[\]\) AND \(s.results->>'result' IS NULL OR s.results->>'result' != 'success'\)\)`
 		mock.ExpectQuery(query).
 			WithArgs(pq.Array([]int{2})).
 			WillReturnError(fmt.Errorf("db error"))
@@ -583,7 +582,7 @@ func TestCheckDependencies(t *testing.T) {
 	})
 
 	t.Run("db error on initial query", func(t *testing.T) {
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
+		mock.ExpectQuery(`SELECT COALESCE\(\(SELECT value FROM jsonb_each\(settings\) WHERE key = 'depends_on'\), '\[\]'::jsonb\)::text FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnError(fmt.Errorf("db error"))
 
@@ -602,7 +601,7 @@ func TestCheckDependencies(t *testing.T) {
 
 	t.Run("invalid json for depends_on", func(t *testing.T) {
 		dependsOnJSON := `not-a-json`
-		mock.ExpectQuery(regexp.MustCompile(`SELECT\s+COALESCE\(\(\SELECT\s+value\s+FROM\s+jsonb_each\(settings\)\s+WHERE\s+key\s+=\s+'depends_on'\),\s+'\[\]'::jsonb\)\:\:text\s+FROM\s+steps\s+WHERE\s+id\s+=\s*\$1`)).
+		mock.ExpectQuery(`SELECT COALESCE\(\(SELECT value FROM jsonb_each\(settings\) WHERE key = 'depends_on'\), '\[\]'::jsonb\)::text FROM steps WHERE id = \$1`).
 			WithArgs(1).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce_result"}).AddRow(dependsOnJSON))
 
@@ -683,7 +682,7 @@ func TestProcessDockerExtractVolumeStep(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 
 	// Mock task settings query
-	mockDB.ExpectQuery(regexp.MustCompile(`SELECT\s+settings\s+FROM\s+tasks\s+WHERE\s+id\s+=\s*\$1`)).
+	mockDB.ExpectQuery(`SELECT settings FROM tasks WHERE id = \$1`).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{"settings"}).AddRow(`{"docker":{"image_id":"test-image"}}`))
 

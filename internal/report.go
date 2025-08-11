@@ -140,12 +140,16 @@ func ReportTask(db *sql.DB, taskID int) error {
 	for _, step := range steps {
 		if strings.Contains(step.Settings, "rubric_shell") {
 			if step.Results.Valid {
-				var results map[string]map[string]interface{}
+				var results map[string]interface{}
 				if err := json.Unmarshal([]byte(step.Results.String), &results); err == nil {
 					for patch, res := range results {
-						if cmdOut, ok := res["command_output"].(string); ok {
-							solKey := patch
-							sizeMap[solKey] += int64(len(cmdOut))
+						if resStr, ok := res.(string); ok {
+							// Extract output from the result string (format: "Status\nOutput: ...")
+							if outputIndex := strings.Index(resStr, "Output: "); outputIndex != -1 {
+								cmdOut := resStr[outputIndex+8:] // Skip "Output: "
+								solKey := patch
+								sizeMap[solKey] += int64(len(cmdOut))
+							}
 						}
 					}
 				}
@@ -207,10 +211,12 @@ func ReportTask(db *sql.DB, taskID int) error {
 			if strings.Contains(node.Settings, "rubric_shell") {
 				var settingsMap map[string]interface{}
 				if err := json.Unmarshal([]byte(node.Settings), &settingsMap); err == nil {
-					if rubricShell, ok := settingsMap["rubric_shell"].(map[string]interface{}); ok {
-						if resultsRaw, ok := rubricShell["results"].(map[string]interface{}); ok {
+					// Check if we have results in the dedicated results column
+					if node.Results.Valid {
+						var resultsMap map[string]interface{}
+						if err := json.Unmarshal([]byte(node.Results.String), &resultsMap); err == nil {
 							resultMap := make(map[string]string)
-							for k, v := range resultsRaw {
+							for k, v := range resultsMap {
 								if str, ok := v.(string); ok {
 									resultMap[k] = str
 								}

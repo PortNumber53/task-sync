@@ -11,6 +11,7 @@ type ModelTaskCheckConfig struct {
 	RubricsJSON       string            `json:"rubrics_json"`
 	HeldOutTests      string            `json:"held_out_tests"`
 	Triggers          Triggers          `json:"triggers"`
+	Force             bool              `json:"force,omitempty"`
 }
 
 func (c *ModelTaskCheckConfig) GetImageTag() string      { return "" }

@@ -109,6 +109,7 @@ type DockerExtractVolumeConfig struct {
 		Files map[string]string `json:"files,omitempty"`
 	} `json:"triggers,omitempty"`
 	DependsOn []Dependency `json:"depends_on,omitempty"`
+	Force     bool        `json:"force,omitempty"`
 }
 
 func (c *DockerExtractVolumeConfig) GetImageTag() string { return "" }

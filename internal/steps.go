@@ -443,6 +443,31 @@ func ProcessSpecificStep(db *sql.DB, stepID int, force bool) error {
 		return fmt.Errorf("failed to unmarshal settings for step %d: %w", stepID, err)
 	}
 
+	// Inject the force flag into the settings if it's true
+	if force {
+		for key := range settings {
+			// Assuming there's only one key in settings for the step type
+			// and it corresponds to the step's configuration struct.
+			// We need to unmarshal, set force, and re-marshal.
+			var stepConfig map[string]interface{}
+			if err := json.Unmarshal(settings[key], &stepConfig); err != nil {
+				return fmt.Errorf("failed to unmarshal step config for force injection: %w", err)
+			}
+			stepConfig["force"] = true
+			updatedConfig, err := json.Marshal(stepConfig)
+			if err != nil {
+				return fmt.Errorf("failed to marshal step config after force injection: %w", err)
+			}
+			settings[key] = updatedConfig
+			break // Assuming only one step config per settings map
+		}
+		updatedSettings, err := json.Marshal(settings)
+		if err != nil {
+			return fmt.Errorf("failed to marshal updated settings after force injection: %w", err)
+		}
+		stepExec.Settings = string(updatedSettings)
+	}
+
 	var stepType string
 	processors := getStepProcessors(force)
 	for key := range settings {
@@ -503,17 +528,19 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 		return fmt.Errorf("failed to unmarshal docker_extract_volume settings: %w", err)
 	}
 
-	// Add hash check logic using utility function
-	if len(config.Triggers.Files) > 0 {
-		changed, err := models.CheckFileHashChanges(se.BasePath, config.Triggers.Files, logger)
-		if err != nil {
-			return fmt.Errorf("error checking file hashes: %w", err)
-		}
-		if !changed {
-			logger.Printf("Step %d: No changes detected in triggers.files. Skipping execution.", se.StepID)
-			return nil
-		}
-	}
+    // Add hash check logic using utility function (skip when forced)
+    if config.Force {
+        logger.Printf("Step %d: Force flag set; bypassing triggers.files hash check and executing.", se.StepID)
+    } else if len(config.Triggers.Files) > 0 {
+        changed, err := models.CheckFileHashChanges(se.BasePath, config.Triggers.Files, logger)
+        if err != nil {
+            return fmt.Errorf("error checking file hashes: %w", err)
+        }
+        if !changed {
+            logger.Printf("Step %d: No changes detected in triggers.files. Skipping execution.", se.StepID)
+            return nil
+        }
+    }
 
 	// Log the step configuration for debugging
 	configJSON, _ := json.Marshal(config)
@@ -609,7 +636,7 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 		cleanupCmd.Run()
 		return fmt.Errorf("rsync from /src/ to /original/ failed: %w", err)
 	}
-	logger.Printf("Command succeeded: rsync from %2 to /original/ completed", config.AppFolder)
+	logger.Printf("Command succeeded: rsync from %s to /original/ completed", config.AppFolder)
 
 	rsyncCmd2 := "rsync -a --delete-during /original/ /solution1/"
 	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd2)

@@ -144,7 +144,7 @@ func GetAssignedContainersForStep(stepSettings string, taskSettings *TaskSetting
 
 	result := make(map[string]ContainerInfo)
 	// If we have a mapping (patch/solution → container name), resolve to ContainerInfo
-	if assignMap != nil && len(assignMap) > 0 {
+	if len(assignMap) > 0 {
 		// Build a lookup table for container name → ContainerInfo
 		containerLookup := make(map[string]ContainerInfo)
 		if taskSettings != nil {

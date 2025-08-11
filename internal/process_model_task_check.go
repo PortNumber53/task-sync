@@ -14,27 +14,50 @@ import (
 )
 
 func updateModelTaskCheckFileHashes(db *sql.DB, stepID int, basePath string, config *models.ModelTaskCheckConfig, logger *log.Logger) error {
+	// Start with existing hashes to preserve them
+	existingHashes := make(map[string]string)
+	if config.Triggers.Files != nil {
+		for k, v := range config.Triggers.Files {
+			existingHashes[k] = v
+		}
+	}
+
+	// Define all files that should be tracked for this step
 	filesToHash := []string{
 		config.TaskPrompt,
 		config.ModelPromptSample,
 		config.TaskExplanation,
+		config.RubricsJSON,
+		config.HeldOutTests,
+		"pre_patch.patch", // Standard file that may exist
 	}
 
-	newHashes := make(map[string]string)
+	// Calculate hashes for all relevant files
 	for _, fileName := range filesToHash {
 		if fileName == "" {
 			continue
 		}
 		filePath := filepath.Join(basePath, fileName)
+		
+		// Check if file exists before trying to hash it
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			logger.Printf("File %s does not exist, skipping hash calculation", filePath)
+			continue
+		} else if err != nil {
+			logger.Printf("Error checking file %s: %v", filePath, err)
+			continue
+		}
+		
 		hash, err := models.GetSHA256(filePath)
 		if err != nil {
 			logger.Printf("Error computing hash for %s: %v", filePath, err)
 			continue // Skip erroneous files
 		}
-		newHashes[fileName] = hash
+		existingHashes[fileName] = hash
+		logger.Printf("Updated hash for %s: %s", fileName, hash)
 	}
 
-	config.Triggers.Files = newHashes
+	config.Triggers.Files = existingHashes
 
 	newSettings, err := json.Marshal(map[string]interface{}{"model_task_check": config})
 	if err != nil {
@@ -65,11 +88,12 @@ func ProcessModelTaskCheckStep(db *sql.DB, se *models.StepExec, logger *log.Logg
 	logger.Printf("Using BasePath: %s", se.BasePath)
 	logger.Printf("Processing model_task_check step: %s (ID: %d)", se.Title, se.StepID)
 
-	shouldRun := false
-	if len(config.Triggers.Files) == 0 {
+	shouldRun := config.Force // If force is true, we should run regardless of file changes
+	if !shouldRun && len(config.Triggers.Files) == 0 {
 		logger.Printf("No trigger files found for step %d, running for the first time.", se.StepID)
 		shouldRun = true
-	} else {
+	} else if !shouldRun { // Only check file hash changes if not already forced to run
+
 		var err error
 		shouldRun, err = models.CheckFileHashChanges(se.BasePath, config.Triggers.Files, logger)
 		if err != nil {

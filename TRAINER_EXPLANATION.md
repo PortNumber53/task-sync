@@ -1,0 +1,1 @@
+We want to enhance developer experience by allowing GoogleTest to integrate with IDE/editors providing almost realtime feedback on test pass/fail

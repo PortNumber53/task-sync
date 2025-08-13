@@ -22,7 +22,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		return fmt.Errorf("failed to unmarshal step settings: %w", err)
 	}
 	config := &settings.DockerVolumePool
-	
+
 	// Initialize flags for container recreation
 	recreateNeeded := false
 	forceRecreate := config.Force
@@ -36,7 +36,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	// Ensure we have app_folder set
 	if taskSettings.AppFolder == "" {
 		// Fallback to fetching from dependency if not set in task settings
-		appFolder, err := FetchAppFolderFromDependency(db, stepExec, config, logger) 
+		appFolder, err := FetchAppFolderFromDependency(db, stepExec, config, logger)
 		if err != nil {
 			return fmt.Errorf("failed to fetch app_folder from dependency: %w", err)
 		}
@@ -68,10 +68,10 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			logger.Printf("Initialized solutions from pool_size: %v", config.Solutions)
 		}
 
-		// Initialize container map with proper names
+		// Initialize container map with proper names (task_<ID>_volume_<X>)
 		containerMap := make(map[string]string)
-		for _, solution := range config.Solutions {
-			containerMap[solution] = GenerateDVContainerName(stepExec.TaskID, solution) 
+		for i, solution := range config.Solutions {
+			containerMap[solution] = GenerateDVContainerName(stepExec.TaskID, i+1)
 		}
 		config.Triggers.Containers = containerMap
 		logger.Printf("Initialized Triggers.Containers: %v", config.Triggers.Containers)
@@ -85,7 +85,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 
 	// Check each container individually
 	for patchName, containerName := range config.Triggers.Containers {
-		exists, err := CheckContainerExists(containerName) 
+		exists, err := CheckContainerExists(containerName)
 		if err != nil {
 			logger.Printf("Error checking if container %s exists: %v", containerName, err)
 			recreateNeeded = true
@@ -99,7 +99,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		}
 
 		// Check if container needs recreation due to image changes
-		shouldRecreate, err := ShouldRecreateContainer(containerName, config.Triggers.ImageTag, config.Triggers.ImageID, logger) 
+		shouldRecreate, err := ShouldRecreateContainer(containerName, config.Triggers.ImageTag, config.Triggers.ImageID, logger)
 		if err != nil {
 			logger.Printf("Error checking if container %s needs recreation: %v", containerName, err)
 			recreateNeeded = true
@@ -130,14 +130,16 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	// Create containers for each solution
-	for _, solutionFile := range config.Solutions {
+	for i, solutionFile := range config.Solutions {
 		containerName, ok := config.Triggers.Containers[solutionFile]
 		if !ok || containerName == "" {
-			containerName = GenerateDVContainerName(stepExec.TaskID, solutionFile) 
+			containerName = GenerateDVContainerName(stepExec.TaskID, i+1)
 			config.Triggers.Containers[solutionFile] = containerName
 			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
 		}
-		solutionVolumePath := filepath.Join(stepExec.BasePath, fmt.Sprintf("volume_%s", solutionFile))
+        // Build volume directory name without the .patch suffix, e.g., solution1.patch -> volume_solution1
+        baseName := strings.TrimSuffix(solutionFile, filepath.Ext(solutionFile))
+        solutionVolumePath := filepath.Join(stepExec.BasePath, fmt.Sprintf("volume_%s", baseName))
 
 		// Remove existing container if it exists
 		if exists, _ := CheckContainerExists(containerName); exists {
@@ -164,12 +166,12 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 
 			// Start a new container with the volume mounted
 			params := make([]string, 0, len(config.Parameters)+10) // Pre-allocate with extra capacity
-			
+
 			// Add base parameters
 			params = append(params, "--platform", "linux/amd64", "-d")
 			params = append(params, "--name", containerName)
 			params = append(params, "-v", fmt.Sprintf("%s:%s", solutionVolumePath, taskSettings.AppFolder))
-			
+
 			// Add any additional parameters from config
 			for _, param := range config.Parameters {
 				// Replace placeholders in the parameter
@@ -180,7 +182,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 				replaced = strings.ReplaceAll(replaced, "%%VOLUME_NAME%%", solutionVolumePath)
 				replaced = strings.ReplaceAll(replaced, "%%CONTAINER_NAME%%", containerName)
 				replaced = strings.ReplaceAll(replaced, "%%APP_FOLDER%%", taskSettings.AppFolder)
-				
+
 				// Handle parameters with spaces that aren't quoted
 				if strings.Contains(replaced, " ") && !strings.HasPrefix(replaced, "\"") {
 					params = append(params, strings.Fields(replaced)...)
@@ -215,7 +217,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 				logger.Printf("Error waiting for container %s to start: %v", containerName, err)
 				return err
 			}
-			logger.Printf("Successfully started container %s with volume %s mounted to %s", 
+			logger.Printf("Successfully started container %s with volume %s mounted to %s",
 				containerName, solutionVolumePath, taskSettings.AppFolder)
 
 			// Update the stored image ID with the current value after container start
@@ -240,7 +242,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 				}
 				logger.Printf("Successfully started container %s", containerName)
 			}
-		} 
+		}
 
 		// Prepare patch file path if it exists
 		patchFile := ""
@@ -256,11 +258,15 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 
 		// Apply git cleanup and patches to the container
 		logger.Printf("Applying git cleanup and patches to container %s", containerName)
-		if err := ApplyGitCleanupAndPatch(containerName, patchFile, config.HeldOutTestFile, config.GradingSetupScript, logger); err != nil {
+		workingDir := taskSettings.AppFolder
+		if workingDir == "" {
+			workingDir = config.ContainerFolder
+		}
+		if err := ApplyGitCleanupAndPatch(containerName, workingDir, patchFile, config.HeldOutTestFile, config.GradingSetupScript, logger); err != nil {
 			return fmt.Errorf("failed to apply git cleanup and patches to container %s: %w", containerName, err)
 		}
 
-		logger.Printf("Successfully processed container %s with volume %s mounted to %s and applied git cleanup%s", 
+		logger.Printf("Successfully processed container %s with volume %s mounted to %s and applied git cleanup%s",
 			containerName, solutionVolumePath, taskSettings.AppFolder, func() string {
 				if patchFile != "" {
 					return fmt.Sprintf(" and patch %s", filepath.Base(patchFile))
@@ -425,10 +431,11 @@ func RemoveDockerContainer(name string, logger *log.Logger) error {
 	return nil
 }
 
-// ApplyGitCleanupAndPatch applies git cleanup and patches in a container
-func ApplyGitCleanupAndPatch(containerName string, patchFile string, heldOutTestFile string, gradingSetupScript string, logger *log.Logger) error {
+// ApplyGitCleanupAndPatch applies git cleanup and patches in a container.
+// If workingDir is non-empty, commands execute with docker exec -w <workingDir>.
+func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile string, heldOutTestFile string, gradingSetupScript string, logger *log.Logger) error {
 	commands := []string{
-		"cd /app/ansible",
+		"cd " + workingDir,
 		"git reset --hard HEAD",
 		"git checkout -- .",
 		"git clean -fd",
@@ -470,7 +477,12 @@ func ApplyGitCleanupAndPatch(containerName string, patchFile string, heldOutTest
 	}
 
 	for _, cmdStr := range commands {
-		execCmd := exec.Command("docker", "exec", containerName, "bash", "-c", cmdStr)
+		var execCmd *exec.Cmd
+		if workingDir != "" {
+			execCmd = exec.Command("docker", "exec", "-w", workingDir, containerName, "bash", "-c", cmdStr)
+		} else {
+			execCmd = exec.Command("docker", "exec", containerName, "bash", "-c", cmdStr)
+		}
 		if output, err := execCmd.CombinedOutput(); err != nil {
 			logger.Printf("Command failed in container %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
 			return fmt.Errorf("failed to execute command in container: %w", err)
@@ -482,8 +494,9 @@ func ApplyGitCleanupAndPatch(containerName string, patchFile string, heldOutTest
 }
 
 // GenerateDVContainerName generates a consistent container name for Docker volume pool steps
-func GenerateDVContainerName(taskID int, patchName string) string {
-	return fmt.Sprintf("task_%d_%s_container", taskID, strings.TrimSuffix(patchName, ".patch"))
+// Format: task_<taskID>_volume_<index> where index is 1-based
+func GenerateDVContainerName(taskID int, index int) string {
+	return fmt.Sprintf("task_%d_volume_%d", taskID, index)
 }
 
 // ShouldRecreateContainer checks if a container needs to be recreated based on image tag or ID changes
@@ -593,8 +606,7 @@ func CheckVolumeExists(volumeName string) (bool, error) {
 func InitializeContainerMap(taskID int, solutions []string) map[string]string {
 	containers := make(map[string]string)
 	for i := 1; i <= len(solutions); i++ {
-		patchName := fmt.Sprintf("solution%d.patch", i)
-		containers[patchName] = GenerateDVContainerName(taskID, patchName)
+		containers[fmt.Sprintf("solution%d.patch", i)] = GenerateDVContainerName(taskID, i)
 	}
 	return containers
 }

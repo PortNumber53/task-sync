@@ -158,6 +158,7 @@ func EditTask(db *sql.DB, taskID int, updates map[string]string) error {
 		"local_path":  true, // preferred, matches DB and CLI
 		"image_tag":   true,
 		"image_hash":  true,
+		"app_folder":  true, // allow editing app folder in settings
 	}
 
 	// Fetch and update settings JSON for image_tag and image_hash
@@ -211,6 +212,9 @@ func EditTask(db *sql.DB, taskID int, updates map[string]string) error {
 			}
 			dockerMap[key] = value
 			taskSettings["docker"] = dockerMap
+		case "app_folder":
+			// Store app_folder at the root of settings
+			taskSettings["app_folder"] = value
 		}
 	}
 

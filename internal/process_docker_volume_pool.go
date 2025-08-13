@@ -94,9 +94,16 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	}
 	if filesChanged {
 		stepLogger.Println("Triggering partial rebuild: files changed, redoing git operations")
+		// Fetch task settings to get working directory inside the container
+		taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
+		if err != nil {
+			return fmt.Errorf("failed to get task settings: %w", err)
+		}
+		workingDir := taskSettings.AppFolder
 		for patch, container := range config.Triggers.Containers {
 			if containerExists, _ := models.CheckContainerExists(container); containerExists {
-				if err := models.ApplyGitCleanupAndPatch(container, filepath.Join(stepExec.BasePath, patch+".patch"), config.HeldOutTestFile, config.GradingSetupScript, stepLogger); err != nil {
+				patchPath := filepath.Join(stepExec.BasePath, patch) // patch key already includes .patch
+				if err := models.ApplyGitCleanupAndPatch(container, workingDir, patchPath, config.HeldOutTestFile, config.GradingSetupScript, stepLogger); err != nil {
 					return err
 				}
 			} else {

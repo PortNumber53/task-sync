@@ -44,14 +44,21 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	// Initialize or update Triggers.Containers if empty or if any container name is empty
+	// Also ensure container names belong to the current Task ID
 	recreateContainers := false
 	if len(config.Triggers.Containers) == 0 {
 		recreateContainers = true
 	} else {
-		// Check if any container name is empty
+		expectedPrefix := fmt.Sprintf("task_%d_", stepExec.TaskID)
 		for patchName, containerName := range config.Triggers.Containers {
 			if containerName == "" {
 				logger.Printf("Empty container name found for %s, will recreate containers", patchName)
+				recreateContainers = true
+				break
+			}
+			if !strings.HasPrefix(containerName, expectedPrefix) {
+				logger.Printf("Container name %s (for %s) does not match current task prefix %s; will recreate containers",
+					containerName, patchName, expectedPrefix)
 				recreateContainers = true
 				break
 			}
@@ -132,14 +139,15 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	// Create containers for each solution
 	for i, solutionFile := range config.Solutions {
 		containerName, ok := config.Triggers.Containers[solutionFile]
-		if !ok || containerName == "" {
+		expectedPrefix := fmt.Sprintf("task_%d_", stepExec.TaskID)
+		if !ok || containerName == "" || !strings.HasPrefix(containerName, expectedPrefix) {
 			containerName = GenerateDVContainerName(stepExec.TaskID, i+1)
 			config.Triggers.Containers[solutionFile] = containerName
 			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
 		}
-        // Build volume directory name without the .patch suffix, e.g., solution1.patch -> volume_solution1
-        baseName := strings.TrimSuffix(solutionFile, filepath.Ext(solutionFile))
-        solutionVolumePath := filepath.Join(stepExec.BasePath, fmt.Sprintf("volume_%s", baseName))
+		// Build volume directory name without the .patch suffix, e.g., solution1.patch -> volume_solution1
+		baseName := strings.TrimSuffix(solutionFile, filepath.Ext(solutionFile))
+		solutionVolumePath := filepath.Join(stepExec.BasePath, fmt.Sprintf("volume_%s", baseName))
 
 		// Remove existing container if it exists
 		if exists, _ := CheckContainerExists(containerName); exists {

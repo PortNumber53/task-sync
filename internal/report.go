@@ -253,13 +253,21 @@ func ReportTask(db *sql.DB, taskID int) error {
 	}
 	print(rootNodes, "")
 
-	// After the print function call, add summary of output sizes
-	for patch, size := range sizeMap {
-		solNumStr := strings.TrimPrefix(strings.TrimSuffix(patch, ".patch"), "solution")
-		solNum, err := strconv.Atoi(solNumStr)
-		if err == nil {
-			fmt.Printf("Solution %d combined output: %s bytes\n", solNum, addCommas(size))
-		}
-	}
-	return nil
+    // After the print function call, add summary of output sizes sorted by solution number
+    type solPair struct {
+        n    int
+        size int64
+    }
+    var sols []solPair
+    for patch, size := range sizeMap {
+        solNumStr := strings.TrimPrefix(strings.TrimSuffix(patch, ".patch"), "solution")
+        if n, err := strconv.Atoi(solNumStr); err == nil {
+            sols = append(sols, solPair{n: n, size: size})
+        }
+    }
+    sort.Slice(sols, func(i, j int) bool { return sols[i].n < sols[j].n })
+    for _, sp := range sols {
+        fmt.Printf("Solution %d combined output: %s bytes\n", sp.n, addCommas(sp.size))
+    }
+    return nil
 }

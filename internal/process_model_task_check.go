@@ -150,7 +150,26 @@ func ProcessModelTaskCheckStep(db *sql.DB, se *models.StepExec, logger *log.Logg
 	// Perform replacements
 	generatedContent := strings.Replace(string(sampleContent), "{YOUR_TASK_PROMPT}", string(taskPromptContent), -1)
 	generatedContent = strings.Replace(generatedContent, "{YOUR_RUBRIC}", string(rubricsContent), -1)
-	generatedContent = strings.Replace(generatedContent, "{held_out_test_patch}", string(heldOutTestsContent), -1)
+
+	// Decide how to handle held_out_test_patch based on final size
+	const sizeThreshold = 250 * 1024 // 250 KB
+	// First, simulate full inlining
+	inlined := strings.Replace(generatedContent, "{held_out_test_patch}", string(heldOutTestsContent), -1)
+	if len(inlined) > sizeThreshold {
+		// Too large if inlined: replace the wrapped block with a short message
+		placeholderBlock := "<held_out_test_patch>{held_out_test_patch}</held_out_test_patch>"
+		replacementMsg := "held_out_test_patch is provided as an attached file"
+		replaced := strings.Replace(generatedContent, placeholderBlock, replacementMsg, -1)
+		if replaced == generatedContent {
+			// If the exact wrapped block is not present, fall back to replacing the bare placeholder to avoid leaving tokens
+			replaced = strings.Replace(generatedContent, "{held_out_test_patch}", replacementMsg, -1)
+		}
+		generatedContent = replaced
+		logger.Printf("model_task_check: inlined content would exceed %d bytes; using attachment notice instead", sizeThreshold)
+	} else {
+		// Safe to inline entirely
+		generatedContent = inlined
+	}
 
 	// Write the generated file
 	if err := ioutil.WriteFile(generatedFilePath, []byte(generatedContent), 0644); err != nil {

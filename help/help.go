@@ -267,6 +267,7 @@ Editable Fields:
   - image_hash:  Docker image hash (e.g., 'sha256:abc123')
   - status:      Task status (e.g., 'pending', 'active', 'completed')
   - local_path:  Local filesystem path for the task
+  - platform:    Default Docker build platform (e.g., 'linux/amd64')
 
 Examples:
   # Edit the name of task with ID 123
@@ -274,6 +275,9 @@ Examples:
 
   # Update the status and local path for task 45
   task-sync task edit 45 --set status=active --set local_path=/path/to/new/location
+
+  # Set the default build platform
+  task-sync task edit 45 --set platform=linux/amd64
 
   # Show this help message
   task-sync task edit --help`

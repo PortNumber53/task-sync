@@ -32,6 +32,26 @@ func executeDockerBuild(workDir string, config *models.DockerBuildConfig, stepID
 		buildParams = append(buildParams, parts...)
 	}
 
+	// If a platform is specified in config and not already present in params, add it
+	if config.Platform != "" {
+		hasPlatform := false
+		for i := 0; i < len(buildParams); i++ {
+			if buildParams[i] == "--platform" {
+				// if next token exists, treat as present
+				hasPlatform = true
+				break
+			}
+			// also handle combined form: --platform=linux/amd64
+			if strings.HasPrefix(buildParams[i], "--platform=") {
+				hasPlatform = true
+				break
+			}
+		}
+		if !hasPlatform {
+			buildParams = append([]string{"--platform", config.Platform}, buildParams...)
+		}
+	}
+
 	// Ensure the -t flag is present if not already added by parameters
 	hasTagFlag := false
 	for i, param := range buildParams {

@@ -15,6 +15,7 @@ type DockerBuildConfig struct {
 		Files map[string]string `json:"files,omitempty"`
 	} `json:"triggers,omitempty"`
 	Parameters []string `json:"parameters,omitempty"`
+	Platform   string   `json:"platform,omitempty"`
 }
 
 func (c *DockerBuildConfig) GetImageTag() string      { return c.ImageTag }

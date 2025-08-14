@@ -96,6 +96,11 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 		}
 
 		config.ImageTag = taskSettings.Docker.ImageTag
+		// Pull platform from task settings, if provided
+		if taskSettings.Platform != "" {
+			config.Platform = taskSettings.Platform
+			stepLogger.Printf("Step %d: Using platform '%s' from task settings.", step.StepID, config.Platform)
+		}
 		// config.ImageID will be set after successful build
 		stepLogger.Printf("Step %d: Using image tag '%s' from task settings.\n", step.StepID, config.ImageTag)
 

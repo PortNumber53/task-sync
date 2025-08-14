@@ -19,6 +19,7 @@ type TaskSettings struct {
 	AssignedContainers map[string]string `json:"assigned_containers"`
 	VolumeName string `json:"volume_name"`
 	AppFolder string `json:"app_folder"` // Stores the application folder path for docker_extract_volume
+	Platform string `json:"platform,omitempty"` // Target platform for docker builds (e.g., linux/amd64)
 	// Legacy containers array (kept for backward compatibility; we will not write to it going forward)
 	Containers []ContainerInfo `json:"containers,omitempty"`
 	// New canonical containers mapping stored in task.settings as containers_map

@@ -19,7 +19,12 @@ type TaskSettings struct {
 	AssignedContainers map[string]string `json:"assigned_containers"`
 	VolumeName string `json:"volume_name"`
 	AppFolder string `json:"app_folder"` // Stores the application folder path for docker_extract_volume
-	Containers []ContainerInfo `json:"containers"` // Stores container names and IDs
+	// Legacy containers array (kept for backward compatibility; we will not write to it going forward)
+	Containers []ContainerInfo `json:"containers,omitempty"`
+	// New canonical containers mapping stored in task.settings as containers_map
+	ContainersMap map[string]ContainerInfo `json:"containers_map,omitempty"`
+	// New location for docker run parameters
+	DockerRunParameters []string `json:"docker_run_parameters,omitempty"`
 	BasePath string `json:"base_path,omitempty"` // Renamed from LocalPath
 	Rubrics map[string]string `json:"rubrics,omitempty"` // Stores rubric UUID -> hash
 	// Add other fields as needed based on project requirements

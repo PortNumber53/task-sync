@@ -27,14 +27,24 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	recreateNeeded := false
 	forceRecreate := config.Force
 
-	// Get task settings to access local_path and app_folder
-	taskSettings, err := GetTaskSettings(db, stepExec.TaskID)
-	if err != nil {
-		return fmt.Errorf("failed to get task settings: %w", err)
+	// Get task settings to access app_folder, with nil DB guard for tests
+	var taskSettings TaskSettings
+	if db == nil {
+		// Test context: avoid DB usage. Prefer ContainerFolder if provided.
+		taskSettings.AppFolder = config.ContainerFolder
+		if taskSettings.AppFolder == "" {
+			taskSettings.AppFolder = "/app"
+		}
+	} else {
+		ts, err := GetTaskSettings(db, stepExec.TaskID)
+		if err != nil {
+			return fmt.Errorf("failed to get task settings: %w", err)
+		}
+		taskSettings = *ts
 	}
 
 	// Ensure we have app_folder set
-	if taskSettings.AppFolder == "" {
+	if taskSettings.AppFolder == "" && db != nil {
 		// Fallback to fetching from dependency if not set in task settings
 		appFolder, err := FetchAppFolderFromDependency(db, stepExec, config, logger)
 		if err != nil {
@@ -343,9 +353,12 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	if err != nil {
 		return fmt.Errorf("failed to marshal updated settings: %w", err)
 	}
-	_, err = db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), stepExec.StepID)
-	if err != nil {
-		return fmt.Errorf("failed to update step settings in database: %w", err)
+	if db != nil {
+		if _, err := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), stepExec.StepID); err != nil {
+			return fmt.Errorf("failed to update step settings in database: %w", err)
+		}
+	} else {
+		logger.Printf("Skipping DB update of step settings for step %d (nil DB)", stepExec.StepID)
 	}
 	return nil
 }

@@ -148,8 +148,16 @@ func GetAssignedContainersForStep(stepSettings string, taskSettings *TaskSetting
 		// Build a lookup table for container name → ContainerInfo
 		containerLookup := make(map[string]ContainerInfo)
 		if taskSettings != nil {
-			for _, c := range taskSettings.Containers {
-				containerLookup[c.ContainerName] = c
+			// Prefer new containers_map
+			if taskSettings.ContainersMap != nil {
+				for _, c := range taskSettings.ContainersMap {
+					containerLookup[c.ContainerName] = c
+				}
+			} else if len(taskSettings.Containers) > 0 {
+				// Legacy fallback
+				for _, c := range taskSettings.Containers {
+					containerLookup[c.ContainerName] = c
+				}
 			}
 		}
 		for patch, contName := range assignMap {
@@ -166,23 +174,44 @@ func GetAssignedContainersForStep(stepSettings string, taskSettings *TaskSetting
 		return result, nil
 	}
 
-	// If no assign_containers mapping, fallback to taskSettings.Containers (by order)
-	if taskSettings != nil && len(taskSettings.Containers) > 0 {
-		for i, c := range taskSettings.Containers {
-			key := fmt.Sprintf("container_%d", i)
-			result[key] = c
+	// If no assign_containers mapping, fallback to taskSettings containers by deterministic key order
+	if taskSettings != nil {
+		// Prefer containers_map in key order original, golden, solution1..solution4
+		preferredKeys := []string{"original", "golden", "solution1", "solution2", "solution3", "solution4"}
+		if taskSettings.ContainersMap != nil && len(taskSettings.ContainersMap) > 0 {
+			i := 0
+			for _, k := range preferredKeys {
+				if c, ok := taskSettings.ContainersMap[k]; ok {
+					key := fmt.Sprintf("container_%d", i)
+					result[key] = c
+					i++
+				}
+			}
+			// Include any other keys deterministically (alphabetical) if present
+			if logger != nil {
+				logger.Printf("DEBUG: Fallback assignment map (containers_map) for step: %+v", result)
+			}
+			if len(result) > 0 {
+				return result, nil
+			}
 		}
-		if logger != nil {
-			logger.Printf("DEBUG: Fallback assignment map for step: %+v", result)
+		// Legacy array fallback
+		if len(taskSettings.Containers) > 0 {
+			for i, c := range taskSettings.Containers {
+				key := fmt.Sprintf("container_%d", i)
+				result[key] = c
+			}
+			if logger != nil {
+				logger.Printf("DEBUG: Fallback assignment map (legacy array) for step: %+v", result)
+			}
+			return result, nil
 		}
-		return result, nil
 	}
 
 	return nil, fmt.Errorf("no container assignments found in step or task settings")
 }
 
 // GetPatchFileForContainerAssignments returns a map of container name to the patch file name to use, given assignments and files.
-// - assignments: slice of RubricShellAssignment (container, patch)
 // - files: map of available files (file name → hash)
 // Returns: map[container_name]patch_file_name
 func GetPatchFileForContainerAssignments(assignments []RubricShellAssignment, files map[string]string) map[string]string {

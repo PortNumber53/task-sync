@@ -78,6 +78,52 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 			continue
 		}
 
+		// TEMPORARY: Remove any --platform from step.settings.docker_build.parameters
+		var dockerBuildMap map[string]interface{}
+		if err := json.Unmarshal(dockerBuildJSON, &dockerBuildMap); err == nil {
+			paramsVal, hasParams := dockerBuildMap["parameters"].([]interface{})
+			if hasParams {
+				newParams := make([]interface{}, 0, len(paramsVal))
+				skipNext := false
+				removed := false
+				for i := 0; i < len(paramsVal); i++ {
+					if skipNext { // skip value immediately after standalone --platform
+						skipNext = false
+						removed = true
+						continue
+					}
+					s, ok := paramsVal[i].(string)
+					if !ok {
+						newParams = append(newParams, paramsVal[i])
+						continue
+					}
+					p := strings.TrimSpace(s)
+					if p == "--platform" {
+						// remove this and the next token if present
+						skipNext = true
+						removed = true
+						continue
+					}
+					if strings.HasPrefix(p, "--platform=") || strings.HasPrefix(p, "--platform ") {
+						removed = true
+						continue
+					}
+					newParams = append(newParams, s)
+				}
+				if removed {
+					dockerBuildMap["parameters"] = newParams
+					cleanedJSON, _ := json.Marshal(dockerBuildMap)
+					settingsMap["docker_build"] = cleanedJSON
+					updatedSettings, _ := json.Marshal(settingsMap)
+					if _, err := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), step.StepID); err != nil {
+						stepLogger.Printf("Step %d: Failed to persist removal of --platform from parameters: %v\n", step.StepID, err)
+					} else {
+						stepLogger.Printf("Step %d: Removed --platform from docker_build.parameters in step settings.", step.StepID)
+					}
+				}
+			}
+		}
+
 		if dockerfile, ok := config.Triggers.Files["Dockefile"]; ok {
 			delete(config.Triggers.Files, "Dockefile")
 			config.Triggers.Files["Dockerfile"] = dockerfile

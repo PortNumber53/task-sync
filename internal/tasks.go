@@ -9,10 +9,47 @@ import (
 	"strings"
 )
 
-// CreateTask inserts a new task with name and status. Only allows status: active, inactive, disabled, running.
+// isValidTaskStatus checks allowed task statuses
 func isValidTaskStatus(status string) bool {
 	valid := map[string]bool{"active": true, "inactive": true, "disabled": true, "running": true}
 	return valid[status]
+}
+
+// ResetTaskContainers clears the containers and assigned_containers fields in a task's settings JSON
+func ResetTaskContainers(db *sql.DB, taskID int) error {
+	// Fetch current settings
+	var currentSettingsJSON sql.NullString
+	if err := db.QueryRow("SELECT settings FROM tasks WHERE id = $1", taskID).Scan(&currentSettingsJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("task with ID %d not found", taskID)
+		}
+		return fmt.Errorf("failed to fetch settings: %w", err)
+	}
+
+	// Unmarshal, update, marshal
+	settings := make(map[string]interface{})
+	if currentSettingsJSON.Valid && strings.TrimSpace(currentSettingsJSON.String) != "" {
+		if err := json.Unmarshal([]byte(currentSettingsJSON.String), &settings); err != nil {
+			return fmt.Errorf("failed to unmarshal settings: %w", err)
+		}
+	}
+
+	// Set containers to empty array
+	settings["containers"] = []interface{}{}
+	// Set assigned_containers to empty object
+	settings["assigned_containers"] = map[string]interface{}{}
+
+	updatedSettingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated settings: %w", err)
+	}
+
+	// Update DB
+	_, err = db.Exec(`UPDATE tasks SET settings = $1, updated_at = now() WHERE id = $2`, string(updatedSettingsJSON), taskID)
+	if err != nil {
+		return fmt.Errorf("failed to update task settings: %w", err)
+	}
+	return nil
 }
 
 // CreateTask inserts a new task with name, status, and optional local path

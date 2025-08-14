@@ -173,16 +173,20 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			}
 
 			// Start a new container with the volume mounted
-			params := make([]string, 0, len(config.Parameters)+10) // Pre-allocate with extra capacity
+			// We must ensure all options (including --name) appear BEFORE the image name.
+			preImage := make([]string, 0, len(config.Parameters)+12) // docker run options (before IMAGE)
+			postImage := make([]string, 0, 8)                        // args passed to ENTRYPOINT/CMD (after IMAGE)
+			foundImage := false
 
-			// Add base parameters
-			params = append(params, "--platform", "linux/amd64", "-d")
-			params = append(params, "--name", containerName)
-			params = append(params, "-v", fmt.Sprintf("%s:%s", solutionVolumePath, taskSettings.AppFolder))
+			// Base options
+			preImage = append(preImage, "--platform", "linux/amd64", "-d")
+			preImage = append(preImage, "-v", fmt.Sprintf("%s:%s", solutionVolumePath, taskSettings.AppFolder))
 
-			// Add any additional parameters from config
+			// Parse user parameters:
+			//  - strip any --name occurrences
+			//  - detect first occurrence of the image tag to split pre/post image args
 			for _, param := range config.Parameters {
-				// Replace placeholders in the parameter
+				// Replace placeholders
 				replaced := param
 				replaced = strings.ReplaceAll(replaced, "%%HOSTPATH%%", solutionVolumePath)
 				replaced = strings.ReplaceAll(replaced, "%%DOCKERVOLUME%%", taskSettings.AppFolder)
@@ -191,28 +195,67 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 				replaced = strings.ReplaceAll(replaced, "%%CONTAINER_NAME%%", containerName)
 				replaced = strings.ReplaceAll(replaced, "%%APP_FOLDER%%", taskSettings.AppFolder)
 
-				// Handle parameters with spaces that aren't quoted
-				if strings.Contains(replaced, " ") && !strings.HasPrefix(replaced, "\"") {
-					params = append(params, strings.Fields(replaced)...)
-				} else {
-					params = append(params, replaced)
+				// Tokenize conservatively
+				tokens := strings.Fields(replaced)
+				i := 0
+				for i < len(tokens) {
+					tok := tokens[i]
+					// Drop any attempt to set container name
+					if tok == "--name" {
+						end := i + 2
+						if end > len(tokens) {
+							end = len(tokens)
+						}
+						logger.Printf("Stripping user parameter that attempts to set container name: %q", strings.Join(tokens[i:end], " "))
+						// skip flag and its value if present
+						if i+1 < len(tokens) {
+							i += 2
+						} else {
+							i++
+						}
+						continue
+					}
+					// Detect the image token; everything after goes to postImage
+					if !foundImage && tok == config.Triggers.ImageTag {
+						foundImage = true
+						i++
+						// Remaining tokens from this parameter are post-image
+						if i < len(tokens) {
+							postImage = append(postImage, tokens[i:]...)
+						}
+						break
+					}
+					// Otherwise, before image -> pre-image options
+					if !foundImage {
+						preImage = append(preImage, tok)
+					} else {
+						postImage = append(postImage, tok)
+					}
+					i++
 				}
 			}
 
-			// Ensure the image tag is included in the parameters if not already present
-			hasImage := false
-			for _, p := range params {
-				if p == config.Triggers.ImageTag || strings.Contains(p, "/") {
-					hasImage = true
-					break
+			// Enforce our container name BEFORE the image
+			preImage = append(preImage, "--name", containerName)
+
+			// Decide which image to use
+			imageName := config.Triggers.ImageTag
+			if imageName == "" {
+				if !foundImage {
+					return fmt.Errorf("no image specified: config.triggers.image_tag is empty and none found in parameters")
 				}
+				// If foundImage is true but imageName empty, we already split at it; keep imageName empty here
 			}
 
-			if !hasImage && config.Triggers.ImageTag != "" {
-				params = append(params, config.Triggers.ImageTag)
+			// Build final params: options, IMAGE, then args
+			params := make([]string, 0, len(preImage)+1+len(postImage)+4)
+			params = append(params, preImage...)
+			if imageName != "" {
+				params = append(params, imageName)
 			}
+			params = append(params, postImage...)
 
-			// Add keep-alive command if needed
+			// Add keep-alive command if needed (after image)
 			params = AddKeepAliveCommand(params, config.KeepForever, logger)
 
 			if err := RunDockerCommand(params, containerName, logger, true); err != nil {

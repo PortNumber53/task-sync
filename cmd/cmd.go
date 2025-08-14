@@ -24,6 +24,7 @@ func HandleRunSteps() {
 		fmt.Printf("Database configuration error: %v\n", err)
 		os.Exit(1)
 	}
+
 	db, err := sql.Open("postgres", pgURL)
 	if err != nil {
 		fmt.Printf("Database connection error: %v\n", err)
@@ -38,7 +39,6 @@ func HandleRunSteps() {
 	}
 	fmt.Println("Step processing finished.")
 }
-
 
 func HandleStep() {
 	if len(os.Args) < 3 {
@@ -290,6 +290,19 @@ func HandleTask() {
 		}
 		defer db.Close()
 		HandleTaskRunID(db)
+	case "reset-containers":
+		pgURL, err := internal.GetPgURLFromEnv()
+		if err != nil {
+			fmt.Printf("Database configuration error: %v\n", err)
+			os.Exit(1)
+		}
+		db, err := sql.Open("postgres", pgURL)
+		if err != nil {
+			fmt.Printf("Database connection error: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+		HandleTaskResetContainers(db)
 	default:
 		fmt.Printf("Unknown task subcommand: %s\n", subcommand)
 		helpPkg.PrintTaskHelp()
@@ -430,6 +443,25 @@ func HandleTaskList() {
 		fmt.Printf("Error listing tasks: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func HandleTaskResetContainers(db *sql.DB) {
+	if len(os.Args) < 4 {
+		fmt.Println("Error: reset-containers requires a task ID.")
+		helpPkg.PrintTaskHelp()
+		os.Exit(1)
+	}
+	taskID, err := strconv.Atoi(os.Args[3])
+	if err != nil {
+		fmt.Printf("Error: invalid task ID '%s'. Must be an integer.\n", os.Args[3])
+		os.Exit(1)
+	}
+
+	if err := internal.ResetTaskContainers(db, taskID); err != nil {
+		fmt.Printf("Error resetting containers for task %d: %v\n", taskID, err)
+		os.Exit(1)
+	}
+	fmt.Printf("Task %d containers and assignments reset successfully.\n", taskID)
 }
 
 func HandleMigrate() {

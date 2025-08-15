@@ -220,6 +220,7 @@ type RubricShellConfig struct {
 	Files       map[string]string       `json:"files,omitempty"`
 	Rerun       bool                    `json:"rerun,omitempty"`
 	Triggers    Triggers                `json:"triggers,omitempty"`
+	HashLastRun string                  `json:"hash_last_run,omitempty"`
 }
 
 func (c *RubricShellConfig) GetImageTag() string      { return c.ImageTag }

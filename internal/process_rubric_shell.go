@@ -81,26 +81,39 @@ se.Settings = freshSettings
 	rsConfig := settings.RubricShell
 	logger.Printf("[DEEPDEBUG] After unmarshal: step %d rsConfig.Rerun=%v, full struct=%+v", se.StepID, rsConfig.Rerun, rsConfig)
 
-	// TEMPORARY CLEANUP: Remove any legacy 'results' field from settings
-	// This ensures our database is clean after migrating to the dedicated results column
+	// TEMPORARY CLEANUP: Remove legacy/misspelled fields from settings
+	// - Remove 'results' (migrated to dedicated results column)
+	// - Remove 'assingments' (misspelling) and 'assignments' to avoid step-level overrides
 	var rawSettings map[string]interface{}
 	if err := json.Unmarshal([]byte(se.Settings), &rawSettings); err == nil {
 		if rubricShellRaw, ok := rawSettings["rubric_shell"].(map[string]interface{}); ok {
+			cleaned := false
 			if _, hasResults := rubricShellRaw["results"]; hasResults {
 				logger.Printf("[CLEANUP] Removing legacy 'results' field from settings for step %d", se.StepID)
 				delete(rubricShellRaw, "results")
-				// Update the settings in the database
-				cleanedSettings, err := json.Marshal(rawSettings)
-				if err == nil {
-					_, err = db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(cleanedSettings), se.StepID)
-					if err != nil {
-						logger.Printf("[WARN] Failed to update cleaned settings for step %d: %v", se.StepID, err)
+				cleaned = true
+			}
+			if _, hasAssingments := rubricShellRaw["assingments"]; hasAssingments {
+				logger.Printf("[CLEANUP] Removing misspelled 'assingments' field from settings for step %d", se.StepID)
+				delete(rubricShellRaw, "assingments")
+				cleaned = true
+			}
+			if _, hasAssignments := rubricShellRaw["assignments"]; hasAssignments {
+				logger.Printf("[CLEANUP] Removing step-level 'assignments' field from settings for step %d", se.StepID)
+				delete(rubricShellRaw, "assignments")
+				cleaned = true
+			}
+			if cleaned {
+				cleanedSettings, mErr := json.Marshal(rawSettings)
+				if mErr == nil {
+					if _, uErr := db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(cleanedSettings), se.StepID); uErr != nil {
+						logger.Printf("[WARN] Failed to update cleaned settings for step %d: %v", se.StepID, uErr)
 					} else {
-						logger.Printf("[CLEANUP] Successfully removed legacy 'results' field from step %d settings", se.StepID)
-						se.Settings = string(cleanedSettings) // Update our local copy
+						logger.Printf("[CLEANUP] Persisted sanitized settings for step %d", se.StepID)
+						se.Settings = string(cleanedSettings)
 					}
 				} else {
-					logger.Printf("[WARN] Failed to marshal cleaned settings for step %d: %v", se.StepID, err)
+					logger.Printf("[WARN] Failed to marshal cleaned settings for step %d: %v", se.StepID, mErr)
 				}
 			}
 		}
@@ -115,32 +128,56 @@ se.Settings = freshSettings
 	if err != nil {
 		return fmt.Errorf("failed to fetch parent task settings: %w", err)
 	}
-	// --- Rubric hash gating logic (atomic) ---
-	storedHash := ""
-	if taskSettings != nil && taskSettings.Rubrics != nil {
-		storedHash = taskSettings.Rubrics[rsConfig.CriterionID]
+	// --- Rubric set hash gating logic (JSON settings based) ---
+	// Compare task.settings.rubric_set[criterion_id] against step.settings.rubric_shell.hash_last_run
+	rubricSetHash := ""
+	if taskSettings != nil && taskSettings.RubricSet != nil {
+		rubricSetHash = taskSettings.RubricSet[rsConfig.CriterionID]
 	}
-	currentHash := models.CalcRubricCriterionHash(rsConfig.Score, rsConfig.Rubric, rsConfig.Required, rsConfig.Command)
-	logger.Printf("DEBUG: Step %d skip check: storedHash=%q, currentHash=%q, effectiveForce=%v", se.StepID, storedHash, currentHash, effectiveForce)
-	if storedHash == currentHash && !effectiveForce {
-		logger.Printf("Rubric_shell step %d for criterion '%s' is up-to-date (hash: %s); skipping all git and rubric commands.", se.StepID, rsConfig.CriterionID, currentHash)
-		// Defensive: do NOT touch or reset results on skip. Exit immediately.
+	logger.Printf("DEBUG: Step %d skip check: rubricSetHash=%q, hashLastRun=%q, effectiveForce=%v", se.StepID, rubricSetHash, rsConfig.HashLastRun, effectiveForce)
+	if rubricSetHash != "" && rsConfig.HashLastRun == rubricSetHash && !effectiveForce {
+		logger.Printf("Rubric_shell step %d for criterion '%s' is up-to-date (rubric_set hash: %s); skipping execution.", se.StepID, rsConfig.CriterionID, rubricSetHash)
 		return nil
-	} else {
-		logger.Printf("Rubric_shell step %d for criterion '%s' will execute: stored hash '%s', current hash '%s'", se.StepID, rsConfig.CriterionID, storedHash, currentHash)
 	}
-	// Overwrite rsConfig.Assignments with the resolved assignments
-	assignmentMap, err := models.GetAssignedContainersForStep(se.Settings, taskSettings, logger)
-	if err != nil {
-		logger.Printf("ERROR: Could not determine container assignments for step %d: %v", se.StepID, err)
-		return err
-	}
+	logger.Printf("Rubric_shell step %d for criterion '%s' will execute: rubric_set hash now '%s', last run '%s'", se.StepID, rsConfig.CriterionID, rubricSetHash, rsConfig.HashLastRun)
+
+	// Build assignments strictly from task.settings.containers_map (ignore any step-level assignments)
 	rsConfig.Assignments = nil
-	for patch, cinfo := range assignmentMap {
-		rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
-			Patch:     patch,
-			Container: cinfo.ContainerName,
-		})
+	if taskSettings != nil && taskSettings.ContainersMap != nil {
+		// Only include solutionN patches that actually exist in rsConfig.Files
+		for i := 1; i <= 4; i++ {
+			patch := fmt.Sprintf("solution%d.patch", i)
+			if _, ok := rsConfig.Files[patch]; !ok {
+				continue
+			}
+			key := fmt.Sprintf("solution%d", i)
+			if c, ok := taskSettings.ContainersMap[key]; ok && c.ContainerName != "" {
+				rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
+					Patch:     patch,
+					Container: c.ContainerName,
+				})
+			}
+		}
+		// Add golden path if golden.patch key exists in files (hash may be empty from rubric_set hashing step)
+		if _, ok := rsConfig.Files["golden.patch"]; ok {
+			if c, ok := taskSettings.ContainersMap["golden"]; ok && c.ContainerName != "" {
+				rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
+					Patch:     "golden.patch",
+					Container: c.ContainerName,
+				})
+			}
+		}
+		// Add original path (no patch application), always if container is available
+		if c, ok := taskSettings.ContainersMap["original"]; ok && c.ContainerName != "" {
+			rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
+				Patch:     "original",
+				Container: c.ContainerName,
+			})
+		}
+	}
+	if len(rsConfig.Assignments) == 0 {
+		logger.Printf("ERROR: No container assignments could be derived from task.settings.containers_map for step %d", se.StepID)
+		return fmt.Errorf("no container assignments from task settings")
 	}
 
 	// Debug logging for assignment unmarshaling and count
@@ -258,16 +295,46 @@ se.Settings = freshSettings
 			continue
 		}
 
+		mode := "solution"
+		if assignment.Patch == "golden.patch" {
+			mode = "golden"
+		} else if assignment.Patch == "original" {
+			mode = "original"
+		}
+
 		patchFile := patchFileMap[assignment.Container]
-		if patchFile == "" {
-			logger.Printf("ERROR: No patch file found in rsConfig.Files for container '%s' (assignment patch '%s') in step %d. Skipping.", assignment.Container, assignment.Patch, se.StepID)
-			results[assignment.Patch] = "Error: No patch file found"
+		if mode != "original" {
+			if patchFile == "" {
+				logger.Printf("ERROR: No patch file found in rsConfig.Files for container '%s' (assignment patch '%s') in step %d. Skipping.", assignment.Container, assignment.Patch, se.StepID)
+				results[assignment.Patch] = "Error: No patch file found"
+				continue
+			}
+		}
+
+		if mode == "original" {
+			logger.Printf("Processing ORIGINAL baseline in container %s for criterion %s", assignment.Container, rsConfig.CriterionID)
+			output, err := runOriginalSequence(se.BasePath, rsConfig, assignment.Container, rsConfig.Command, rsConfig.Rerun, logger)
+			if err != nil {
+				logger.Printf("ERROR: Test sequence failed for ORIGINAL baseline: %v", err)
+				results["original"] = fmt.Sprintf("Error: %v\nOutput:\n%s", err, output)
+			} else {
+				status := "Unknown"
+				if strings.Contains(output, cfg.PassMarker) {
+					status = "Pass"
+				} else if strings.Contains(output, cfg.FailMarker) {
+					status = "Fail"
+				} else {
+					status = "Success"
+				}
+				results["original"] = fmt.Sprintf("%s\nOutput: %s", status, output)
+				logger.Printf("Test %s for ORIGINAL baseline: %s\nOutput: %s", status, status, output)
+			}
 			continue
 		}
 
 		logger.Printf("Processing solution patch %s (resolved file: %s) in container %s for criterion %s", assignment.Patch, patchFile, assignment.Container, rsConfig.CriterionID)
 
-		// Perform the test sequence: reset git, apply solution patch, apply held-out tests patch, run command
+		// Perform the test sequence: reset git, apply solution/golden patch, apply held-out tests patch, run command
 		output, err := runTestSequence(se.BasePath, rsConfig, assignment.Container, patchFile, rsConfig.Command, rsConfig.Rerun, logger)
 		if err != nil {
 			logger.Printf("ERROR: Test sequence failed for patch %s: %v", patchFile, err)
@@ -309,19 +376,22 @@ se.Settings = freshSettings
 
 	logger.Printf("Completed processing for criterion %s with %d assignments", rsConfig.CriterionID, len(rsConfig.Assignments))
 
-	// If rerun was true, reset it to false and persist
+	// Persist updated hash_last_run (and reset rerun if it was set)
+	if rubricSetHash != "" {
+		rsConfig.HashLastRun = rubricSetHash
+	}
 	if rsConfig.Rerun {
 		rsConfig.Rerun = false
-		persistSettings, err := json.Marshal(map[string]models.RubricShellConfig{"rubric_shell": rsConfig})
+	}
+	persistSettings, err := json.Marshal(map[string]models.RubricShellConfig{"rubric_shell": rsConfig})
+	if err != nil {
+		logger.Printf("Failed to marshal settings for persistence on step %d: %v", se.StepID, err)
+	} else {
+		_, err := db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(persistSettings), se.StepID)
 		if err != nil {
-			logger.Printf("Failed to marshal settings for rerun reset on step %d: %v", se.StepID, err)
+			logger.Printf("Failed to update step settings on step %d: %v", se.StepID, err)
 		} else {
-			_, err := db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(persistSettings), se.StepID)
-			if err != nil {
-				logger.Printf("Failed to update step settings to reset rerun on step %d: %v", se.StepID, err)
-			} else {
-				logger.Printf("[TRACE] Reset rerun flag to false for rubric_shell step %d. Persisting settings: %s", se.StepID, string(persistSettings))
-			}
+			logger.Printf("[TRACE] Persisted hash_last_run and settings for rubric_shell step %d.", se.StepID)
 		}
 	}
 	return nil
@@ -382,19 +452,41 @@ func runTestSequence(basePath string, rsConfig models.RubricShellConfig, contain
 		logger.Printf("Applied pre_patch.patch in container %s", container)
 	}
 
-	// Step 3: Apply solution patch using git apply
+	// Step 3: Apply solution/golden patch using git apply
 	if _, ok := rsConfig.Files[patch]; ok {
-		containerPatchPath := "/app/" + patch
-		cmd := exec.Command("docker", "cp", filepath.Join(basePath, patch), fmt.Sprintf("%s:%s", container, containerPatchPath))
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("copy solution patch %s failed: %w", patch, err)
+		// Special-case: if golden.patch exists but is empty, skip applying and continue
+		if patch == "golden.patch" {
+			fullPath := filepath.Join(basePath, patch)
+			if fi, err := os.Stat(fullPath); err == nil && fi.Size() == 0 {
+				logger.Printf("Golden patch is empty; skipping apply in container %s", container)
+			} else {
+				containerPatchPath := "/app/" + patch
+				cmd := exec.Command("docker", "cp", filepath.Join(basePath, patch), fmt.Sprintf("%s:%s", container, containerPatchPath))
+				if err := cmd.Run(); err != nil {
+					// For golden, continue even if we fail to copy/apply the patch
+					logger.Printf("WARNING: Copy golden patch failed (continuing without it): %v", err)
+				} else {
+					applyPatchCmd := exec.Command("docker", "exec", container, "git", "apply", containerPatchPath)
+					if err := applyPatchCmd.Run(); err != nil {
+						logger.Printf("WARNING: Golden patch apply failed for criterion %s (continuing without it): %v", rsConfig.CriterionID, err)
+					} else {
+						logger.Printf("Applied solution patch %s in container %s", patch, container)
+					}
+				}
+			}
+		} else {
+			containerPatchPath := "/app/" + patch
+			cmd := exec.Command("docker", "cp", filepath.Join(basePath, patch), fmt.Sprintf("%s:%s", container, containerPatchPath))
+			if err := cmd.Run(); err != nil {
+				return "", fmt.Errorf("copy solution patch %s failed: %w", patch, err)
+			}
+			applyPatchCmd := exec.Command("docker", "exec", container, "git", "apply", containerPatchPath)
+			if err := applyPatchCmd.Run(); err != nil {
+				logger.Printf("ERROR: Solution patch %s apply failed for criterion %s: %v", patch, rsConfig.CriterionID, err)
+				return "", fmt.Errorf("solution patch %s apply failed: %w", patch, err)
+			}
+			logger.Printf("Applied solution patch %s in container %s", patch, container)
 		}
-		applyPatchCmd := exec.Command("docker", "exec", container, "git", "apply", containerPatchPath)
-		if err := applyPatchCmd.Run(); err != nil {
-			logger.Printf("ERROR: Solution patch %s apply failed for criterion %s: %v", patch, rsConfig.CriterionID, err)
-			return "", fmt.Errorf("solution patch %s apply failed: %w", patch, err)
-		}
-		logger.Printf("Applied solution patch %s in container %s", patch, container)
 	} else {
 		logger.Printf("Solution patch '%s' not found in rsConfig.Files", patch)
 		return "", fmt.Errorf("solution patch '%s' not found in rsConfig.Files", patch)
@@ -465,4 +557,88 @@ func runTestSequence(basePath string, rsConfig models.RubricShellConfig, contain
 // escapeSingleQuotes escapes single quotes for safe use inside bash -c '<cmd>'
 func escapeSingleQuotes(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
+// runOriginalSequence runs the rubric on the unmodified ORIGINAL container state.
+// It performs git cleanup, applies only held_out_tests.patch, and runs the command.
+func runOriginalSequence(basePath string, rsConfig models.RubricShellConfig, container string, command string, rerun bool, logger *log.Logger) (string, error) {
+    // Step 1: Ensure clean git state in the container
+    cleanupCmds := [][]string{
+        {"docker", "exec", container, "git", "clean", "-fdx"},
+        {"docker", "exec", container, "git", "reset", "--hard", "HEAD"},
+        {"docker", "exec", container, "git", "checkout", "--", "."},
+    }
+    if rerun {
+        logger.Printf("[RERUN] Performing enhanced git cleanup for forced rerun in container %s (ORIGINAL)", container)
+        additionalCleanup := [][]string{
+            {"docker", "exec", container, "git", "stash", "clear"},
+            {"docker", "exec", container, "find", "/app", "-name", "*.orig", "-delete"},
+            {"docker", "exec", container, "find", "/app", "-name", "*.rej", "-delete"},
+        }
+        cleanupCmds = append(cleanupCmds, additionalCleanup...)
+    } else {
+        logger.Printf("[NORMAL] Performing standard git cleanup in container %s (ORIGINAL)", container)
+    }
+    for i, c := range cleanupCmds {
+        cmd := exec.Command(c[0], c[1:]...)
+        if err := cmd.Run(); err != nil {
+            if rerun {
+                logger.Printf("Warning: enhanced cleanup command %d failed during rerun (ORIGINAL): %v", i+1, err)
+            } else {
+                logger.Printf("Warning: cleanup command %d failed (ORIGINAL): %v", i+1, err)
+            }
+        }
+    }
+
+    // Step 2: Apply held-out tests patch using git apply
+    if _, ok := rsConfig.Files["held_out_tests.patch"]; ok {
+        fullHeldOutTestsPath := filepath.Join(basePath, "held_out_tests.patch")
+        if _, err := os.Stat(fullHeldOutTestsPath); os.IsNotExist(err) {
+            return "", fmt.Errorf("held_out_tests.patch does not exist at %s", fullHeldOutTestsPath)
+        } else if err != nil {
+            return "", fmt.Errorf("error checking held_out_tests.patch: %w", err)
+        }
+        logger.Printf("Confirmed held_out_tests.patch exists at %s (ORIGINAL)", fullHeldOutTestsPath)
+        containerHeldOutTestsPatchPath := "/app/held_out_tests.patch"
+        cmd := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath))
+        if err := cmd.Run(); err != nil {
+            return "", fmt.Errorf("copy held-out tests patch failed (ORIGINAL): %w", err)
+        }
+        cmd = exec.Command("docker", "exec", container, "git", "apply", containerHeldOutTestsPatchPath)
+        if err := cmd.Run(); err != nil {
+            logger.Printf("ERROR: Held-out tests patch apply failed for criterion %s (ORIGINAL): %v", rsConfig.CriterionID, err)
+            return "", fmt.Errorf("held-out tests patch apply failed (ORIGINAL): %w", err)
+        }
+        logger.Printf("Applied held_out_tests.patch in container %s (ORIGINAL)", container)
+    } else {
+        logger.Println("held_out_tests.patch not found in rsConfig.Files (ORIGINAL)")
+        return "", fmt.Errorf("held_out_tests.patch not found in rsConfig.Files (ORIGINAL)")
+    }
+
+    // Step 3: Run the rubric test command and capture output
+    scriptFile, err := os.CreateTemp("", "rubric-script-*.sh")
+    if err != nil {
+        return "", fmt.Errorf("failed to create temp script file (ORIGINAL): %w", err)
+    }
+    defer os.Remove(scriptFile.Name())
+    scriptContent := fmt.Sprintf("#!/bin/bash\n%s", command)
+    if _, err := scriptFile.WriteString(scriptContent); err != nil {
+        return "", fmt.Errorf("failed to write to temp script file (ORIGINAL): %w", err)
+    }
+    scriptFile.Close()
+    if err := os.Chmod(scriptFile.Name(), 0755); err != nil {
+        return "", fmt.Errorf("failed to make script executable (ORIGINAL): %w", err)
+    }
+    containerScriptPath := "/tmp/run_rubric.sh"
+    copyCmd := exec.Command("docker", "cp", scriptFile.Name(), fmt.Sprintf("%s:%s", container, containerScriptPath))
+    if err := copyCmd.Run(); err != nil {
+        return "", fmt.Errorf("failed to copy script to container (ORIGINAL): %w", err)
+    }
+    cmd := exec.Command("docker", "exec", container, "/bin/bash", containerScriptPath)
+    output, err := cmd.CombinedOutput()
+    if err != nil {
+        logger.Printf("Error running rubric script (ORIGINAL): %v\nOutput:\n%s", err, string(output))
+        return string(output), err
+    }
+    return string(output), nil
 }

@@ -58,6 +58,39 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	}
 	config := &settings.RubricSet
 
+	// Temporary cleanup: remove legacy fields from step.settings.rubric_set if present
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(stepExec.Settings), &raw); err == nil {
+		if rs, ok := raw["rubric_set"].(map[string]interface{}); ok {
+			cleaned := false
+			// Remove assign_containers (legacy per-step assignment)
+			if _, ok := rs["assign_containers"]; ok {
+				delete(rs, "assign_containers")
+				cleaned = true
+				stepLogger.Printf("Debug: Removed legacy rubric_set.assign_containers from step %d", stepExec.StepID)
+			}
+			// Remove solution_1.._4 and solution1..4 (legacy)
+			legacyKeys := []string{"solution_1", "solution_2", "solution_3", "solution_4", "solution1", "solution2", "solution3", "solution4"}
+			for _, k := range legacyKeys {
+				if _, ok := rs[k]; ok {
+					delete(rs, k)
+					cleaned = true
+					stepLogger.Printf("Debug: Removed legacy rubric_set.%s from step %d", k, stepExec.StepID)
+				}
+			}
+			if cleaned {
+				raw["rubric_set"] = rs
+				if b, err := json.Marshal(raw); err == nil {
+					if _, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2`, string(b), stepExec.StepID); err == nil {
+						stepLogger.Printf("Debug: Persisted cleanup of legacy rubric_set fields for step %d", stepExec.StepID)
+					} else {
+						stepLogger.Printf("Warn: failed persisting cleanup for step %d: %v", stepExec.StepID, err)
+					}
+				}
+			}
+		}
+	}
+
 	stepLogger.Printf("Debug: Unmarshaled RubricSetConfig: %+v", config)
 
 	// Hash the main rubric file and store in Files map under the rubric file name
@@ -131,6 +164,25 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 		}
 	}
 
+	// Build Assignments from task.settings.containers_map and known solution patches
+	assignments := make([]models.RubricShellAssignment, 0)
+	containersMap, err := getContainersMap(db, stepExec.TaskID, stepLogger)
+	if err != nil {
+		stepLogger.Printf("Warn: could not load containers_map: %v", err)
+	} else {
+		for i := 1; i <= 4; i++ {
+			patch := fmt.Sprintf("solution%d.patch", i)
+			// Only map if this solution patch is part of Files (present or hashed)
+			if _, ok := config.Files[patch]; ok {
+				key := fmt.Sprintf("solution%d", i)
+				if c, ok := containersMap[key]; ok && c != "" {
+					assignments = append(assignments, models.RubricShellAssignment{Patch: patch, Container: c})
+				}
+			}
+		}
+		stepLogger.Printf("Debug: Prepared Assignments from containers_map: %+v", assignments)
+	}
+
 	// Prioritize rubrics.json if it exists, otherwise use config.File
 	jsonPath := filepath.Join(stepExec.BasePath, "rubrics.json")
 	if _, err := os.Stat(jsonPath); err == nil {
@@ -188,22 +240,26 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 			currentCriterionIDs[crit.Title] = struct{}{}
 		}
 
-		// Fetch rubric hashes from task settings
+		// Fetch rubric_set hashes from task settings
 		settingsObj, err := models.GetTaskSettings(db, stepExec.TaskID)
-		var rubricHashes map[string]string
-		if err == nil && settingsObj != nil && settingsObj.Rubrics != nil {
-			rubricHashes = settingsObj.Rubrics
+		var rubricSetHashes map[string]string
+		if err == nil && settingsObj != nil && settingsObj.RubricSet != nil {
+			rubricSetHashes = settingsObj.RubricSet
 		} else {
-			rubricHashes = map[string]string{}
+			rubricSetHashes = map[string]string{}
+			if settingsObj == nil {
+				settingsObj = &models.TaskSettings{}
+			}
 		}
+		changedRubricSet := false
 
 		// Reconcile each criterion: ensure only one step exists and is correct
 		for _, crit := range criteria {
 			criterionID := crit.Title
 			steps, exists := existingStepsByCriterion[criterionID]
-			// Calculate current hash for this criterion
-			currentHash := models.CalcRubricCriterionHash(crit.Score, crit.Rubric, crit.Required, crit.HeldOutTest)
-			storedHash, hashExists := rubricHashes[criterionID]
+			// Calculate current hash for this criterion (including counter)
+			currentHash := models.CalcRubricSetCriterionHash(crit.Score, crit.Rubric, crit.Required, crit.HeldOutTest, crit.Counter)
+			storedHash, hashExists := rubricSetHashes[criterionID]
 			shouldUpsert := !hashExists || storedHash != currentHash || force
 
 			newRubricShellConfig := models.RubricShellConfig{
@@ -216,7 +272,7 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 				Rerun:       force || shouldUpsert, // Always set Rerun true if force is true
 				DependsOn:   []models.Dependency{{ID: stepExec.StepID}},
 				GeneratedBy: fmt.Sprintf("%d", stepExec.StepID),
-				Assignments: []models.RubricShellAssignment{},
+				Assignments: assignments,
 				Files:       config.Files, // Inherit Files map from RubricSetConfig
 			}
 			wrappedSettings := map[string]models.RubricShellConfig{"rubric_shell": newRubricShellConfig}
@@ -235,6 +291,11 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 				// Immediately update the map so future logic sees only the canonical step
 				newStep := models.Step{ID: stepID, Title: criterionID, Settings: string(childSettingsJSON)}
 				existingStepsByCriterion[criterionID] = []models.Step{newStep}
+				// Update rubric_set hash map
+				if storedHash != currentHash {
+					rubricSetHashes[criterionID] = currentHash
+					changedRubricSet = true
+				}
 			} else {
 				// Steps exist, keep the first one and delete duplicates if any
 				keepStep := steps[0]
@@ -271,6 +332,11 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 						// Update the map so only the canonical step is present
 						keepStep.Settings = string(childSettingsJSON)
 						existingStepsByCriterion[criterionID] = []models.Step{keepStep}
+						// Update rubric_set hash map
+						if storedHash != currentHash {
+							rubricSetHashes[criterionID] = currentHash
+							changedRubricSet = true
+						}
 					}
 				} else {
 					// Handle unmarshal error by updating anyway (should not happen after pre-pass)
@@ -287,6 +353,11 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 					// Update the map so only the canonical step is present
 					keepStep.Settings = string(childSettingsJSON)
 					existingStepsByCriterion[criterionID] = []models.Step{keepStep}
+					// Update rubric_set hash map
+					if storedHash != currentHash {
+						rubricSetHashes[criterionID] = currentHash
+						changedRubricSet = true
+					}
 				}
 			}
 		}
@@ -301,6 +372,21 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 						stepLogger.Printf("Deleted obsolete step %d for criterion %s", step.ID, criterionID)
 					}
 				}
+				// Also remove obsolete hash entry
+				if _, exists := rubricSetHashes[criterionID]; exists {
+					delete(rubricSetHashes, criterionID)
+					changedRubricSet = true
+				}
+			}
+		}
+
+		// Persist updated rubric_set hashes in task settings if changed
+		if settingsObj != nil && changedRubricSet {
+			settingsObj.RubricSet = rubricSetHashes
+			if err := models.UpdateTaskSettings(db, stepExec.TaskID, settingsObj); err != nil {
+				stepLogger.Printf("Warn: failed to update task rubric_set hashes for task %d: %v", stepExec.TaskID, err)
+			} else {
+				stepLogger.Printf("Debug: Updated task.settings.rubric_set with %d entries", len(rubricSetHashes))
 			}
 		}
 

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Function to add thousand separators to numbers
@@ -200,12 +201,19 @@ func ReportTask(db *sql.DB, taskID int) error {
 			return nodes[i].ID < nodes[j].ID
 		})
 
+		headerPrinted := false
 		for i, node := range nodes {
 			connector := "├── "
 			newPrefix := prefix + "│   "
 			if i == len(nodes)-1 {
 				connector = "╰── "
 				newPrefix = prefix + "    "
+			}
+			if !headerPrinted && strings.Contains(node.Settings, "rubric_shell") {
+				// Align header to this exact connector position
+				pad := strings.Repeat(" ", utf8.RuneCountInString(connector))
+				fmt.Printf("%s%s1  2  3  4  O  G\n", prefix, pad)
+				headerPrinted = true
 			}
 			var icons string
 			if strings.Contains(node.Settings, "rubric_shell") {
@@ -221,7 +229,7 @@ func ReportTask(db *sql.DB, taskID int) error {
 									resultMap[k] = str
 								}
 							}
-							for _, patch := range []string{"solution1.patch", "solution2.patch", "solution3.patch", "solution4.patch"} {
+							for _, patch := range []string{"solution1.patch", "solution2.patch", "solution3.patch", "solution4.patch", "original", "golden.patch"} {
 								if output, ok := resultMap[patch]; ok {
 									if strings.Contains(output, passMarker) {
 										icons += "✅ "
@@ -235,13 +243,13 @@ func ReportTask(db *sql.DB, taskID int) error {
 								}
 							}
 						} else {
-							icons = "❔ ❔ ❔ ❔ "
+							icons = "❔ ❔ ❔ ❔ ❔ ❔ "
 						}
 					} else {
-						icons = "❔ ❔ ❔ ❔ "
+						icons = "❔ ❔ ❔ ❔ ❔ ❔ "
 					}
 				} else {
-					icons = "❔ ❔ ❔ ❔ "
+					icons = "❔ ❔ ❔ ❔ ❔ ❔ "
 				}
 			} else {
 				icons = ""
@@ -253,21 +261,28 @@ func ReportTask(db *sql.DB, taskID int) error {
 	}
 	print(rootNodes, "")
 
-    // After the print function call, add summary of output sizes sorted by solution number
-    type solPair struct {
-        n    int
-        size int64
-    }
-    var sols []solPair
-    for patch, size := range sizeMap {
-        solNumStr := strings.TrimPrefix(strings.TrimSuffix(patch, ".patch"), "solution")
-        if n, err := strconv.Atoi(solNumStr); err == nil {
-            sols = append(sols, solPair{n: n, size: size})
-        }
-    }
-    sort.Slice(sols, func(i, j int) bool { return sols[i].n < sols[j].n })
-    for _, sp := range sols {
-        fmt.Printf("Solution %d combined output: %s bytes\n", sp.n, addCommas(sp.size))
-    }
-    return nil
+	// After the print function call, add summary of output sizes sorted by solution number
+	type solPair struct {
+		n    int
+		size int64
+	}
+	var sols []solPair
+	for patch, size := range sizeMap {
+		solNumStr := strings.TrimPrefix(strings.TrimSuffix(patch, ".patch"), "solution")
+		if n, err := strconv.Atoi(solNumStr); err == nil {
+			sols = append(sols, solPair{n: n, size: size})
+		}
+	}
+	sort.Slice(sols, func(i, j int) bool { return sols[i].n < sols[j].n })
+	for _, sp := range sols {
+		fmt.Printf("Solution %d combined output: %s bytes\n", sp.n, addCommas(sp.size))
+	}
+	// Add Original (O) and Golden (G) combined output sizes
+	if size, ok := sizeMap["original"]; ok {
+		fmt.Printf("Original combined output: %s bytes\n", addCommas(size))
+	}
+	if size, ok := sizeMap["golden.patch"]; ok {
+		fmt.Printf("Golden combined output: %s bytes\n", addCommas(size))
+	}
+	return nil
 }

@@ -24,8 +24,16 @@ func SHA256String(s string) string {
 }
 
 // CalcRubricCriterionHash returns the SHA256 hex digest for rubric criterion fields.
+// Historical variant without the counter field; kept for backward compatibility.
 func CalcRubricCriterionHash(score int, criterion string, required bool, criterionTestCommand string) string {
 	str := fmt.Sprintf("%d|%s|%t|%s", score, criterion, required, criterionTestCommand)
+	return SHA256String(str)
+}
+
+// CalcRubricSetCriterionHash returns the SHA256 hex digest including the counter for rubric_set usage.
+// It hashes the tuple: score, rubric, required, command, counter
+func CalcRubricSetCriterionHash(score int, rubric string, required bool, command string, counter string) string {
+	str := fmt.Sprintf("%d|%s|%t|%s|%s", score, rubric, required, command, counter)
 	return SHA256String(str)
 }
 

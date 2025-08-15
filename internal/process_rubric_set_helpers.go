@@ -20,7 +20,6 @@ func getTaskContainers(db *sql.DB, taskID int, stepLogger *log.Logger) ([]string
     if err := db.QueryRow(query, taskID).Scan(&containersJSON); err != nil {
         return nil, fmt.Errorf("failed to query task containers_map: %w", err)
     }
-
     if len(containersJSON) == 0 || string(containersJSON) == "null" {
         stepLogger.Printf("Debug: containers_map is empty or null for task %d", taskID)
         return []string{}, nil
@@ -58,4 +57,40 @@ func getTaskContainers(db *sql.DB, taskID int, stepLogger *log.Logger) ([]string
 
     stepLogger.Printf("Debug: Extracted containers from containers_map: %+v", containers)
     return containers, nil
+}
+
+// getContainersMap returns a mapping of logical keys (e.g., original, golden, solution1..solution4)
+// to container names from tasks.settings.containers_map. Keys not present are omitted.
+func getContainersMap(db *sql.DB, taskID int, stepLogger *log.Logger) (map[string]string, error) {
+    stepLogger.Printf("Debug: Getting containers_map (detailed) for task ID %d", taskID)
+    query := `
+        SELECT t.settings->'containers_map'
+        FROM tasks t
+        WHERE t.id = $1
+    `
+    var containersJSON []byte
+    if err := db.QueryRow(query, taskID).Scan(&containersJSON); err != nil {
+        return nil, fmt.Errorf("failed to query task containers_map: %w", err)
+    }
+
+    if len(containersJSON) == 0 || string(containersJSON) == "null" {
+        return map[string]string{}, nil
+    }
+
+    var containersMapRaw map[string]struct{
+        ContainerID   string `json:"container_id"`
+        ContainerName string `json:"container_name"`
+    }
+    if err := json.Unmarshal(containersJSON, &containersMapRaw); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal containers_map: %w", err)
+    }
+
+    result := make(map[string]string, len(containersMapRaw))
+    for k, v := range containersMapRaw {
+        if v.ContainerName != "" {
+            result[k] = v.ContainerName
+        }
+    }
+    stepLogger.Printf("Debug: containers_map keys available: %+v", result)
+    return result, nil
 }

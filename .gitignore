@@ -1,5 +1,6 @@
 repo.tar.gz
 Dockerfile
+golden.patch
 held_out_tests.patch
 solution*.patch
 NEW_TASK_DATA.md

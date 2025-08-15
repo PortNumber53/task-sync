@@ -17,8 +17,8 @@ import (
 var CommandFunc func(name string, arg ...string) *exec.Cmd = exec.Command
 
 // stepProcessors maps step types to their respective processor functions with consistent signature using wrappers.
-// getStepProcessors returns the step processor map, parameterized by force flag for rubric_shell steps.
-func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *log.Logger) error {
+// getStepProcessors returns the step processor map, parameterized by force and golden flags for rubric-related steps.
+func getStepProcessors(force bool, golden bool) map[string]func(*sql.DB, *models.StepExec, *log.Logger) error {
 	return map[string]func(*sql.DB, *models.StepExec, *log.Logger) error{
 		"docker_pull": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			processDockerPullSteps(db, se.StepID)
@@ -61,10 +61,10 @@ func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *l
 		"rubric_shell": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			// If a specific step is provided (from ProcessSpecificStep), run only that.
 			if se != nil && se.StepID != 0 {
-				return ProcessRubricShellStep(db, se, logger, force)
+				return ProcessRubricShellStep(db, se, logger, force, golden)
 			}
 			// Otherwise (from executePendingSteps), run all rubric_shell steps.
-			return processAllRubricShellSteps(db, logger, force)
+			return processAllRubricShellSteps(db, logger, force, golden)
 		},
 		"dynamic_rubric": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			if se != nil && se.StepID != 0 {
@@ -87,11 +87,12 @@ func getStepProcessors(force bool) map[string]func(*sql.DB, *models.StepExec, *l
 
 // ProcessSteps is the main entry point for processing all pending steps.
 func ProcessSteps(db *sql.DB) error {
-	return executePendingSteps(db, getStepProcessors(false))
+	// Bulk runs default to golden=false
+	return executePendingSteps(db, getStepProcessors(false, false))
 }
 
 // ProcessStepsForTask processes all steps for a specific task by ID, respecting dependencies.
-func ProcessStepsForTask(db *sql.DB, taskID int) error {
+func ProcessStepsForTask(db *sql.DB, taskID int, golden bool) error {
 	// Fetch all steps for the given task, ordered by ID (can be improved to topological sort if needed)
 	rows, err := db.Query(`SELECT id FROM steps WHERE task_id = $1 ORDER BY id`, taskID)
 	if err != nil {
@@ -114,7 +115,7 @@ func ProcessStepsForTask(db *sql.DB, taskID int) error {
 
 	for _, stepID := range stepIDs {
 		fmt.Printf("Processing step ID %d...\n", stepID)
-		if err := ProcessSpecificStep(db, stepID, false); err != nil {
+		if err := ProcessSpecificStep(db, stepID, false, golden); err != nil {
 			fmt.Printf("Error processing step %d: %v\n", stepID, err)
 			// Continue processing other steps even if one fails
 		}
@@ -405,7 +406,7 @@ func printChildren(nodes []*StepNode, prefix string) {
 }
 
 // ProcessSpecificStep processes a single step by its ID.
-func ProcessSpecificStep(db *sql.DB, stepID int, force bool) error {
+func ProcessSpecificStep(db *sql.DB, stepID int, force bool, golden bool) error {
 	// Fetch the full step details including task_id
 	var stepExec models.StepExec
 	err := db.QueryRow("SELECT s.id, s.task_id, s.title, s.settings, t.base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1", stepID).Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings, &stepExec.BasePath)
@@ -469,7 +470,7 @@ func ProcessSpecificStep(db *sql.DB, stepID int, force bool) error {
 	}
 
 	var stepType string
-	processors := getStepProcessors(force)
+	processors := getStepProcessors(force, golden)
 	for key := range settings {
 		if _, exists := processors[key]; exists {
 			stepType = key
@@ -528,19 +529,19 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 		return fmt.Errorf("failed to unmarshal docker_extract_volume settings: %w", err)
 	}
 
-    // Add hash check logic using utility function (skip when forced)
-    if config.Force {
-        logger.Printf("Step %d: Force flag set; bypassing triggers.files hash check and executing.", se.StepID)
-    } else if len(config.Triggers.Files) > 0 {
-        changed, err := models.CheckFileHashChanges(se.BasePath, config.Triggers.Files, logger)
-        if err != nil {
-            return fmt.Errorf("error checking file hashes: %w", err)
-        }
-        if !changed {
-            logger.Printf("Step %d: No changes detected in triggers.files. Skipping execution.", se.StepID)
-            return nil
-        }
-    }
+	// Add hash check logic using utility function (skip when forced)
+	if config.Force {
+		logger.Printf("Step %d: Force flag set; bypassing triggers.files hash check and executing.", se.StepID)
+	} else if len(config.Triggers.Files) > 0 {
+		changed, err := models.CheckFileHashChanges(se.BasePath, config.Triggers.Files, logger)
+		if err != nil {
+			return fmt.Errorf("error checking file hashes: %w", err)
+		}
+		if !changed {
+			logger.Printf("Step %d: No changes detected in triggers.files. Skipping execution.", se.StepID)
+			return nil
+		}
+	}
 
 	// Log the step configuration for debugging
 	configJSON, _ := json.Marshal(config)
@@ -575,44 +576,53 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 		return fmt.Errorf("Docker image %s does not exist: %w", imageID, err)
 	}
 
-	// Store volume name and app_folder in task settings
+	// Store volume name in task settings (do not modify app_folder here)
 	taskSettings, err := models.GetTaskSettings(db, se.TaskID)
 	if err != nil {
 		return fmt.Errorf("failed to get task settings: %w", err)
 	}
 	taskSettings.VolumeName = volumeName
-	taskSettings.AppFolder = config.AppFolder // Store the app_folder in task settings
 
 	err = models.UpdateTaskSettings(db, se.TaskID, taskSettings)
 	if err != nil {
 		return fmt.Errorf("failed to update task settings: %w", err)
 	}
-	logger.Printf("Updated task settings with volume name: %s and app_folder: %s", volumeName, config.AppFolder)
+	logger.Printf("Updated task settings with volume name: %s", volumeName)
 
 	// Create Docker volume
 	cmd := CommandFunc("docker", "volume", "create", volumeName)
 	logger.Printf("Executing command: docker volume create %s", volumeName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		logger.Printf("Command output: %s", string(output))
-		return fmt.Errorf("failed to create volume: %v, output: %s", err, string(output))
+		logger.Printf("Command failed: %s", string(output))
+		return fmt.Errorf("failed to create docker volume: %w", err)
 	}
-	logger.Printf("Command succeeded: volume created %s", volumeName)
 
 	appHostPath := filepath.Join(se.BasePath, "original/") + "/"
 	solution1Path := filepath.Join(se.BasePath, "volume_solution1/") + "/"
 	solution2Path := filepath.Join(se.BasePath, "volume_solution2/") + "/"
 	solution3Path := filepath.Join(se.BasePath, "volume_solution3/") + "/"
 	solution4Path := filepath.Join(se.BasePath, "volume_solution4/") + "/"
+	goldenPath := filepath.Join(se.BasePath, "volume_golden/") + "/"
 	containerName := fmt.Sprintf("extract_vol_container_%d", se.StepID)
-	cmd = CommandFunc("docker", "run", "-d", "--platform", "linux/amd64", "--name", containerName, "-v", volumeName+":/original_volume", "-v", appHostPath+":/original", "-v", solution1Path+":/solution1", "-v", solution2Path+":/solution2", "-v", solution3Path+":/solution3", "-v", solution4Path+":/solution4", imageID, "tail", "-f", "/dev/null")
-	logger.Printf("Executing command: docker run -d --platform linux/amd64 --name %s -v %s:/original_volume -v %s:/orignal -v %s:/solution1 -v %s:/solution2 -v %s:/solution3 -v %s:/solution4 %s tail -f /dev/null", containerName, volumeName, appHostPath, solution1Path, solution2Path, solution3Path, solution4Path, imageID)
+	// Best-effort cleanup in case a previous run left the helper container
+	preCleanup := CommandFunc("docker", "rm", "-f", containerName)
+	logger.Printf("Ensuring no leftover helper container: docker rm -f %s", containerName)
+	_ = preCleanup.Run()
+	cmd = CommandFunc("docker", "run", "-d", "--platform", "linux/amd64", "--name", containerName, "-v", volumeName+":/original_volume", "-v", appHostPath+":/original", "-v", solution1Path+":/solution1", "-v", solution2Path+":/solution2", "-v", solution3Path+":/solution3", "-v", solution4Path+":/solution4", "-v", goldenPath+":/golden", imageID, "tail", "-f", "/dev/null")
+	logger.Printf("Executing command: docker run -d --platform linux/amd64 --name %s -v %s:/original_volume -v %s:/original -v %s:/solution1 -v %s:/solution2 -v %s:/solution3 -v %s:/solution4 -v %s:/golden %s tail -f /dev/null", containerName, volumeName, appHostPath, solution1Path, solution2Path, solution3Path, solution4Path, goldenPath, imageID)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		logger.Printf("Command failed: %s", string(output))
 		return fmt.Errorf("failed to start container: %w", err)
 	}
 	logger.Printf("Command succeeded: container started %s", containerName)
+	// Always clean up the helper container after we're done
+	defer func() {
+		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+		logger.Printf("Cleaning up helper container: docker rm -f %s", containerName)
+		_ = cleanupCmd.Run()
+	}()
 
 	installCmd := "apt-get update && apt-get install -y rsync"
 	execCmd := CommandFunc("docker", "exec", containerName, "bash", "-c", installCmd)
@@ -686,12 +696,18 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	}
 	logger.Printf("Command succeeded: rsync from /original/ to /solution4/ completed")
 
-	// Remove the container after operation
-	cmd = CommandFunc("docker", "rm", "-f", containerName)
-	output, err = cmd.CombinedOutput()
+	// Mirror solution1 behavior for golden workspace
+	rsyncCmdGolden := "rsync -a --delete-during /original/ /golden/"
+	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmdGolden)
+	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmdGolden)
+	output, err = execCmd.CombinedOutput()
 	if err != nil {
-		logger.Printf("Failed to remove container %s: %v, output: %s", containerName, err, string(output))
+		logger.Printf("Command failed: %s", string(output))
+		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+		cleanupCmd.Run()
+		return fmt.Errorf("rsync from /original/ to /golden/ failed: %w", err)
 	}
+	logger.Printf("Command succeeded: rsync from /original/ to /golden/ completed")
 
 	// After successful execution, update file hashes
 	if err := models.UpdateFileHashes(db, se.StepID, se.BasePath, config.Triggers.Files, logger); err != nil {

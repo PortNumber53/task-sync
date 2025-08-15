@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/PortNumber53/task-sync/pkg/models"
@@ -187,7 +188,32 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 			}
 			randomSuffix, _ := models.GenerateRandomString(4)
 			containerName := fmt.Sprintf("tasksync_%d_%s_%s", step.TaskID, randomSuffix, key)
-			cmdArgs := append([]string{"run", "-d", "--name", containerName}, processedDockerRunParams...)
+			// Compute a per-key bind mount so each logical container sees the correct workspace
+			// - original      -> <base_path>/original        mounted at <app_folder>
+			// - solution{1-4} -> <base_path>/volume_solutionX mounted at <app_folder>
+			// - golden        -> <base_path>/volume_golden    mounted at <app_folder>/golden
+			hostPath := ""
+			switch key {
+			case "original":
+				hostPath = filepath.Join(step.BasePath, "original")
+			case "golden":
+				hostPath = filepath.Join(step.BasePath, "volume_golden")
+			default:
+				// solution1..solution4
+				hostPath = filepath.Join(step.BasePath, fmt.Sprintf("volume_%s", key))
+			}
+
+			// Determine container mount point
+            // All containers, including golden, should mount at <app_folder>
+            // Golden's host path already points to volume_golden
+            mountPoint := taskSettings.AppFolder
+
+			// Ensure absolute paths for docker -v mapping
+			volumeArg := "-v"
+			volumeMap := fmt.Sprintf("%s:%s", hostPath, mountPoint)
+
+			// Place our -v mapping BEFORE the image name (which is expected inside processedDockerRunParams)
+			cmdArgs := append([]string{"run", "-d", "--name", containerName, volumeArg, volumeMap}, processedDockerRunParams...)
 			models.StepLogger.Printf("Constructed docker command: docker %s\n", strings.Join(cmdArgs, " "))
 			cmd := exec.Command("docker", cmdArgs...)
 			output, err := cmd.CombinedOutput()

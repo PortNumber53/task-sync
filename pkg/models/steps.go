@@ -278,13 +278,13 @@ type DockerVolumePoolConfig struct {
 		ImageTag string `json:"image_tag"`
 		Containers map[string]string `json:"containers"`
 	} `json:"triggers"`
-	Artifacts map[string]interface{} `json:"artifacts"`
-	PoolSize int `json:"pool_size"`
+	Artifacts map[string]interface{} `json:"artifacts,omitempty"`
+	PoolSize int `json:"pool_size,omitempty"`
 	DependsOn []map[string]int `json:"depends_on"`
 	Parameters []string `json:"parameters"`
 	ImageTag string `json:"image_tag"`
-	ContainerFolder string `json:"container_folder"`
-	Solutions []string `json:"solutions"`
+	ContainerFolder string `json:"container_folder,omitempty"`
+	Solutions []string `json:"solutions,omitempty"`
 	HeldOutTestFile string `json:"held_out_test_file"`
 	GradingSetupScript string `json:"grading_setup_script"`
 	KeepForever bool `json:"keep_forever"`

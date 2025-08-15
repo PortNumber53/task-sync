@@ -30,11 +30,9 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	// Get task settings to access app_folder, with nil DB guard for tests
 	var taskSettings TaskSettings
 	if db == nil {
-		// Test context: avoid DB usage. Prefer ContainerFolder if provided.
-		taskSettings.AppFolder = config.ContainerFolder
-		if taskSettings.AppFolder == "" {
-			taskSettings.AppFolder = "/app"
-		}
+		// Test context: avoid DB usage. Do not rely on step.container_folder.
+		// Default to the commonly used app folder for this project.
+		taskSettings.AppFolder = "/app/ansible"
 	} else {
 		ts, err := GetTaskSettings(db, stepExec.TaskID)
 		if err != nil {
@@ -54,21 +52,14 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	// Initialize or update Triggers.Containers if empty or if any container name is empty
-	// Also ensure container names belong to the current Task ID
+	// Container names may come from task.settings.containers_map and do not need a specific prefix.
 	recreateContainers := false
 	if len(config.Triggers.Containers) == 0 {
 		recreateContainers = true
 	} else {
-		expectedPrefix := fmt.Sprintf("task_%d_", stepExec.TaskID)
 		for patchName, containerName := range config.Triggers.Containers {
 			if containerName == "" {
 				logger.Printf("Empty container name found for %s, will recreate containers", patchName)
-				recreateContainers = true
-				break
-			}
-			if !strings.HasPrefix(containerName, expectedPrefix) {
-				logger.Printf("Container name %s (for %s) does not match current task prefix %s; will recreate containers",
-					containerName, patchName, expectedPrefix)
 				recreateContainers = true
 				break
 			}
@@ -85,13 +76,20 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			logger.Printf("Initialized solutions from pool_size: %v", config.Solutions)
 		}
 
-		// Initialize container map with proper names (task_<ID>_volume_<X>)
+		// Initialize container map with names from task.settings.containers_map when available; otherwise generate defaults
 		containerMap := make(map[string]string)
 		for i, solution := range config.Solutions {
+			base := strings.TrimSuffix(solution, filepath.Ext(solution))
+			if taskSettings.ContainersMap != nil {
+				if c, ok := taskSettings.ContainersMap[base]; ok && c.ContainerName != "" {
+					containerMap[solution] = c.ContainerName
+					continue
+				}
+			}
 			containerMap[solution] = GenerateDVContainerName(stepExec.TaskID, i+1)
 		}
 		config.Triggers.Containers = containerMap
-		logger.Printf("Initialized Triggers.Containers: %v", config.Triggers.Containers)
+		logger.Printf("Initialized Triggers.Containers (aligned with task.settings when possible): %v", config.Triggers.Containers)
 
 		// Force recreation of containers since we just initialized the container map
 		recreateNeeded = true
@@ -149,8 +147,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	// Create containers for each solution
 	for i, solutionFile := range config.Solutions {
 		containerName, ok := config.Triggers.Containers[solutionFile]
-		expectedPrefix := fmt.Sprintf("task_%d_", stepExec.TaskID)
-		if !ok || containerName == "" || !strings.HasPrefix(containerName, expectedPrefix) {
+		if !ok || containerName == "" {
 			containerName = GenerateDVContainerName(stepExec.TaskID, i+1)
 			config.Triggers.Containers[solutionFile] = containerName
 			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
@@ -189,7 +186,11 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			foundImage := false
 
 			// Base options
-			preImage = append(preImage, "--platform", "linux/amd64", "-d")
+			platform := taskSettings.Platform
+			if platform == "" {
+				platform = "linux/amd64"
+			}
+			preImage = append(preImage, "--platform", platform, "-d")
 			preImage = append(preImage, "-v", fmt.Sprintf("%s:%s", solutionVolumePath, taskSettings.AppFolder))
 
 			// Parse user parameters:
@@ -218,6 +219,20 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 						}
 						logger.Printf("Stripping user parameter that attempts to set container name: %q", strings.Join(tokens[i:end], " "))
 						// skip flag and its value if present
+						if i+1 < len(tokens) {
+							i += 2
+						} else {
+							i++
+						}
+						continue
+					}
+					// Drop any user-specified platform to enforce task.settings.platform
+					if tok == "--platform" {
+						end := i + 2
+						if end > len(tokens) {
+							end = len(tokens)
+						}
+						logger.Printf("Stripping user parameter that attempts to set platform: %q", strings.Join(tokens[i:end], " "))
 						if i+1 < len(tokens) {
 							i += 2
 						} else {
@@ -321,7 +336,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		logger.Printf("Applying git cleanup and patches to container %s", containerName)
 		workingDir := taskSettings.AppFolder
 		if workingDir == "" {
-			workingDir = config.ContainerFolder
+			workingDir = taskSettings.AppFolder
 		}
 		if err := ApplyGitCleanupAndPatch(containerName, workingDir, patchFile, config.HeldOutTestFile, config.GradingSetupScript, logger); err != nil {
 			return fmt.Errorf("failed to apply git cleanup and patches to container %s: %w", containerName, err)
@@ -343,12 +358,42 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		config.Artifacts["containers"] = config.Triggers.Containers
 	}
 
-	// After successful execution, update stored hashes for triggers
+	// After successful execution, update stored hashes for triggers and perform settings cleanup
 	logger.Printf("Debug: Attempting to update step settings with image_id: %s", config.Triggers.ImageID)
 	if err := json.Unmarshal([]byte(stepExec.Settings), &settings); err != nil {
 		return fmt.Errorf("failed to unmarshal settings for update: %w", err)
 	}
 	settings.DockerVolumePool.Triggers.ImageID = config.Triggers.ImageID
+
+	// Temporary cleanup: remove artifacts, pool_size, solutions and any '--platform' parameters from settings
+	if settings.DockerVolumePool.Artifacts != nil {
+		logger.Printf("Cleanup: removing docker_volume_pool.artifacts from step settings")
+		settings.DockerVolumePool.Artifacts = nil
+	}
+	if settings.DockerVolumePool.ContainerFolder != "" {
+		logger.Printf("Cleanup: clearing docker_volume_pool.container_folder from step settings (use task.settings.app_folder)")
+		settings.DockerVolumePool.ContainerFolder = ""
+	}
+	if settings.DockerVolumePool.PoolSize != 0 {
+		logger.Printf("Cleanup: clearing docker_volume_pool.pool_size from step settings")
+		settings.DockerVolumePool.PoolSize = 0
+	}
+	if len(settings.DockerVolumePool.Solutions) > 0 {
+		logger.Printf("Cleanup: clearing docker_volume_pool.solutions from step settings")
+		settings.DockerVolumePool.Solutions = nil
+	}
+	if len(settings.DockerVolumePool.Parameters) > 0 {
+		filtered := make([]string, 0, len(settings.DockerVolumePool.Parameters))
+		for _, p := range settings.DockerVolumePool.Parameters {
+			if strings.Contains(p, "--platform") {
+				logger.Printf("Cleanup: stripping parameter from step settings: %q", p)
+				continue
+			}
+			filtered = append(filtered, p)
+		}
+		settings.DockerVolumePool.Parameters = filtered
+	}
+
 	updatedSettings, err := json.Marshal(settings)
 	if err != nil {
 		return fmt.Errorf("failed to marshal updated settings: %w", err)

@@ -23,10 +23,18 @@ func HandleTaskRunID(db *sql.DB) {
 		fmt.Printf("Error: invalid TASK_ID '%s'. Must be a positive integer.\n", taskIDStr)
 		os.Exit(1)
 	}
-	fmt.Printf("Running all steps for task ID %d...\n", taskID)
-	if err := internal.ProcessStepsForTask(db, taskID); err != nil {
-		fmt.Printf("Error processing steps for task: %v\n", err)
-		os.Exit(1)
-	}
+    // Parse flags after task ID
+    golden := false
+    for i := 4; i < len(os.Args); i++ {
+        if os.Args[i] == "--golden" {
+            golden = true
+        }
+    }
+
+    fmt.Printf("Running all steps for task ID %d...\n", taskID)
+    if err := internal.ProcessStepsForTask(db, taskID, golden); err != nil {
+        fmt.Printf("Error processing steps for task: %v\n", err)
+        os.Exit(1)
+    }
 	fmt.Println("All steps for task processed successfully.")
 }

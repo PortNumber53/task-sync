@@ -14,7 +14,7 @@ import (
 )
 
 // processAllRubricShellSteps finds and executes all rubric_shell steps.
-func processAllRubricShellSteps(db *sql.DB, logger *log.Logger, force bool) error {
+func processAllRubricShellSteps(db *sql.DB, logger *log.Logger, force bool, golden bool) error {
 	// Query for all steps of type 'rubric_shell'.
 	query := `
 		SELECT s.id, s.task_id, s.title, s.settings, t.base_path
@@ -37,7 +37,7 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger, force bool) erro
 		}
 
 		// Call the original processor for the individual step.
-		if err := ProcessRubricShellStep(db, &models.StepExec{StepID: step.ID, TaskID: step.TaskID, Title: step.Title, Settings: step.Settings, BasePath: step.BasePath}, logger, force); err != nil {
+		if err := ProcessRubricShellStep(db, &models.StepExec{StepID: step.ID, TaskID: step.TaskID, Title: step.Title, Settings: step.Settings, BasePath: step.BasePath}, logger, force, golden); err != nil {
 			logger.Printf("failed to process rubric_shell step %d: %v", step.ID, err)
 			// Continue processing other steps even if one fails.
 		}
@@ -47,7 +47,7 @@ func processAllRubricShellSteps(db *sql.DB, logger *log.Logger, force bool) erro
 }
 
 // ProcessRubricShellStep handles the execution of a rubric_shell step.
-func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger, force bool) error {
+func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger, force bool, golden bool) error {
 	// Defensive: Check parent task status before running
 	var status string
 	err := db.QueryRow("SELECT status FROM tasks WHERE id = $1", se.TaskID).Scan(&status)
@@ -158,14 +158,18 @@ se.Settings = freshSettings
 				})
 			}
 		}
-		// Add golden path if golden.patch key exists in files (hash may be empty from rubric_set hashing step)
-		if _, ok := rsConfig.Files["golden.patch"]; ok {
-			if c, ok := taskSettings.ContainersMap["golden"]; ok && c.ContainerName != "" {
-				rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
-					Patch:     "golden.patch",
-					Container: c.ContainerName,
-				})
+		// Add golden path if allowed by --golden and golden.patch key exists in files
+		if golden {
+			if _, ok := rsConfig.Files["golden.patch"]; ok {
+				if c, ok := taskSettings.ContainersMap["golden"]; ok && c.ContainerName != "" {
+					rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
+						Patch:     "golden.patch",
+						Container: c.ContainerName,
+					})
+				}
 			}
+		} else {
+			logger.Printf("[GOLDEN] --golden not set; skipping golden container assignment if present")
 		}
 		// Add original path (no patch application), always if container is available
 		if c, ok := taskSettings.ContainersMap["original"]; ok && c.ContainerName != "" {
@@ -175,6 +179,18 @@ se.Settings = freshSettings
 			})
 		}
 	}
+	// If golden not enabled, ensure any accidental golden assignments are filtered out
+	if !golden && len(rsConfig.Assignments) > 0 {
+		filtered := rsConfig.Assignments[:0]
+		for _, a := range rsConfig.Assignments {
+			if a.Patch == "golden.patch" {
+				continue
+			}
+			filtered = append(filtered, a)
+		}
+		rsConfig.Assignments = filtered
+	}
+
 	if len(rsConfig.Assignments) == 0 {
 		logger.Printf("ERROR: No container assignments could be derived from task.settings.containers_map for step %d", se.StepID)
 		return fmt.Errorf("no container assignments from task settings")

@@ -25,6 +25,27 @@ To process all pending steps for all tasks:
 ```
 
 
+### Update an Existing Step (CLI examples)
+
+Use `step edit` to update top-level fields or nested JSON settings using dot notation. Values are parsed as JSON when valid; otherwise treated as strings.
+
+Examples:
+
+```bash
+# Update the step title (top-level field)
+./task-sync step edit <step_id> --set title="Run App Container (prod)"
+
+# Set a nested settings key (e.g., docker_run.parameters)
+./task-sync step edit <step_id> --set docker_run.parameters='["-p","8080:80","--rm"]'
+
+# Change a single string key
+./task-sync step edit <step_id> --set docker_run.container_name=my-app
+
+# Remove a settings key (dot notation supported)
+./task-sync step edit <step_id> --remove-key docker_run.parameters
+```
+
+
 
 `task-sync` is a command-line tool for defining and executing multi-step tasks. It uses a PostgreSQL database to store task and step definitions, allowing for complex workflows with dependencies.
 
@@ -65,6 +86,22 @@ Stores the individual steps that make up a task.
 ## Step Types & Examples
 
 Steps are defined by the JSON content of the `settings` column. The top-level key in the `settings` object determines the type of the step.
+
+### Step Type Quick Reference
+
+- **file_exists** — Assert presence of files. Fails if any are missing.
+- **docker_pull** — Pull an image from a registry.
+- **docker_build** — Build an image; uses file hash triggers to skip unchanged builds.
+- **docker_run** — Start a container from an image; can keep running (keep-alive).
+- **docker_pool** — Maintain a pool of running containers and record assignments in task settings.
+- **docker_shell** — Run shell commands inside an existing running container.
+- **docker_volume_pool** — Create/manage volumes and long-lived containers; set ownership/safe.directory for git.
+- **docker_extract_volume** — Sync files from the original volume into solution and golden volumes.
+- **model_task_check** — Generate/verify a model artifact; supports a `force` flag to bypass hash checks.
+- **rubrics_import** — Import rubric data (e.g., mhtml → md) for downstream steps.
+- **rubric_set** — Parse rubric markdown, manage container assignments, and create/update `rubric_shell` steps.
+- **rubric_shell** — For each criterion, clean repo, apply patches, run rubric command; results saved to `steps.results`.
+- **dynamic_rubric** — Generate `rubric_shell` steps for solution↔container pairs across criteria; run by specific step only.
 
 ### 1. `file_exists`
 

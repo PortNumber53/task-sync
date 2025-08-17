@@ -10,10 +10,184 @@ import (
 	"unicode/utf8"
 )
 
+// ReportTaskJSON returns a structured JSON-friendly report for a given task ID.
+// The structure mirrors the CLI output but is consumable by the web UI.
+type ReportNode struct {
+	ID       int           `json:"id"`
+	Title    string        `json:"title"`
+	Settings string        `json:"settings"`
+	Results  *string       `json:"results,omitempty"`
+	Children []*ReportNode `json:"children"`
+}
+
+type TaskReport struct {
+	TaskID      int              `json:"task_id"`
+	TaskName    string           `json:"task_name"`
+	Roots       []*ReportNode    `json:"roots"`
+	OutputSizes map[string]int64 `json:"output_sizes"`
+}
+
+func ReportTaskJSON(db *sql.DB, taskID int) (*TaskReport, error) {
+	// Load config for PASS/FAIL markers (not strictly needed here, but kept for parity)
+	// Build the same data used by ReportTask but return it instead of printing
+
+	// 1. Fetch the task name
+	var taskName string
+	if err := db.QueryRow("SELECT name FROM tasks WHERE id = $1", taskID).Scan(&taskName); err != nil {
+		return nil, fmt.Errorf("failed to fetch task name: %w", err)
+	}
+
+	rows, err := db.Query("SELECT id, title, settings, results FROM steps WHERE task_id = $1 ORDER BY id", taskID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch steps: %w", err)
+	}
+	defer rows.Close()
+
+	type stepRow struct {
+		ID       int
+		Title    string
+		Settings string
+		Results  sql.NullString
+	}
+	steps := make(map[int]*stepRow)
+	var stepOrder []int
+	for rows.Next() {
+		var s stepRow
+		if err := rows.Scan(&s.ID, &s.Title, &s.Settings, &s.Results); err != nil {
+			return nil, err
+		}
+		steps[s.ID] = &s
+		stepOrder = append(stepOrder, s.ID)
+	}
+
+	// Build dependency tree
+	nodes := make(map[int]*ReportNode)
+	dependencies := make(map[int][]int)
+	var rootNodes []*ReportNode
+	for _, id := range stepOrder {
+		step := steps[id]
+		var resPtr *string
+		if step.Results.Valid {
+			rs := step.Results.String
+			resPtr = &rs
+		}
+		node := &ReportNode{ID: step.ID, Title: step.Title, Settings: step.Settings, Results: resPtr}
+		nodes[id] = node
+		// Parse depends_on (both top-level and nested)
+		var topLevel map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(step.Settings), &topLevel); err == nil {
+			if dependsOnRaw, ok := topLevel["depends_on"]; ok {
+				var deps []struct{ ID int `json:"id"` }
+				if err := json.Unmarshal(dependsOnRaw, &deps); err == nil {
+					for _, dep := range deps {
+						dependencies[id] = append(dependencies[id], dep.ID)
+					}
+				}
+			}
+			for _, raw := range topLevel {
+				var nested struct {
+					DependsOn []struct{ ID int `json:"id"` } `json:"depends_on"`
+				}
+				if err := json.Unmarshal(raw, &nested); err == nil {
+					for _, dep := range nested.DependsOn {
+						dependencies[id] = append(dependencies[id], dep.ID)
+					}
+				}
+			}
+		}
+	}
+	isChild := make(map[int]bool)
+	for childID, parentIDs := range dependencies {
+		for _, parentID := range parentIDs {
+			if parent, ok := nodes[parentID]; ok {
+				if child, ok := nodes[childID]; ok {
+					parent.Children = append(parent.Children, child)
+					isChild[childID] = true
+				}
+			}
+		}
+	}
+	for _, node := range nodes {
+		if !isChild[node.ID] {
+			rootNodes = append(rootNodes, node)
+		}
+	}
+
+	// Calculate output sizes per solution (same as CLI logic)
+	sizeMap := make(map[string]int64)
+	for _, step := range steps {
+		if strings.Contains(step.Settings, "rubric_shell") {
+			if step.Results.Valid {
+				var results map[string]interface{}
+				if err := json.Unmarshal([]byte(step.Results.String), &results); err == nil {
+					for patch, res := range results {
+						if resStr, ok := res.(string); ok {
+							if outputIndex := strings.Index(resStr, "Output: "); outputIndex != -1 {
+								cmdOut := resStr[outputIndex+8:]
+								solKey := patch
+								sizeMap[solKey] += int64(len(cmdOut))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Sort children for rubric_shell titles (consistency with CLI sort)
+	var sortNodes func(ns []*ReportNode)
+	sortNodes = func(ns []*ReportNode) {
+		sort.Slice(ns, func(i, j int) bool {
+			getRubricNum := func(title string) int {
+				idx := strings.Index(title, "Rubric ")
+				if idx == -1 {
+					return -1
+				}
+				rest := title[idx+7:]
+				end := strings.Index(rest, ":")
+				if end == -1 {
+					return -1
+				}
+				numStr := strings.TrimSpace(rest[:end])
+				if n, err := strconv.Atoi(numStr); err == nil {
+					return n
+				}
+				return -1
+			}
+			left := getRubricNum(ns[i].Title)
+			right := getRubricNum(ns[j].Title)
+			if left != -1 && right != -1 {
+				return left < right
+			}
+			if left != -1 {
+				return true
+			}
+			if right != -1 {
+				return false
+			}
+			return ns[i].ID < ns[j].ID
+		})
+		for _, n := range ns {
+			if len(n.Children) > 0 {
+				sortNodes(n.Children)
+			}
+		}
+	}
+	sortNodes(rootNodes)
+
+	return &TaskReport{
+		TaskID:      taskID,
+		TaskName:    taskName,
+		Roots:       rootNodes,
+		OutputSizes: sizeMap,
+	}, nil
+}
+
 // Function to add thousand separators to numbers
 func addCommas(n int64) string {
 	in := strconv.FormatInt(n, 10)
 	out := &strings.Builder{}
+
 	lenIn := len(in)
 	for i, c := range in {
 		if i > 0 && (lenIn-i)%3 == 0 {

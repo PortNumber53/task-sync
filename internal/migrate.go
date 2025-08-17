@@ -3,26 +3,27 @@ package internal
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
-	"path/filepath"
 
 	"github.com/gin-contrib/cors"
-	"github.com/PortNumber53/task-sync/pkg/models"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/PortNumber53/task-sync/pkg/models"
 )
-
 
 const StepExecutorInterval = 5 * time.Second
 
@@ -103,6 +104,9 @@ func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) 
 	fmt.Println("  GET    /tasks        - List all tasks")
 	fmt.Println("  POST   /steps        - Create a new step")
 	fmt.Println("  GET    /steps        - List all steps (use ?full=1 for settings)")
+	fmt.Println("  GET    /tasks/:id/report - Get task report")
+	fmt.Println("  GET/PUT /tasks/:id/settings - Get/Set task settings")
+	fmt.Println("  GET/PUT /steps/:id/settings - Get/Set step settings")
 	fmt.Println("==============================")
 	fmt.Println()
 
@@ -169,6 +173,134 @@ func NewAPIServer(listenAddr string, db *sql.DB) (*http.Server, chan os.Signal) 
 			})
 		}
 		c.JSON(200, gin.H{"tasks": tasks})
+	})
+
+	// Task report JSON endpoint
+	r.GET("/tasks/:id/report", func(c *gin.Context) {
+		idStr := c.Param("id")
+		taskID, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid task id"})
+			return
+		}
+		report, err := ReportTaskJSON(db, taskID)
+		if err != nil {
+			apiErrorLogger.Printf("/tasks/%d/report error: %v", taskID, err)
+			c.JSON(500, gin.H{"error": "failed to build report"})
+			return
+		}
+		c.JSON(200, report)
+	})
+
+	// Task settings endpoints
+	r.GET("/tasks/:id/settings", func(c *gin.Context) {
+		idStr := c.Param("id")
+		taskID, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid task id"})
+			return
+		}
+		var settings sql.NullString
+		if err := db.QueryRow("SELECT settings FROM tasks WHERE id = $1", taskID).Scan(&settings); err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(404, gin.H{"error": "task not found"})
+				return
+			}
+			apiErrorLogger.Printf("/tasks/%d/settings get error: %v", taskID, err)
+			c.JSON(500, gin.H{"error": "failed to fetch settings"})
+			return
+		}
+		var obj interface{}
+		if settings.Valid && settings.String != "" {
+			if err := json.Unmarshal([]byte(settings.String), &obj); err != nil {
+				// Return as raw string if JSON invalid to avoid data loss
+				c.JSON(200, gin.H{"settings": settings.String})
+				return
+			}
+		}
+		if obj == nil {
+			obj = map[string]interface{}{}
+		}
+		c.JSON(200, gin.H{"settings": obj})
+	})
+	r.PUT("/tasks/:id/settings", func(c *gin.Context) {
+		idStr := c.Param("id")
+		taskID, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid task id"})
+			return
+		}
+		var body interface{}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(400, gin.H{"error": "invalid JSON body"})
+			return
+		}
+		b, err := json.Marshal(body)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "could not encode settings"})
+			return
+		}
+		if _, err := db.Exec("UPDATE tasks SET settings = $1, updated_at = NOW() WHERE id = $2", string(b), taskID); err != nil {
+			apiErrorLogger.Printf("/tasks/%d/settings put error: %v", taskID, err)
+			c.JSON(500, gin.H{"error": "failed to update settings"})
+			return
+		}
+		c.JSON(200, gin.H{"ok": true})
+	})
+
+	// Step settings endpoints
+	r.GET("/steps/:id/settings", func(c *gin.Context) {
+		idStr := c.Param("id")
+		stepID, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid step id"})
+			return
+		}
+		var settings sql.NullString
+		if err := db.QueryRow("SELECT settings FROM steps WHERE id = $1", stepID).Scan(&settings); err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(404, gin.H{"error": "step not found"})
+				return
+			}
+			apiErrorLogger.Printf("/steps/%d/settings get error: %v", stepID, err)
+			c.JSON(500, gin.H{"error": "failed to fetch settings"})
+			return
+		}
+		var obj interface{}
+		if settings.Valid && settings.String != "" {
+			if err := json.Unmarshal([]byte(settings.String), &obj); err != nil {
+				c.JSON(200, gin.H{"settings": settings.String})
+				return
+			}
+		}
+		if obj == nil {
+			obj = map[string]interface{}{}
+		}
+		c.JSON(200, gin.H{"settings": obj})
+	})
+	r.PUT("/steps/:id/settings", func(c *gin.Context) {
+		idStr := c.Param("id")
+		stepID, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid step id"})
+			return
+		}
+		var body interface{}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(400, gin.H{"error": "invalid JSON body"})
+			return
+		}
+		b, err := json.Marshal(body)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "could not encode settings"})
+			return
+		}
+		if _, err := db.Exec("UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2", string(b), stepID); err != nil {
+			apiErrorLogger.Printf("/steps/%d/settings put error: %v", stepID, err)
+			c.JSON(500, gin.H{"error": "failed to update settings"})
+			return
+		}
+		c.JSON(200, gin.H{"ok": true})
 	})
 	r.POST("/steps", func(c *gin.Context) {
 		// Log any errors in the handler

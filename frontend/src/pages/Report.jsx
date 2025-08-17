@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
+import { Link } from "react-router-dom";
 import { API_BASE_URL, WS_BASE_URL } from "../config";
 
 const Report = () => {
@@ -95,7 +96,9 @@ const Report = () => {
           {tasks.map((task) => (
             <tr key={task.id} className="hover:bg-gray-50">
               <td className="border border-border p-2 text-sm bg-surface text-primary">{task.id}</td>
-              <td className="border border-border p-2 text-sm bg-surface text-primary">{task.name}</td>
+              <td className="border border-border p-2 text-sm bg-surface text-primary">
+                <Link to={`/tasks/${task.id}`} className="text-blue-600 hover:underline">{task.name}</Link>
+              </td>
               <td className="border border-border p-2 text-sm bg-surface text-primary">{task.status}</td>
               <td className="border border-border p-2 text-sm bg-surface text-primary">{task.local_path || ""}</td>
               <td className="border border-border p-2 text-sm bg-surface text-primary">{task.created_at}</td>

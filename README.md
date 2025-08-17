@@ -1,5 +1,36 @@
 # task-sync
 
+## Configuration
+
+Task Sync reads its configuration from `~/.config/task/task.conf`. This file controls PASS/FAIL markers, timeouts, and the database connection. The `.env` file is now optional and only used as a fallback if settings are not present in `task.conf`.
+
+Create the file and populate it like this:
+
+```ini
+# ~/.config/task/task.conf
+PASS_MARKER=#__PASS__#
+FAIL_MARKER=#__FAIL__#
+TIMEOUT_MARKER=#__TIMEOUT__#
+TIMEOUT_SECONDS=45
+
+# Database (preferred over .env)
+DB_HOST=your_database_host
+DB_PORT=your_database_port
+DB_USER=your_database_user
+DB_PASSWORD=your_super_duper_password
+DB_NAME=your_database_name
+DB_SSL=false
+
+# Alternatively, you can set a full DATABASE_URL:
+# DATABASE_URL=postgres://user:pass@host:port/dbname?sslmode=disable
+```
+
+Notes:
+
+- __Load order__: `DATABASE_URL` in `task.conf` is used if present; otherwise `DB_*` keys are used. If neither are present, environment variables (including optional `.env`) are used as a fallback.
+- __SSL__: `DB_SSL` accepts `false`, `true` (maps to `require`), or an explicit `sslmode` (e.g., `disable`, `require`).
+- __Timeout__: `TIMEOUT_SECONDS` controls rubric command hard timeouts.
+
 ## Task Commands
 
 ### Run All Steps for a Specific Task

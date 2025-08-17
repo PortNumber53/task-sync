@@ -10,9 +10,14 @@ pre_patch.patch
 PROMPT.md
 report*.json
 rubrics.json
+volume_golden/
 volume_solution?
 original/
 tmp/
+
+# Environment files
+.env
+.env.example
 
 # Created by https://www.toptal.com/developers/gitignore/api/linux
 # Edit at https://www.toptal.com/developers/gitignore?templates=linux

@@ -14,6 +14,14 @@ type Config struct {
 	PassMarker     string
 	FailMarker     string
 	TimeoutSeconds int // New: hard timeout for rubric commands (seconds)
+	// Database configuration (optional)
+	DatabaseURL string
+	DBHost      string
+	DBPort      string
+	DBUser      string
+	DBPassword  string
+	DBName      string
+	DBSSL       string // e.g., "true", "false", "require"; app decides mapping
 }
 
 // LoadConfig loads config from ~/.config/task/task.conf (if present)
@@ -51,6 +59,21 @@ func LoadConfig() (*Config, error) {
 				if v, err := strconv.Atoi(val); err == nil {
 					cfg.TimeoutSeconds = v
 				}
+			// Database configuration keys
+			case "DATABASE_URL":
+				cfg.DatabaseURL = val
+			case "DB_HOST":
+				cfg.DBHost = val
+			case "DB_PORT":
+				cfg.DBPort = val
+			case "DB_USER":
+				cfg.DBUser = val
+			case "DB_PASSWORD":
+				cfg.DBPassword = val
+			case "DB_NAME":
+				cfg.DBName = val
+			case "DB_SSL":
+				cfg.DBSSL = val
 			}
 
 		}

@@ -358,48 +358,81 @@ func RunStepExecutor(db *sql.DB) (context.Context, context.CancelFunc) {
 		}
 	}(ctx, db)
 	return ctx, cancel
-}
+} // Added missing closing brace here
 
-// GetPgURLFromEnv loads the database connection URL from environment variables
 // It checks for DATABASE_URL first, then falls back to individual DB_* variables
 func GetPgURLFromEnv() (string, error) {
-	err := godotenvLoad()
-	if err != nil {
-		return "", fmt.Errorf("error loading .env file: %w", err)
-	}
+    // Load task.conf (ignore errors; config may not exist)
+    cfg, _ := LoadConfig()
 
-	pgURL := os.Getenv("DATABASE_URL")
-	if pgURL == "" {
-		// Construct from individual components if DATABASE_URL not set
-		pgURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-			os.Getenv("DB_USER"),
-			os.Getenv("DB_PASSWORD"),
-			os.Getenv("DB_HOST"),
-			os.Getenv("DB_PORT"),
-			os.Getenv("DB_NAME"),
-		)
-	}
-	return pgURL, nil
+    // 1) Prefer DATABASE_URL from config
+    if cfg != nil && cfg.DatabaseURL != "" {
+        return cfg.DatabaseURL, nil
+    }
+
+    // 2) Build from DB_* keys in config if present
+    if cfg != nil && (cfg.DBHost != "" || cfg.DBUser != "" || cfg.DBName != "") {
+        sslmode := "disable"
+        if cfg.DBSSL != "" && cfg.DBSSL != "false" && cfg.DBSSL != "0" {
+            // Allow passing a raw sslmode value (e.g., "require")
+            if cfg.DBSSL == "true" {
+                sslmode = "require"
+            } else {
+                sslmode = cfg.DBSSL
+            }
+        }
+        host := cfg.DBHost
+        port := cfg.DBPort
+        user := cfg.DBUser
+        pass := cfg.DBPassword
+        name := cfg.DBName
+        return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslmode), nil
+    }
+
+    // 3) Fall back to environment variables (.env optional). Ignore load errors.
+    _ = godotenvLoad()
+    if envURL := os.Getenv("DATABASE_URL"); envURL != "" {
+        return envURL, nil
+    }
+    // Construct from individual components if DATABASE_URL not set
+    user := os.Getenv("DB_USER")
+    pass := os.Getenv("DB_PASSWORD")
+    host := os.Getenv("DB_HOST")
+    port := os.Getenv("DB_PORT")
+    name := os.Getenv("DB_NAME")
+    ssl := os.Getenv("DB_SSL")
+    sslmode := "disable"
+    if ssl != "" && ssl != "false" && ssl != "0" {
+        if ssl == "true" {
+            sslmode = "require"
+        } else {
+            sslmode = ssl
+        }
+    }
+    if user == "" && host == "" && name == "" {
+        return "", fmt.Errorf("database configuration not found in task.conf or environment")
+    }
+    return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslmode), nil
 }
 
 func RunMigrateForce(version int) error {
-	pgURL, err := GetPgURLFromEnv()
-	if err != nil {
-		return err
-	}
-	m, err := migrate.New(
-		"file://./migrations",
-		pgURL,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to init migrate: %w", err)
-	}
-	defer m.Close()
-	if err := m.Force(version); err != nil {
-		return fmt.Errorf("failed to force migration version: %w", err)
-	}
-	fmt.Printf("Forced migration version to %d and cleared dirty flag.\n", version)
-	return nil
+    pgURL, err := GetPgURLFromEnv()
+    if err != nil {
+        return err
+    }
+    m, err := migrate.New(
+        "file://./migrations",
+        pgURL,
+    )
+    if err != nil {
+        return fmt.Errorf("failed to init migrate: %w", err)
+    }
+    defer m.Close()
+    if err := m.Force(version); err != nil {
+        return fmt.Errorf("failed to force migration version: %w", err)
+    }
+    fmt.Printf("Forced migration version to %d and cleared dirty flag.\n", version)
+    return nil
 }
 
 func RunMigrate(direction string) error {

@@ -25,6 +25,12 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	stepLogger.Printf("Solutions loaded: %v", settings.DockerVolumePool.Solutions)
 	config := &settings.DockerVolumePool
 
+	// Load task settings once; needed to source container assignments from task.settings
+	taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
+	if err != nil {
+		return fmt.Errorf("failed to get task settings: %w", err)
+	}
+
 	// Check for force flag
 	if config.Force {
 		stepLogger.Println("Force flag set; running step regardless of triggers")
@@ -33,8 +39,29 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 
 	// Initialize or update Triggers.Containers if empty
 	if len(config.Triggers.Containers) == 0 {
-		config.Triggers.Containers = models.InitializeContainerMap(stepExec.TaskID, config.Solutions) // Using exported function
-		stepLogger.Printf("Initialized Triggers.Containers: %v", config.Triggers.Containers)
+		// Prefer task.settings.containers_map if available
+		if taskSettings != nil && taskSettings.ContainersMap != nil {
+			preferredKeys := []string{"solution1", "solution2", "solution3", "solution4"}
+			initialized := make(map[string]string)
+			for idx, key := range preferredKeys {
+				if c, ok := taskSettings.ContainersMap[key]; ok && c.ContainerName != "" {
+					patch := fmt.Sprintf("solution%d.patch", idx+1)
+					initialized[patch] = c.ContainerName
+				}
+			}
+			if len(initialized) > 0 {
+				config.Triggers.Containers = initialized
+				stepLogger.Printf("Initialized Triggers.Containers from task.settings.containers_map: %v", config.Triggers.Containers)
+			} else {
+				// Fallback to generated names
+				config.Triggers.Containers = models.InitializeContainerMap(stepExec.TaskID, config.Solutions)
+				stepLogger.Printf("Initialized Triggers.Containers (fallback): %v", config.Triggers.Containers)
+			}
+		} else {
+			// Fallback to generated names
+			config.Triggers.Containers = models.InitializeContainerMap(stepExec.TaskID, config.Solutions)
+			stepLogger.Printf("Initialized Triggers.Containers (no task settings): %v", config.Triggers.Containers)
+		}
 	}
 
 	// Gather container and volume names for checks
@@ -94,11 +121,7 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	}
 	if filesChanged {
 		stepLogger.Println("Triggering partial rebuild: files changed, redoing git operations")
-		// Fetch task settings to get working directory inside the container
-		taskSettings, err := models.GetTaskSettings(db, stepExec.TaskID)
-		if err != nil {
-			return fmt.Errorf("failed to get task settings: %w", err)
-		}
+		// Use previously loaded task settings to get working directory inside the container
 		workingDir := taskSettings.AppFolder
 		for patch, container := range config.Triggers.Containers {
 			if containerExists, _ := models.CheckContainerExists(container); containerExists {

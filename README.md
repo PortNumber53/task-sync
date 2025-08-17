@@ -129,7 +129,7 @@ Steps are defined by the JSON content of the `settings` column. The top-level ke
 - **docker_volume_pool** — Create/manage volumes and long-lived containers; set ownership/safe.directory for git.
 - **docker_extract_volume** — Sync files from the original volume into solution and golden volumes.
 - **model_task_check** — Generate/verify a model artifact; supports a `force` flag to bypass hash checks.
-- **rubrics_import** — Import rubric data (e.g., mhtml → md) for downstream steps.
+- **rubrics_import** — Import rubric data from JSON and/or reference Markdown for downstream steps.
 - **rubric_set** — Parse rubric markdown, manage container assignments, and create/update `rubric_shell` steps.
 - **rubric_shell** — For each criterion, clean repo, apply patches, run rubric command; results saved to `steps.results`.
 - **dynamic_rubric** — Generate `rubric_shell` steps for solution↔container pairs across criteria; run by specific step only.
@@ -265,14 +265,14 @@ Executes a series of shell commands inside a running Docker container. The conta
 
 ### 7. `rubrics_import`
 
-Imports rubric definitions from an MHTML file and converts them to a Markdown file.
+Imports rubric definitions from a JSON file (or reads Markdown directly) for downstream steps. MHTML support has been removed.
 
 **Settings:**
 
 ```json
 {
   "rubrics_import": {
-    "mhtml_file": "path/to/rubric.mhtml",
+    "json_file": "path/to/rubrics.json",
     "md_file": "path/to/rubric.md",
     "depends_on": []
   }
@@ -474,28 +474,28 @@ Executes one or more shell commands inside a pre-existing, running Docker contai
 
 ### 5. `rubrics_import`
 
-Parses an MHTML file containing rubric criteria and generates a Markdown file (`TASK_DATA.md`) with the extracted information. This is useful for automating the creation of structured task data from external rubric definitions.
+Parses a rubric JSON file and/or reads an existing Markdown rubric. Use this to register rubric criteria and compute hashes for downstream steps. MHTML support has been removed.
 
 **Settings:**
 
 ```json
 {
   "rubrics_import": {
-    "mhtml_file": "rubrics.mhtml",
+    "json_file": "rubrics.json",
     "md_file": "TASK_DATA.md"
   }
 }
 ```
 
-- `mhtml_file`: The path to the MHTML file containing the rubric.
-- `md_file`: The desired name for the output Markdown file (`TASK_DATA.md`).
+- `json_file`: Path to the rubric JSON (array of rubric items).
+- `md_file`: Optional path to a Markdown rubric file used by other steps.
 
 **Example CLI Command:**
 
 ```bash
 ./task-sync step create --task-id 1 --title "Import Rubric" --settings '{
   "rubrics_import": {
-    "mhtml_file": "path/to/your/rubrics.mhtml",
+    "json_file": "path/to/your/rubrics.json",
     "md_file": "TASK_DATA.md"
   }
 }'

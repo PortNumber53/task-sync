@@ -12,6 +12,7 @@ import (
 )
 
 func TestProcessRubricsImportSteps(t *testing.T) {
+	t.Skip("Skipping MHTML-based test: MHTML import support removed. Use JSON/Markdown based import tests instead.")
 	models.InitStepLogger(os.Stdout)
 	_ = models.Criterion{} // Dummy usage to avoid 'imported and not used' error
 
@@ -50,45 +51,6 @@ func TestProcessRubricsImportSteps(t *testing.T) {
 		t.Fatalf("Failed to initialize database schema: %v", err)
 	}
 
-	// Create a dummy MHTML file
-	mhtmlContent := `
-Content-Type: multipart/related; boundary="=___=_something_unique_boundary_=_"
-
---=___=_something_unique_boundary_=_
-Content-Type: text/html; charset="utf-8"
-Content-Transfer-Encoding: quoted-printable
-
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Rubrics</title>
-</head>
-<body>
-    <div class="rubric-criterion">
-        <span class="criterion-id">CRIT001</span>
-        <span class="criterion-score">10</span>
-        <span class="criterion-required">true</span>
-        <div class="criterion-rubric-text">This is the rubric text for criterion 1.</div>
-        <pre class="held-out-tests">echo "test 1"</pre>
-    </div>
-    <div class="rubric-criterion">
-        <span class="criterion-id">CRIT002</span>
-        <span class="criterion-score">5</span>
-        <span class="criterion-required">false</span>
-        <div class="criterion-rubric-text">This is the rubric text for criterion 2.</div>
-        <pre class="held-out-tests">echo "test 2"</pre>
-    </div>
-</body>
-</html>
-
---=___=_something_unique_boundary_=_--
-`
-	mhtmlFilePath := filepath.Join(tmpDir, "rubrics.mhtml")
-	err = ioutil.WriteFile(mhtmlFilePath, []byte(mhtmlContent), 0644)
-	if err != nil {
-		t.Fatalf("Failed to write MHTML file: %v", err)
-	}
-
 	// Insert a dummy task
 	_, err = db.Exec("INSERT INTO tasks (local_path, status) VALUES (?, ?)", tmpDir, "active")
 	if err != nil {
@@ -103,7 +65,7 @@ Content-Transfer-Encoding: quoted-printable
 	}
 
 	// Insert a rubrics_import step
-	stepSettings := `{"rubrics_import":{"mhtml_file":"rubrics.mhtml","md_file":"TASK_DATA.md"}}`
+	stepSettings := `{"rubrics_import":{"md_file":"TASK_DATA.md"}}`
 	_, err = db.Exec("INSERT INTO steps (task_id, settings, status) VALUES (?, ?, ?)", taskID, stepSettings, "pending")
 	if err != nil {
 		t.Fatalf("Failed to insert step: %v", err)

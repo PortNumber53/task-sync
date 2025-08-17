@@ -257,3 +257,46 @@ func GetPatchFileForContainerAssignments(assignments []RubricShellAssignment, fi
 	}
 	return result
 }
+
+// SanitizeJSONRemoveMHTML recursively removes any map entries where the key is
+// exactly "mhtml_file", "rubrics.mhtml", or "md_file". This is a temporary migration helper
+// to strip deprecated MHTML/Markdown-related datapoints from settings and triggers.
+func SanitizeJSONRemoveMHTML(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		// Remove targeted keys at this level
+		delete(val, "mhtml_file")
+		delete(val, "rubrics.mhtml")
+		delete(val, "md_file")
+		// Recurse into remaining entries
+		for k, inner := range val {
+			val[k] = SanitizeJSONRemoveMHTML(inner)
+		}
+		return val
+	case []interface{}:
+		for i := range val {
+			val[i] = SanitizeJSONRemoveMHTML(val[i])
+		}
+		return val
+	default:
+		return v
+	}
+}
+
+// SanitizeRawJSONRemoveMHTML takes a json.RawMessage and returns a sanitized copy
+// with deprecated MHTML keys removed, preserving JSON structure.
+func SanitizeRawJSONRemoveMHTML(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var any interface{}
+	if err := json.Unmarshal(raw, &any); err != nil {
+		return raw // if it isn't valid JSON, pass through unchanged
+	}
+	sanitized := SanitizeJSONRemoveMHTML(any)
+	out, err := json.Marshal(sanitized)
+	if err != nil {
+		return raw
+	}
+	return out
+}

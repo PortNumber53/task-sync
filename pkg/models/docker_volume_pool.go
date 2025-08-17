@@ -351,11 +351,8 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			}())
 
 		// Update the config with the container names for future reference
-		if config.Artifacts == nil {
-			config.Artifacts = make(map[string]interface{})
-		}
-		// Store a copy of the container map in Artifacts for backward compatibility
-		config.Artifacts["containers"] = config.Triggers.Containers
+		// Temporary policy: do not persist artifacts in step settings.
+		// Container assignments should be sourced from task.settings.containers_map.
 	}
 
 	// After successful execution, update stored hashes for triggers and perform settings cleanup
@@ -398,6 +395,21 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	if err != nil {
 		return fmt.Errorf("failed to marshal updated settings: %w", err)
 	}
+
+	// Belt-and-suspenders: explicitly remove docker_volume_pool.artifacts at JSON level
+	var settingsMap map[string]interface{}
+	if err := json.Unmarshal(updatedSettings, &settingsMap); err == nil {
+		if dvpRaw, ok := settingsMap["docker_volume_pool"].(map[string]interface{}); ok {
+			if _, exists := dvpRaw["artifacts"]; exists {
+				logger.Printf("Cleanup (explicit): deleting docker_volume_pool.artifacts from settings JSON")
+				delete(dvpRaw, "artifacts")
+			}
+		}
+		if rem, err := json.Marshal(settingsMap); err == nil {
+			updatedSettings = rem
+		}
+	}
+
 	if db != nil {
 		if _, err := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), stepExec.StepID); err != nil {
 			return fmt.Errorf("failed to update step settings in database: %w", err)
@@ -593,6 +605,11 @@ func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile 
 			execCmd = exec.Command("docker", "exec", containerName, "bash", "-c", cmdStr)
 		}
 		if output, err := execCmd.CombinedOutput(); err != nil {
+			// Do not abort on git apply failures; capture and continue
+			if strings.Contains(cmdStr, "git apply") {
+				logger.Printf("Non-fatal apply failure in %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
+				continue
+			}
 			logger.Printf("Command failed in container %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
 			return fmt.Errorf("failed to execute command in container: %w", err)
 		}

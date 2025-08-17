@@ -119,6 +119,8 @@ func UpdateTaskSettings(db *sql.DB, taskID int, newSettings *TaskSettings) error
 	if err != nil {
 		return fmt.Errorf("failed to marshal merged task settings for task %d: %w", taskID, err)
 	}
+	// Sanitize deprecated MHTML keys from the merged JSON before persisting (temporary migration)
+	mergedSettingsBytes = SanitizeRawJSONRemoveMHTML(mergedSettingsBytes)
 
 	// Update the database
 	_, err = db.Exec("UPDATE tasks SET settings = $1 WHERE id = $2", string(mergedSettingsBytes), taskID)

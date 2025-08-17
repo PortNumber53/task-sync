@@ -2,6 +2,7 @@ package internal
 
 import (
 	"database/sql"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -45,6 +46,17 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 			continue
 		}
 
+		// Sanitize step settings to remove deprecated MHTML keys before processing
+		original := []byte(step.Settings)
+		sanitized := models.SanitizeRawJSONRemoveMHTML(original)
+		if !bytes.Equal(original, sanitized) {
+			if _, err := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(sanitized), step.StepID); err != nil {
+				models.StepLogger.Printf("Step %d: failed to sanitize step settings: %v\n", step.StepID, err)
+			} else {
+				step.Settings = string(sanitized)
+			}
+		}
+
 		var settingsMap map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(step.Settings), &settingsMap); err != nil {
 			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "invalid step config"})
@@ -67,7 +79,6 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 
 		// Add logging to inspect config values
 		models.StepLogger.Printf("DEBUG: Step %d: config: %+v\n", step.StepID, config)
-		models.StepLogger.Printf("DEBUG: Step %d: config.MHTMLFile: %s\n", step.StepID, config.MHTMLFile)
 		models.StepLogger.Printf("DEBUG: Step %d: config.MDFile: %s\n", step.StepID, config.MDFile)
 		models.StepLogger.Printf("DEBUG: Step %d: config.JSONFile: %s\n", step.StepID, config.JSONFile)
 
@@ -135,38 +146,33 @@ func processRubricsImportSteps(db *sql.DB, stepID int) error {
 				}
 			}
 			// --- End rubric hash logic ---
-			if filesToCheck != nil && len(filesToCheck) > 0 {
-				for filePath := range filesToCheck {
-					fullPath := filepath.Join(step.BasePath, filePath)
-					hash, err := models.GetSHA256(fullPath)
-					if err != nil {
-						models.StepLogger.Printf("Step %d: Warning: could not compute hash for %s: %v\n", step.StepID, filePath, err)
-						continue
-					}
-					filesToCheck[filePath] = hash
-				}
-				// Persist updated hashes to step settings
-				settingsMap["rubrics_import"], _ = json.Marshal(config)
-				updatedSettings, _ := json.Marshal(settingsMap)
-				_, err := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), step.StepID)
+		}
+		// After computing hashes, persist updated triggers.files back to step settings (if present)
+		if filesToCheck != nil && len(filesToCheck) > 0 {
+			for filePath := range filesToCheck {
+				fullPath := filepath.Join(step.BasePath, filePath)
+				hash, err := models.GetSHA256(fullPath)
 				if err != nil {
-					models.StepLogger.Printf("Step %d: Failed to persist updated file hashes to step settings: %v\n", step.StepID, err)
-				} else {
-					models.StepLogger.Printf("Step %d: Updated file hashes in step settings after import.", step.StepID)
+					models.StepLogger.Printf("Step %d: Warning: could not compute hash for %s: %v\n", step.StepID, filePath, err)
+					continue
 				}
+				filesToCheck[filePath] = hash
 			}
+			// Persist updated hashes to step settings (sanitize deprecated keys before write)
+			settingsMap["rubrics_import"], _ = json.Marshal(config)
+			updatedSettings, _ := json.Marshal(settingsMap)
+			updatedSettings = models.SanitizeRawJSONRemoveMHTML(updatedSettings)
+			if _, err := db.Exec("UPDATE steps SET settings = $1 WHERE id = $2", string(updatedSettings), step.StepID); err != nil {
+				models.StepLogger.Printf("Step %d: Failed to persist updated file hashes to step settings: %v\n", step.StepID, err)
+			} else {
+				models.StepLogger.Printf("Step %d: Updated file hashes in step settings after import.", step.StepID)
+			}
+		}
+		if config.JSONFile != "" {
 			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "message": "JSON rubric processed successfully"})
-		} else if config.MHTMLFile != "" {
-			mhtmlFile := filepath.Join(step.BasePath, config.MHTMLFile)
-			mdFile := filepath.Join(step.BasePath, config.MDFile)
-			models.StepLogger.Printf("Processing rubrics_import step: %s -> %s\n", mhtmlFile, mdFile)
-			err = models.ProcessRubricsMHTML(mhtmlFile, mdFile)
-			if err != nil {
-				models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": fmt.Sprintf("failed to process MHTML file: %v", err)})
-				continue
-			}
 		} else if config.MDFile != "" {
-			// Handle MD file logic if needed
+			// Optional: handle MD-only path if needed in future
+			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "success", "message": "Markdown rubric acknowledged (no-op)"})
 		} else {
 			models.StoreStepResult(db, step.StepID, map[string]interface{}{"result": "failure", "message": "No rubric file specified"})
 		}

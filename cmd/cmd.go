@@ -395,54 +395,64 @@ func HandleTaskCreate() {
 }
 
 func HandleTaskEdit(db *sql.DB) {
-	if len(os.Args) < 4 {
-		helpPkg.PrintTaskEditHelp()
-		os.Exit(1)
-	}
-	taskID, err := strconv.Atoi(os.Args[3])
-	if err != nil {
-		fmt.Printf("Error: invalid task ID '%s'.\n", os.Args[3])
-		helpPkg.PrintTaskEditHelp()
-		os.Exit(1)
-	}
+    if len(os.Args) < 4 {
+        helpPkg.PrintTaskEditHelp()
+        os.Exit(1)
+    }
+    taskID, err := strconv.Atoi(os.Args[3])
+    if err != nil {
+        fmt.Printf("Error: invalid task ID '%s'.\n", os.Args[3])
+        helpPkg.PrintTaskEditHelp()
+        os.Exit(1)
+    }
 
-	updates := make(map[string]string)
-	for i := 4; i < len(os.Args); i++ {
-		if os.Args[i] == "--set" {
-			if i+1 >= len(os.Args) {
-				fmt.Println("Error: --set requires a key=value argument")
-				helpPkg.PrintTaskEditHelp()
-				os.Exit(1)
-			}
-			kv := strings.SplitN(os.Args[i+1], "=", 2)
-			if len(kv) != 2 {
-				fmt.Printf("Error: invalid format for --set, expected key=value, got '%s'\n", os.Args[i+1])
-				helpPkg.PrintTaskEditHelp()
-				os.Exit(1)
-			}
-			updates[kv[0]] = kv[1]
-			i++
-		}
-	}
+    setOps := make(map[string]string)
+    var unsetOps []string
+    for i := 4; i < len(os.Args); i++ {
+        switch os.Args[i] {
+        case "--set":
+            if i+1 >= len(os.Args) {
+                fmt.Println("Error: --set requires a key=value argument")
+                helpPkg.PrintTaskEditHelp()
+                os.Exit(1)
+            }
+            kv := strings.SplitN(os.Args[i+1], "=", 2)
+            if len(kv) != 2 {
+                fmt.Printf("Error: invalid format for --set, expected key=value, got '%s'\n", os.Args[i+1])
+                helpPkg.PrintTaskEditHelp()
+                os.Exit(1)
+            }
+            setOps[kv[0]] = kv[1]
+            i++
+        case "--unset":
+            if i+1 >= len(os.Args) {
+                fmt.Println("Error: --unset requires a path argument")
+                helpPkg.PrintTaskEditHelp()
+                os.Exit(1)
+            }
+            unsetOps = append(unsetOps, os.Args[i+1])
+            i++
+        }
+    }
 
-	if len(updates) == 0 {
-		fmt.Println("Error: at least one --set flag is required.")
-		helpPkg.PrintTaskEditHelp()
-		os.Exit(1)
-	}
+    if len(setOps) == 0 && len(unsetOps) == 0 {
+        fmt.Println("Error: at least one --set or --unset flag is required.")
+        helpPkg.PrintTaskEditHelp()
+        os.Exit(1)
+    }
 
-	if err := internal.EditTask(db, taskID, updates); err != nil {
-		fmt.Printf("Error editing task: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("Task %d updated successfully.\n", taskID)
+    if err := internal.EditTaskFlexible(db, taskID, setOps, unsetOps); err != nil {
+        fmt.Printf("Error editing task: %v\n", err)
+        os.Exit(1)
+    }
+    fmt.Printf("Task %d updated successfully.\n", taskID)
 }
 
 func HandleTaskList() {
-	if err := internal.ListTasks(); err != nil {
-		fmt.Printf("Error listing tasks: %v\n", err)
-		os.Exit(1)
-	}
+    if err := internal.ListTasks(); err != nil {
+        fmt.Printf("Error listing tasks: %v\n", err)
+        os.Exit(1)
+    }
 }
 
 func HandleTaskResetContainers(db *sql.DB) {

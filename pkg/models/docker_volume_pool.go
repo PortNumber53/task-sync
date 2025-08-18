@@ -27,7 +27,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	recreateNeeded := false
 	forceRecreate := config.Force
 
-	// Get task settings to access app_folder, with nil DB guard for tests
+	// Get task settings to access app_folder and docker.image_tag, with nil DB guard for tests
 	var taskSettings TaskSettings
 	if db == nil {
 		// Test context: avoid DB usage. Do not rely on step.container_folder.
@@ -39,6 +39,14 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			return fmt.Errorf("failed to get task settings: %w", err)
 		}
 		taskSettings = *ts
+	}
+
+	// Ensure image tag is sourced from task settings when available
+	if taskSettings.Docker.ImageTag != "" {
+		if config.Triggers.ImageTag != taskSettings.Docker.ImageTag {
+			logger.Printf("Debug: Using task.settings.docker.image_tag=%q (was %q)", taskSettings.Docker.ImageTag, config.Triggers.ImageTag)
+		}
+		config.Triggers.ImageTag = taskSettings.Docker.ImageTag
 	}
 
 	// Ensure we have app_folder set
@@ -572,7 +580,8 @@ func AddKeepAliveCommand(params []string, keepForever bool, logger *log.Logger) 
 		}
 	}
 	if keepForever && !hasKeepAliveCmd {
-		keepAliveArgs := []string{"-c", "while true; do sleep 30; done"}
+		// Use a shell so '-c' is interpreted as a shell flag, not a docker flag
+		keepAliveArgs := []string{"sh", "-c", "while true; do sleep 30; done"}
 		params = append(params, keepAliveArgs...)
 		logger.Printf("Added keep-alive command to parameters: %v", params)
 	}
@@ -615,6 +624,8 @@ func RunDockerCommand(params []string, containerName string, logger *log.Logger,
 		logger.Printf("Error running Docker command for container %s: %v, output: %s", containerName, err, string(output))
 		return fmt.Errorf("failed to run Docker command: %w", err)
 	}
+	// Log output even on success (usually the container ID)
+	logger.Printf("Docker run output for container %s: %s", containerName, strings.TrimSpace(string(output)))
 	logger.Printf("Successfully ran Docker command for container %s", containerName)
 	if detached {
 		if err := WaitForContainerRunning(containerName, 15, logger); err != nil {

@@ -31,6 +31,14 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 		return fmt.Errorf("failed to get task settings: %w", err)
 	}
 
+	// Ensure image tag comes from task settings (tasks.settings.docker.image_tag)
+	if taskSettings != nil && taskSettings.Docker.ImageTag != "" {
+		if settings.DockerVolumePool.Triggers.ImageTag != taskSettings.Docker.ImageTag {
+			stepLogger.Printf("Debug: Overriding triggers.image_tag (%q) with task.settings.docker.image_tag (%q)", settings.DockerVolumePool.Triggers.ImageTag, taskSettings.Docker.ImageTag)
+		}
+		settings.DockerVolumePool.Triggers.ImageTag = taskSettings.Docker.ImageTag
+	}
+
 	// Check for force flag
 	if config.Force {
 		stepLogger.Println("Force flag set; running step regardless of triggers")

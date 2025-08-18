@@ -48,7 +48,12 @@ func getStepProcessors(force bool, golden bool) map[string]func(*sql.DB, *models
 			return processAllFileExistsSteps(db, logger)
 		},
 		"rubrics_import": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
-			return processRubricsImportSteps(db, se.StepID)
+			// If a specific step is provided, process just that step so injected flags (e.g., force) are honored
+			if se != nil && se.StepID != 0 {
+				return ProcessRubricsImportStep(db, se, logger)
+			}
+			// Otherwise, process all rubrics_import steps
+			return processRubricsImportSteps(db, 0)
 		},
 		"rubric_set": func(db *sql.DB, se *models.StepExec, logger *log.Logger) error {
 			// If a specific step is provided (from ProcessSpecificStep), run only that.

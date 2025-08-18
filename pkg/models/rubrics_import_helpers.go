@@ -2,6 +2,8 @@ package models
 
 // RubricsImportConfig represents the configuration for a rubrics_import step.
 type RubricsImportConfig struct {
+    // When true, bypass hash checks and force the step to run
+    Force     bool        `json:"force,omitempty"`
     MDFile    string `json:"md_file"`
     JSONFile  string `json:"json_file"`
     DependsOn []Dependency `json:"depends_on,omitempty"`

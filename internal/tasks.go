@@ -15,29 +15,200 @@ func isValidTaskStatus(status string) bool {
 	return valid[status]
 }
 
+// EditTaskFlexible updates a task allowing arbitrary JSON settings updates via dot-paths and unsets.
+// setOps: map of path => jsonValue (string form). Value will be parsed as JSON; if parsing fails, it is stored as a string.
+// unsetPaths: slice of dot-paths to remove from settings. Special handling for core columns.
+func EditTaskFlexible(db *sql.DB, taskID int, setOps map[string]string, unsetPaths []string) error {
+    if len(setOps) == 0 && len(unsetPaths) == 0 {
+        return fmt.Errorf("no operations provided")
+    }
+
+    // Fetch current row
+    var currentSettingsJSON sql.NullString
+    var currentName, currentStatus string
+    var currentLocalPath sql.NullString
+    err := db.QueryRow("SELECT name, status, local_path, settings FROM tasks WHERE id = $1", taskID).
+        Scan(&currentName, &currentStatus, &currentLocalPath, &currentSettingsJSON)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return fmt.Errorf("task with ID %d not found", taskID)
+        }
+        return fmt.Errorf("failed to fetch task: %w", err)
+    }
+
+    // Load settings
+    settings := make(map[string]interface{})
+    if currentSettingsJSON.Valid && strings.TrimSpace(currentSettingsJSON.String) != "" {
+        if err := json.Unmarshal([]byte(currentSettingsJSON.String), &settings); err != nil {
+            return fmt.Errorf("failed to unmarshal settings: %w", err)
+        }
+    }
+
+    // Prepare column updates
+    var setClauses []string
+    var args []interface{}
+    argCounter := 1
+
+    // Helper: set column
+    setColumn := func(col string, val interface{}) {
+        setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argCounter))
+        args = append(args, val)
+        argCounter++
+    }
+
+    // Apply setOps
+    for path, raw := range setOps {
+        switch path {
+        case "name":
+            setColumn("name", raw)
+        case "status":
+            if !isValidTaskStatus(raw) {
+                return fmt.Errorf("invalid status: %s (must be one of active|inactive|disabled|running)", raw)
+            }
+            setColumn("status", raw)
+        case "local_path", "localpath":
+            // Normalize to local_path
+            setColumn("local_path", raw)
+        default:
+            // Settings JSON path
+            var v interface{}
+            if err := json.Unmarshal([]byte(raw), &v); err != nil {
+                // treat as string if not valid JSON
+                v = raw
+            }
+            jsonSetByPath(settings, path, v)
+        }
+    }
+
+    // Apply unsetOps
+    for _, path := range unsetPaths {
+        switch path {
+        case "name", "status":
+            return fmt.Errorf("cannot unset core field '%s'", path)
+        case "local_path", "localpath":
+            // set to NULL
+            setClauses = append(setClauses, fmt.Sprintf("%s = NULL", "local_path"))
+        default:
+            jsonUnsetByPath(settings, path)
+        }
+    }
+
+    // Always update settings JSON
+    updatedSettingsJSON, err := json.Marshal(settings)
+    if err != nil {
+        return fmt.Errorf("failed to marshal settings: %w", err)
+    }
+    setClauses = append(setClauses, fmt.Sprintf("settings = $%d", argCounter))
+    args = append(args, string(updatedSettingsJSON))
+    argCounter++
+
+    // Add updated_at and WHERE clause
+    setClauses = append(setClauses, "updated_at = now()")
+    query := fmt.Sprintf("UPDATE tasks SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argCounter)
+    args = append(args, taskID)
+
+    tx, err := db.Begin()
+    if err != nil {
+        return fmt.Errorf("failed to begin transaction: %w", err)
+    }
+    res, err := tx.Exec(query, args...)
+    if err != nil {
+        tx.Rollback()
+        return fmt.Errorf("failed to update task: %w", err)
+    }
+    rows, err := res.RowsAffected()
+    if err != nil {
+        tx.Rollback()
+        return fmt.Errorf("failed to get rows affected: %w", err)
+    }
+    if rows == 0 {
+        tx.Rollback()
+        return fmt.Errorf("task not found or no changes made")
+    }
+    return tx.Commit()
+}
+
+// jsonSetByPath sets value at a dot-separated path in the settings map, creating maps as needed.
+func jsonSetByPath(root map[string]interface{}, path string, value interface{}) {
+    parts := strings.Split(path, ".")
+    m := root
+    for i, p := range parts {
+        if i == len(parts)-1 {
+            m[p] = value
+            return
+        }
+        // ensure map
+        next, ok := m[p]
+        if !ok || next == nil {
+            nm := make(map[string]interface{})
+            m[p] = nm
+            m = nm
+            continue
+        }
+        if nm, ok := next.(map[string]interface{}); ok {
+            m = nm
+        } else {
+            // overwrite non-object with object to proceed
+            nm := make(map[string]interface{})
+            m[p] = nm
+            m = nm
+        }
+    }
+}
+
+// jsonUnsetByPath removes a key at a dot-separated path. Returns true if removed.
+func jsonUnsetByPath(root map[string]interface{}, path string) bool {
+    parts := strings.Split(path, ".")
+    m := root
+    for i, p := range parts {
+        if i == len(parts)-1 {
+            if _, ok := m[p]; ok {
+                delete(m, p)
+                return true
+            }
+            return false
+        }
+        next, ok := m[p]
+        if !ok {
+            return false
+        }
+        nm, ok := next.(map[string]interface{})
+        if !ok {
+            return false
+        }
+        m = nm
+    }
+    return false
+}
+
 // ResetTaskContainers clears the containers and assigned_containers fields in a task's settings JSON
 func ResetTaskContainers(db *sql.DB, taskID int) error {
-	// Fetch current settings
-	var currentSettingsJSON sql.NullString
-	if err := db.QueryRow("SELECT settings FROM tasks WHERE id = $1", taskID).Scan(&currentSettingsJSON); err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("task with ID %d not found", taskID)
-		}
-		return fmt.Errorf("failed to fetch settings: %w", err)
-	}
+    // Fetch current settings
+    var currentSettingsJSON sql.NullString
+    err := db.QueryRow("SELECT settings FROM tasks WHERE id = $1", taskID).Scan(&currentSettingsJSON)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return fmt.Errorf("task with ID %d not found", taskID)
+        }
+        return fmt.Errorf("failed to fetch settings: %w", err)
+    }
 
-	// Unmarshal, update, marshal
-	settings := make(map[string]interface{})
-	if currentSettingsJSON.Valid && strings.TrimSpace(currentSettingsJSON.String) != "" {
-		if err := json.Unmarshal([]byte(currentSettingsJSON.String), &settings); err != nil {
-			return fmt.Errorf("failed to unmarshal settings: %w", err)
-		}
-	}
+    // Unmarshal, update, marshal
+    settings := make(map[string]interface{})
+    if currentSettingsJSON.Valid && strings.TrimSpace(currentSettingsJSON.String) != "" {
+        if err := json.Unmarshal([]byte(currentSettingsJSON.String), &settings); err != nil {
+            return fmt.Errorf("failed to unmarshal settings: %w", err)
+        }
+    }
 
-	// Set legacy containers to empty array
-	settings["containers"] = []interface{}{}
-	// Set assigned_containers to empty object
-	settings["assigned_containers"] = map[string]interface{}{}
+    // Set legacy containers to empty array
+    settings["containers"] = []interface{}{}
+    // Set assigned_containers to empty object
+    settings["assigned_containers"] = map[string]interface{}{}
+    // Set new containers_map to empty object
+    settings["containers_map"] = map[string]interface{}{}
+    // Clear docker_run_parameters array
+    settings["docker_run_parameters"] = []interface{}{}
 	// Set new containers_map to empty object
 	settings["containers_map"] = map[string]interface{}{}
 	// Clear docker_run_parameters array

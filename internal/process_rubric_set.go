@@ -48,8 +48,6 @@ func processAllRubricSetSteps(db *sql.DB, logger *log.Logger) error {
 // It parses the main rubric file, updates the task-level settings with container assignments,
 // and then creates, updates, or deletes child rubric_shell steps to match the rubric criteria.
 func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log.Logger, force bool) error {
-	var rerunNeeded bool
-
 	var settings struct {
 		RubricSet models.RubricSetConfig `json:"rubric_set"`
 	}
@@ -57,6 +55,30 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 		return fmt.Errorf("failed to unmarshal step settings: %w", err)
 	}
 	config := &settings.RubricSet
+
+	// Decide whether we should run based on force or file hash changes.
+	// Use the existing config.Files map as the trigger set. Ensure the main file is included as a trigger.
+	shouldRun := force
+	if config.Files == nil {
+		config.Files = map[string]string{}
+	}
+	mainFileName := filepath.Base(config.File)
+	if _, exists := config.Files[mainFileName]; !exists && config.File != "" {
+		// Track the main rubric file by its base name (consistent with existing logic below)
+		config.Files[mainFileName] = config.Files[mainFileName] // no-op insert if empty
+	}
+	if !shouldRun {
+		filesChanged, err := models.CheckFileHashChanges(stepExec.BasePath, config.Files, stepLogger)
+		if err != nil {
+			stepLogger.Printf("Warn: hash check error treated as change: %v", err)
+		}
+		if !filesChanged {
+			stepLogger.Printf("Skipped: no relevant file changes detected and not forced")
+			models.StoreStepResult(db, stepExec.StepID, map[string]interface{}{"result": "skipped", "message": "skipped: no relevant file changes detected"})
+			return nil
+		}
+		shouldRun = true
+	}
 
 	// Temporary cleanup: remove legacy fields from step.settings.rubric_set if present
 	var raw map[string]interface{}
@@ -92,77 +114,6 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 	}
 
 	stepLogger.Printf("Debug: Unmarshaled RubricSetConfig: %+v", config)
-
-	// Hash the main rubric file and store in Files map under the rubric file name
-	mainPath := config.File
-	mainFileName := filepath.Base(config.File)
-	if !filepath.IsAbs(mainPath) {
-		mainPath = filepath.Join(stepExec.BasePath, mainPath)
-	}
-	stepLogger.Printf("DEBUG: main rubric file fullPath=%s", mainPath)
-	mainInfo, err := os.Stat(mainPath)
-	if err != nil {
-		stepLogger.Printf("Warning: could not stat main rubric file (%s): %v", mainPath, err)
-		rerunNeeded = true
-	} else if mainInfo.IsDir() {
-		stepLogger.Printf("Skipping directory for main rubric file: %s", mainPath)
-	} else {
-		hash, err := models.GetSHA256(mainPath)
-		if err != nil {
-			stepLogger.Printf("Warning: could not compute hash for main rubric file (%s): %v", mainPath, err)
-			rerunNeeded = true
-		} else {
-			if old, ok := config.Files[mainFileName]; !ok || old != hash {
-				rerunNeeded = true
-			}
-			config.Files[mainFileName] = hash
-		}
-	}
-
-	// Hash all files in config.Files (keys are file names)
-	for fileName := range config.Files {
-		filePath := fileName
-		if !filepath.IsAbs(filePath) {
-			filePath = filepath.Join(stepExec.BasePath, filePath)
-		}
-		stepLogger.Printf("DEBUG: fileName=%s filePath=%s", fileName, filePath)
-		info, err := os.Stat(filePath)
-		if err != nil {
-			stepLogger.Printf("Warning: could not stat %s: %v", filePath, err)
-			config.Files[fileName] = ""
-			rerunNeeded = true
-			continue
-		}
-		if info.IsDir() {
-			stepLogger.Printf("Skipping directory: %s", filePath)
-			config.Files[fileName] = ""
-			continue
-		}
-		hash, err := models.GetSHA256(filePath)
-		if err != nil {
-			stepLogger.Printf("Warning: could not compute hash for %s: %v", filePath, err)
-			config.Files[fileName] = ""
-			rerunNeeded = true
-			continue
-		}
-		if old, ok := config.Files[fileName]; !ok || old != hash {
-			rerunNeeded = true
-		}
-		config.Files[fileName] = hash
-	}
-	stepLogger.Printf("Debug: Updated config.Files after hashing: %v", config.Files)
-
-	// If any hash changed, or hashes were missing, update and persist
-	if rerunNeeded {
-		stepLogger.Printf("Debug: Rerun needed, updating settings for step %d", stepExec.StepID)
-		updatedSettings, err := json.Marshal(settings)
-		if err != nil {
-			return fmt.Errorf("failed to marshal updated settings: %w", err)
-		}
-		if _, err := db.Exec(`UPDATE steps SET settings = $1 WHERE id = $2`, string(updatedSettings), stepExec.StepID); err != nil {
-			return fmt.Errorf("failed to update step settings in db: %w", err)
-		}
-	}
 
 	// Build Assignments from task.settings.containers_map and known solution patches
 	assignments := make([]models.RubricShellAssignment, 0)
@@ -390,7 +341,52 @@ func ProcessRubricSetStep(db *sql.DB, stepExec *models.StepExec, stepLogger *log
 			}
 		}
 
-		stepLogger.Println("Successfully reconciled rubric_set step.")
+		// After successful reconciliation, refresh and persist the file hashes in config.Files
+		// Recompute hash for main rubric file and all tracked files
+		var persistErr error
+		// Main rubric file
+		if config.File != "" {
+			mainPath := config.File
+			if !filepath.IsAbs(mainPath) {
+				mainPath = filepath.Join(stepExec.BasePath, mainPath)
+			}
+			stepLogger.Printf("DEBUG: Updating hash for main rubric file: %s", mainPath)
+			if info, err := os.Stat(mainPath); err == nil && !info.IsDir() {
+				if hash, err := models.GetSHA256(mainPath); err == nil {
+					config.Files[filepath.Base(config.File)] = hash
+				} else {
+					stepLogger.Printf("Warning: could not compute hash for main rubric file (%s): %v", mainPath, err)
+				}
+			}
+		}
+		// Other files in Files map
+		for fileName := range config.Files {
+			filePath := fileName
+			if !filepath.IsAbs(filePath) {
+				filePath = filepath.Join(stepExec.BasePath, filePath)
+			}
+			if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+				if hash, err := models.GetSHA256(filePath); err == nil {
+					config.Files[fileName] = hash
+				} else {
+					stepLogger.Printf("Warning: could not compute hash for %s: %v", filePath, err)
+				}
+			}
+		}
+		// Persist updated settings with refreshed hashes
+		updatedSettings, err := json.Marshal(settings)
+		if err != nil {
+			return fmt.Errorf("failed to marshal updated settings: %w", err)
+		}
+		if _, err := db.Exec(`UPDATE steps SET settings = $1, updated_at = NOW() WHERE id = $2`, string(updatedSettings), stepExec.StepID); err != nil {
+			persistErr = fmt.Errorf("failed to update step settings in db: %w", err)
+		}
+
+		if persistErr != nil {
+			return persistErr
+		}
+
+		stepLogger.Println("Successfully reconciled rubric_set step and updated file hashes.")
 	}
 
 	return nil

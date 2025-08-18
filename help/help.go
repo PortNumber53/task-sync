@@ -243,41 +243,49 @@ Examples:
 
   # Show this help message
   task-sync task delete --help`
-	fmt.Println(helpText)
+    fmt.Println(helpText)
 }
 
 // PrintTaskEditHelp prints help for the task edit command
 func PrintTaskEditHelp() {
-	helpText := `Edit a task's details.
+    helpText := `Edit a task's details.
 
 Usage:
-  task-sync task edit TASK_ID --set KEY=VALUE [--set KEY2=VALUE2 ...]
+  task-sync task edit TASK_ID [--set KEY=JSON]... [--unset KEY]...
 
 Arguments:
   TASK_ID    ID of the task to edit
 
 Options:
-  --set KEY=VALUE    Set a field on the task. This can be used multiple times.
+  --set KEY=JSON     Set a field on the task. Value is parsed as JSON if valid (numbers, arrays, objects, booleans). Otherwise stored as a string. Can be used multiple times.
+  --unset KEY        Unset/remove a field. For JSON settings, removes the key (supports dot paths). For core fields, only 'local_path' may be unset (sets NULL).
   -h, --help         Show this help message and exit
 
-Editable Fields:
-  - name:        Task name
-  - description: Task description
-  - image_tag:   Docker image tag (e.g., 'my_image:latest')
-  - image_hash:  Docker image hash (e.g., 'sha256:abc123')
-  - status:      Task status (e.g., 'pending', 'active', 'completed')
-  - local_path:  Local filesystem path for the task
-  - platform:    Default Docker build platform (e.g., 'linux/amd64')
+Notes:
+  - Core fields: name, status, local_path. You may set any of them. You may NOT unset 'name' or 'status'. Unsetting 'local_path' sets it to NULL.
+  - JSON settings: Use dot paths to edit nested keys inside the settings JSON (e.g., docker.image_tag, rubric_set.some_id).
+  - JSON examples: Strings must be valid JSON when using complex/nested values (quote them accordingly).
 
 Examples:
-  # Edit the name of task with ID 123
+  # Rename task 123 (core field)
   task-sync task edit 123 --set name="My New Task Name"
 
-  # Update the status and local path for task 45
+  # Update status and local path for task 45 (core fields)
   task-sync task edit 45 --set status=active --set local_path=/path/to/new/location
 
-  # Set the default build platform
-  task-sync task edit 45 --set platform=linux/amd64
+  # Unset local_path (sets it to NULL)
+  task-sync task edit 45 --unset local_path
+
+  # Set nested JSON fields in settings via dot paths
+  task-sync task edit 45 --set docker.image_tag="testing_image" \
+                         --set platform="linux/amd64"
+
+  # Provide complex JSON values (arrays/objects) for settings
+  task-sync task edit 45 --set docker.run_args='["--rm","--network none"]' \
+                         --set docker.env='{"NODE_ENV":"production","DEBUG":false}'
+
+  # Remove nested JSON keys from settings
+  task-sync task edit 45 --unset docker.env.DEBUG --unset rubric_set.some_uuid
 
   # Show this help message
   task-sync task edit --help`

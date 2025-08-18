@@ -660,17 +660,17 @@ func RemoveDockerContainer(name string, logger *log.Logger) error {
 	}
 	logger.Printf("Removed container: %s", name)
 	return nil
-}
+} // Added closing brace here
 
 // ApplyGitCleanupAndPatch applies git cleanup and patches in a container.
 // If workingDir is non-empty, commands execute with docker exec -w <workingDir>.
 func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile string, heldOutTestFile string, gradingSetupScript string, logger *log.Logger) error {
-	commands := []string{
-		"cd " + workingDir,
-		"git reset --hard HEAD",
-		"git checkout -- .",
-		"git clean -fd",
-	}
+    commands := []string{
+        "cd " + workingDir,
+        "git reset --hard HEAD",
+        "git checkout -- .",
+        "git clean -fd",
+    }
 
 	if gradingSetupScript != "" {
 		if _, err := os.Stat(gradingSetupScript); err == nil {
@@ -708,23 +708,38 @@ func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile 
 	}
 
 	for _, cmdStr := range commands {
-		var execCmd *exec.Cmd
-		if workingDir != "" {
-			execCmd = exec.Command("docker", "exec", "-w", workingDir, containerName, "bash", "-c", cmdStr)
-		} else {
-			execCmd = exec.Command("docker", "exec", containerName, "bash", "-c", cmdStr)
-		}
-		if output, err := execCmd.CombinedOutput(); err != nil {
-			// Do not abort on git apply failures; capture and continue
-			if strings.Contains(cmdStr, "git apply") {
-				logger.Printf("Non-fatal apply failure in %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
-				continue
-			}
-			logger.Printf("Command failed in container %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
-			return fmt.Errorf("failed to execute command in container: %w", err)
-		}
-		logger.Printf("Executed in container %s: %s", containerName, cmdStr)
-	}
+        // Guard: remove a stale .git/index.lock if present before each git-related step
+        guard := "if [ -e .git/index.lock ]; then echo '[guard] removing .git/index.lock'; rm -f .git/index.lock; fi"
+        if strings.Contains(cmdStr, "git ") || strings.HasPrefix(cmdStr, "git") {
+            var guardCmd *exec.Cmd
+            if workingDir != "" {
+                guardCmd = exec.Command("docker", "exec", "-w", workingDir, containerName, "bash", "-c", guard)
+            } else {
+                guardCmd = exec.Command("docker", "exec", containerName, "bash", "-c", guard)
+            }
+            if gout, gerr := guardCmd.CombinedOutput(); gerr != nil {
+                logger.Printf("Warning: guard before '%s' failed in %s: %v\nOutput: %s", cmdStr, containerName, gerr, string(gout))
+                // Continue regardless; attempt the command anyway
+            }
+        }
+
+        var execCmd *exec.Cmd
+        if workingDir != "" {
+            execCmd = exec.Command("docker", "exec", "-w", workingDir, containerName, "bash", "-c", cmdStr)
+        } else {
+            execCmd = exec.Command("docker", "exec", containerName, "bash", "-c", cmdStr)
+        }
+        if output, err := execCmd.CombinedOutput(); err != nil {
+            // Do not abort on git apply failures; capture and continue
+            if strings.Contains(cmdStr, "git apply") {
+                logger.Printf("Non-fatal apply failure in %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
+                continue
+            }
+            logger.Printf("Command failed in container %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
+            return fmt.Errorf("failed to execute command in container: %w", err)
+        }
+        logger.Printf("Executed in container %s: %s", containerName, cmdStr)
+    }
 
 	return nil
 }

@@ -67,13 +67,43 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	if recreateContainers {
-		// If no solutions specified, use default solution files based on pool_size
+		// If no solutions specified, try to derive them from task.settings.containers_map.
+		// Always consider "original" and "golden" (mapped to golden.patch) like docker_extract_volume does.
+		// Fall back to pool_size if containers_map is empty, and finally to existing Triggers.Containers keys.
 		if len(config.Solutions) == 0 {
-			config.Solutions = make([]string, config.PoolSize)
-			for i := 0; i < config.PoolSize; i++ {
-				config.Solutions[i] = fmt.Sprintf("solution%d.patch", i+1)
+			derived := make([]string, 0, 6)
+			if taskSettings.ContainersMap != nil {
+				for key, val := range taskSettings.ContainersMap {
+					if val.ContainerName == "" { continue }
+					if key == "original" {
+						derived = append(derived, "original")
+						continue
+					}
+					if key == "golden" {
+						derived = append(derived, "golden.patch")
+						continue
+					}
+					if strings.HasPrefix(key, "solution") {
+						derived = append(derived, fmt.Sprintf("%s.patch", key))
+					}
+				}
 			}
-			logger.Printf("Initialized solutions from pool_size: %v", config.Solutions)
+			if len(derived) == 0 && config.PoolSize > 0 {
+				// Include original and golden by default
+				derived = append(derived, "original", "golden.patch")
+				for i := 0; i < config.PoolSize; i++ {
+					derived = append(derived, fmt.Sprintf("solution%d.patch", i+1))
+				}
+			}
+			if len(derived) == 0 && len(config.Triggers.Containers) > 0 {
+				for k := range config.Triggers.Containers {
+					if k == "golden" { derived = append(derived, "golden.patch"); continue }
+					if k == "original" { derived = append(derived, "original"); continue }
+					derived = append(derived, k)
+				}
+			}
+			config.Solutions = derived
+			logger.Printf("Initialized solutions: %v", config.Solutions)
 		}
 
 		// Initialize container map with names from task.settings.containers_map when available; otherwise generate defaults
@@ -95,22 +125,63 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		recreateNeeded = true
 	}
 
+	// Ensure Solutions includes original and golden even when not recreating
+	if len(config.Solutions) == 0 {
+		// Derive from triggers if empty
+		if len(config.Triggers.Containers) > 0 {
+			for k := range config.Triggers.Containers {
+				if k == "golden" {
+					config.Solutions = append(config.Solutions, "golden.patch")
+					continue
+				}
+				if k == "original" {
+					config.Solutions = append(config.Solutions, "original")
+					continue
+				}
+				config.Solutions = append(config.Solutions, k)
+			}
+		}
+	}
+
+	// Guarantee presence of original and golden in Solutions list
+	ensureInSolutions := func(name string) {
+		for _, s := range config.Solutions { if s == name { return } }
+		config.Solutions = append(config.Solutions, name)
+	}
+	ensureInSolutions("original")
+	ensureInSolutions("golden.patch")
+
+	// Ensure Triggers.Containers has entries for all solutions (including original/golden)
+	if config.Triggers.Containers == nil { config.Triggers.Containers = make(map[string]string) }
+	for i, solution := range config.Solutions {
+		if _, ok := config.Triggers.Containers[solution]; !ok || config.Triggers.Containers[solution] == "" {
+			base := strings.TrimSuffix(solution, filepath.Ext(solution))
+			if taskSettings.ContainersMap != nil {
+				if c, ok := taskSettings.ContainersMap[base]; ok && c.ContainerName != "" {
+					config.Triggers.Containers[solution] = c.ContainerName
+					continue
+				}
+			}
+			config.Triggers.Containers[solution] = GenerateDVContainerName(stepExec.TaskID, i+1)
+		}
+	}
+
 	// Check if we need to recreate containers based on image tag/ID changes or missing containers
 	recreateNeeded = false // Reset the flag before checking containers
 
-	// Check each container individually
+	// Check each container individually and evaluate all of them (do not break early)
 	for patchName, containerName := range config.Triggers.Containers {
 		exists, err := CheckContainerExists(containerName)
 		if err != nil {
 			logger.Printf("Error checking if container %s exists: %v", containerName, err)
 			recreateNeeded = true
-			break
+			continue
 		}
 
 		if !exists {
-			logger.Printf("Container %s (for %s) does not exist, will recreate all", containerName, patchName)
+			logger.Printf("Container %s (for %s) does not exist, will recreate", containerName, patchName)
 			recreateNeeded = true
-			break
+			continue
 		}
 
 		// Check if container needs recreation due to image changes
@@ -118,13 +189,12 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		if err != nil {
 			logger.Printf("Error checking if container %s needs recreation: %v", containerName, err)
 			recreateNeeded = true
-			break
+			continue
 		}
 
 		if shouldRecreate {
 			logger.Printf("Container %s (for %s) needs recreation due to image change", containerName, patchName)
 			recreateNeeded = true
-			break
 		}
 	}
 
@@ -145,6 +215,22 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	// Create containers for each solution
+	// If solutions are still empty but we have container assignments, derive from those keys.
+	if len(config.Solutions) == 0 && len(config.Triggers.Containers) > 0 {
+		for k := range config.Triggers.Containers {
+			if k == "golden" { config.Solutions = append(config.Solutions, "golden.patch"); continue }
+			if k == "original" { config.Solutions = append(config.Solutions, "original"); continue }
+			config.Solutions = append(config.Solutions, k)
+		}
+		logger.Printf("Derived solutions from Triggers.Containers keys: %v", config.Solutions)
+	}
+	// Keep original and golden in the list if missing
+	ensureInSolutions("original")
+	ensureInSolutions("golden.patch")
+
+	// Debug: log final solutions and containers map before creation loop
+	logger.Printf("Final Solutions list: %v", config.Solutions)
+	logger.Printf("Final Triggers.Containers: %v", config.Triggers.Containers)
 	for i, solutionFile := range config.Solutions {
 		containerName, ok := config.Triggers.Containers[solutionFile]
 		if !ok || containerName == "" {
@@ -152,9 +238,13 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			config.Triggers.Containers[solutionFile] = containerName
 			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
 		}
-		// Build volume directory name without the .patch suffix, e.g., solution1.patch -> volume_solution1
+		// Build host mount path. For 'original', mount the original directory created by docker_extract_volume.
+		// Otherwise, mount the corresponding volume_<name> directory (e.g., solution1 -> volume_solution1, golden -> volume_golden)
 		baseName := strings.TrimSuffix(solutionFile, filepath.Ext(solutionFile))
 		solutionVolumePath := filepath.Join(stepExec.BasePath, fmt.Sprintf("volume_%s", baseName))
+		if solutionFile == "original" {
+			solutionVolumePath = filepath.Join(stepExec.BasePath, "original")
+		}
 
 		// Remove existing container if it exists
 		if exists, _ := CheckContainerExists(containerName); exists {
@@ -322,10 +412,19 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 
 		// Prepare patch file path if it exists
 		patchFile := ""
-		if solutionFile != "" {
+		// Do not apply a solution patch for the original container; it's a baseline
+		if solutionFile != "" && solutionFile != "original" {
 			patchFile = filepath.Join(stepExec.BasePath, solutionFile)
-			if _, err := os.Stat(patchFile); os.IsNotExist(err) {
-				logger.Printf("Patch file not found: %s, skipping patch application", patchFile)
+			if fi, err := os.Stat(patchFile); err != nil {
+				if os.IsNotExist(err) {
+					logger.Printf("Patch file not found: %s, skipping patch application", patchFile)
+					patchFile = ""
+				} else {
+					logger.Printf("Error stating patch file %s: %v (skipping)", patchFile, err)
+					patchFile = ""
+				}
+			} else if fi.IsDir() {
+				logger.Printf("Patch path is a directory, not a file: %s; skipping", patchFile)
 				patchFile = ""
 			} else {
 				logger.Printf("Found patch file: %s", patchFile)

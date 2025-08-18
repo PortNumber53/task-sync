@@ -207,12 +207,9 @@ func ResetTaskContainers(db *sql.DB, taskID int) error {
     settings["assigned_containers"] = map[string]interface{}{}
     // Set new containers_map to empty object
     settings["containers_map"] = map[string]interface{}{}
-    // Clear docker_run_parameters array
-    settings["docker_run_parameters"] = []interface{}{}
-	// Set new containers_map to empty object
-	settings["containers_map"] = map[string]interface{}{}
-	// Clear docker_run_parameters array
-	settings["docker_run_parameters"] = []interface{}{}
+    // Preserve docker_run_parameters; do not modify here
+    // Set new containers_map to empty object
+    settings["containers_map"] = map[string]interface{}{}
 
 	updatedSettingsJSON, err := json.Marshal(settings)
 	if err != nil {

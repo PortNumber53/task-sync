@@ -127,8 +127,9 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 					if err := json.Unmarshal(output, &inspectResult); err == nil && len(inspectResult) > 0 {
 						img := inspectResult[0].Image
 						running := inspectResult[0].State.Running
-						if img != expectedImageID {
-							// Stop and remove outdated container
+						// Only treat as mismatch if both are non-empty sha256 digests and different
+						if strings.HasPrefix(img, "sha256:") && strings.HasPrefix(expectedImageID, "sha256:") && img != expectedImageID {
+							models.StepLogger.Printf("Step %d: removing stale container %s for key %s due to image ID mismatch: have=%s want=%s", step.StepID, container.ContainerID, key, img, expectedImageID)
 							exec.Command("docker", "stop", container.ContainerID).Run()
 							exec.Command("docker", "rm", container.ContainerID).Run()
 							continue
@@ -316,31 +317,35 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
                     imgID := inspectResult[0].Image
                     running := inspectResult[0].State.Running
                     id := inspectResult[0].ID
-                    if imgID == expectedImageID {
-                        if running {
-                            runningContainers[key] = models.ContainerInfo{ContainerID: id, ContainerName: name}
-                            usedIDs[id] = true
-                            reused = true
-                            break
-                        }
-                        if out2, sErr := exec.Command("docker", "start", name).CombinedOutput(); sErr == nil {
-                            models.StepLogger.Printf("Step %d: started existing container for key %s: %s", step.StepID, key, strings.TrimSpace(string(out2)))
-                            if out3, e2 := exec.Command("docker", "inspect", name).CombinedOutput(); e2 == nil {
-                                var res2 []struct{ ID string `json:"Id"` }
-                                if json.Unmarshal(out3, &res2) == nil && len(res2) > 0 {
-                                    id2 := res2[0].ID
-                                    runningContainers[key] = models.ContainerInfo{ContainerID: id2, ContainerName: name}
-                                    usedIDs[id2] = true
-                                    reused = true
-                                    break
-                                }
+                    // Remove only on true mismatch when both are non-empty
+                    if expectedImageID != "" && imgID != "" && imgID != expectedImageID {
+                        models.StepLogger.Printf("Step %d: removing candidate container %s (key=%s) due to image mismatch: have=%s want=%s", step.StepID, name, key, imgID, expectedImageID)
+                        exec.Command("docker", "rm", "-f", name).Run()
+                        continue
+                    }
+                    // Image OK: reuse
+                    if running {
+                        // Keep the existing container name for stability (no auto-rename)
+                        runningContainers[key] = models.ContainerInfo{ContainerID: id, ContainerName: name}
+                        usedIDs[id] = true
+                        reused = true
+                        break
+                    }
+                    if out2, sErr := exec.Command("docker", "start", name).CombinedOutput(); sErr == nil {
+                        models.StepLogger.Printf("Step %d: started existing container for key %s: %s", step.StepID, key, strings.TrimSpace(string(out2)))
+                        if out3, e2 := exec.Command("docker", "inspect", name).CombinedOutput(); e2 == nil {
+                            var res2 []struct{ ID string `json:"Id"` }
+                            if json.Unmarshal(out3, &res2) == nil && len(res2) > 0 {
+                                id2 := res2[0].ID
+                                // Keep the existing container name for stability (no auto-rename)
+                                runningContainers[key] = models.ContainerInfo{ContainerID: id2, ContainerName: name}
+                                usedIDs[id2] = true
+                                reused = true
+                                break
                             }
-                        } else {
-                            models.StepLogger.Printf("Step %d: failed to start existing container %s for key %s: %v Output: %s", step.StepID, name, key, sErr, string(out2))
                         }
                     } else {
-                        // Image mismatch; remove so we can recreate cleanly below
-                        exec.Command("docker", "rm", "-f", name).Run()
+                        models.StepLogger.Printf("Step %d: failed to start existing container %s for key %s: %v Output: %s", step.StepID, name, key, sErr, string(out2))
                     }
                 }
             }

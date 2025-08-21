@@ -50,6 +50,18 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		config.Triggers.ImageTag = taskSettings.Docker.ImageTag
 	}
 
+	// Resolve and set ImageID from ImageTag for deterministic image matching
+	if config.Triggers.ImageTag != "" {
+		if id, err := GetCurrentImageID(config.Triggers.ImageTag); err == nil && id != "" {
+			if config.Triggers.ImageID != id {
+				logger.Printf("Debug: Resolved image ID for %q -> %q", config.Triggers.ImageTag, id)
+			}
+			config.Triggers.ImageID = id
+		} else if err != nil {
+			logger.Printf("Warning: failed to resolve image ID for %q: %v", config.Triggers.ImageTag, err)
+		}
+	}
+
 	// Ensure we have app_folder set
 	if taskSettings.AppFolder == "" && db != nil {
 		// Fallback to fetching from dependency if not set in task settings
@@ -60,8 +72,34 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		taskSettings.AppFolder = appFolder
 	}
 
+	// Helper: resolve preferred container name for a base key
+    // Preference order:
+    // 1) Name from task.settings.containers_map (if present)
+    // 2) Existing canonical name (GenerateDVContainerNameForBase)
+    // 3) Existing legacy name (tasksync_<taskID>_<base>)
+    // 4) Canonical name
+    resolveContainerName := func(base string) string {
+        // From task settings map
+        if taskSettings.ContainersMap != nil {
+            if c, ok := taskSettings.ContainersMap[base]; ok && c.ContainerName != "" {
+                return c.ContainerName
+            }
+        }
+        canonical := GenerateDVContainerNameForBase(stepExec.TaskID, base)
+        // Prefer existing canonical
+        if exists, _ := CheckContainerExists(canonical); exists {
+            return canonical
+        }
+        // Legacy fallback
+        legacy := fmt.Sprintf("tasksync_%d_%s", stepExec.TaskID, base)
+        if exists, _ := CheckContainerExists(legacy); exists {
+            return legacy
+        }
+        // Default to canonical
+        return canonical
+    }
+
 	// Initialize or update Triggers.Containers if empty or if any container name is empty
-	// Container names may come from task.settings.containers_map and do not need a specific prefix.
 	recreateContainers := false
 	if len(config.Triggers.Containers) == 0 {
 		recreateContainers = true
@@ -115,21 +153,14 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			logger.Printf("Initialized solutions: %v", config.Solutions)
 		}
 
-		// Initialize container map with names from task.settings.containers_map when available; otherwise generate defaults
-		containerMap := make(map[string]string)
-		for _, solution := range config.Solutions {
-			base := strings.TrimSuffix(solution, filepath.Ext(solution))
-			if taskSettings.ContainersMap != nil {
-				if c, ok := taskSettings.ContainersMap[base]; ok && c.ContainerName != "" {
-					containerMap[solution] = c.ContainerName
-					continue
-				}
-			}
-			// Fallback: stable name based on base key (original/golden/solutionN)
-			containerMap[solution] = GenerateDVContainerNameForBase(stepExec.TaskID, base)
-		}
-		config.Triggers.Containers = containerMap
-		logger.Printf("Initialized Triggers.Containers (aligned with task.settings when possible): %v", config.Triggers.Containers)
+        // Initialize container map preferring existing containers to avoid duplication/recreation
+        containerMap := make(map[string]string)
+        for _, solution := range config.Solutions {
+            base := strings.TrimSuffix(solution, filepath.Ext(solution))
+            containerMap[solution] = resolveContainerName(base)
+        }
+        config.Triggers.Containers = containerMap
+        logger.Printf("Initialized Triggers.Containers (aligned with task.settings when possible): %v", config.Triggers.Containers)
 
 		// Force recreation of containers since we just initialized the container map
 		recreateNeeded = true
@@ -184,19 +215,12 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 
 	// Ensure Triggers.Containers has entries for all solutions (including original/golden)
 	if config.Triggers.Containers == nil { config.Triggers.Containers = make(map[string]string) }
-	for _, solution := range config.Solutions {
-		if _, ok := config.Triggers.Containers[solution]; !ok || config.Triggers.Containers[solution] == "" {
-			base := strings.TrimSuffix(solution, filepath.Ext(solution))
-			if taskSettings.ContainersMap != nil {
-				if c, ok := taskSettings.ContainersMap[base]; ok && c.ContainerName != "" {
-					config.Triggers.Containers[solution] = c.ContainerName
-					continue
-				}
-			}
-			// Fallback: stable name based on base key
-			config.Triggers.Containers[solution] = GenerateDVContainerNameForBase(stepExec.TaskID, base)
-		}
-	}
+    for _, solution := range config.Solutions {
+        if _, ok := config.Triggers.Containers[solution]; !ok || config.Triggers.Containers[solution] == "" {
+            base := strings.TrimSuffix(solution, filepath.Ext(solution))
+            config.Triggers.Containers[solution] = resolveContainerName(base)
+        }
+    }
 
 	// Check if we need to recreate containers based on image tag/ID changes or missing containers
 	recreateNeeded = false // Reset the flag before checking containers
@@ -289,6 +313,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			return fmt.Errorf("error checking if container should be recreated: %w", err)
 		}
 
+		logger.Printf("Decision: container %s shouldRecreate=%v force=%v", containerName, shouldRecreate, forceRecreate)
 		if shouldRecreate || forceRecreate {
 			// Only recreate the container if needed
 			if exists, _ := CheckContainerExists(containerName); exists {
@@ -489,6 +514,10 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		return fmt.Errorf("failed to unmarshal settings for update: %w", err)
 	}
 	settings.DockerVolumePool.Triggers.ImageID = config.Triggers.ImageID
+	if settings.DockerVolumePool.Force {
+		logger.Printf("Cleanup: disabling docker_volume_pool.force (was true)")
+	}
+	settings.DockerVolumePool.Force = false
 
 	// Temporary cleanup: remove artifacts, pool_size, solutions and any '--platform' parameters from settings
 	if settings.DockerVolumePool.Artifacts != nil {
@@ -634,14 +663,6 @@ func AddKeepAliveCommand(params []string, keepForever bool, logger *log.Logger) 
 
 // RunDockerCommand executes a Docker command with given parameters
 func RunDockerCommand(params []string, containerName string, logger *log.Logger, detached bool) error {
-    // Add container name conflict handling by removing existing container
-    removeCmd := exec.Command("docker", "rm", "-f", containerName)
-    removeOutput, removeErr := removeCmd.CombinedOutput()
-    if removeErr != nil && !strings.Contains(string(removeOutput), "No such container") {
-        logger.Printf("Error removing existing container %s: %v, output: %s", containerName, removeErr, string(removeOutput))
-        return fmt.Errorf("failed to remove existing container: %w", removeErr)
-    }
-
     // Log raw params before processing
     logger.Printf("RunDockerCommand: raw params for %s: %v (detached=%v)", containerName, params, detached)
 
@@ -897,47 +918,52 @@ func ShouldRecreateContainer(containerName, expectedImageTag, expectedImageID st
 		return true, nil
 	}
 
-	cmd := exec.Command("docker", "inspect", "--format", "{{.Image}}", containerName)
-	output, err := cmd.CombinedOutput()
+    cmd := exec.Command("docker", "inspect", "--format", "{{.Image}}", containerName)
+    output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("failed to get container image: %w", err)
 	}
 	currentImageID := strings.TrimSpace(string(output))
 	logger.Printf("Container %s current image ID: %s", containerName, currentImageID)
 
-	if expectedImageID != "" {
-		cmd = exec.Command("docker", "inspect", "--format", "{{.ID}}", expectedImageID)
-		expectedFullImageID, err := cmd.CombinedOutput()
-		if err != nil {
-			return false, fmt.Errorf("failed to get expected image ID: %w", err)
-		}
-		trimmedExpectedID := strings.TrimSpace(string(expectedFullImageID))
-		logger.Printf("Comparing image IDs - Current: %s, Expected: %s", currentImageID, trimmedExpectedID)
-		if !strings.HasPrefix(trimmedExpectedID, currentImageID) {
-			logger.Printf("Container %s: Image ID changed from %s to %s", containerName, currentImageID, trimmedExpectedID)
-			return true, nil
-		}
-	}
+    if expectedImageID != "" {
+        // Resolve the expected image ID to its full digest (in case a short ID was provided)
+        cmd = exec.Command("docker", "inspect", "--format", "{{.ID}}", expectedImageID)
+        expectedFullImageID, err := cmd.CombinedOutput()
+        if err != nil {
+            // If we cannot resolve the expected ID, log and fall back to tag comparison below
+            logger.Printf("Warning: failed to resolve expected image ID %q: %v", expectedImageID, err)
+        } else {
+            trimmedExpectedID := strings.TrimSpace(string(expectedFullImageID))
+            logger.Printf("Comparing image IDs - Current: %s, Expected: %s", currentImageID, trimmedExpectedID)
+            if currentImageID != trimmedExpectedID {
+                logger.Printf("Container %s: Image ID changed from %s to %s", containerName, currentImageID, trimmedExpectedID)
+                return true, nil
+            }
+            // IDs match -> no recreation needed; ignore tag differences
+            logger.Printf("Container %s: Image ID matches expected; no recreation needed", containerName)
+            return false, nil
+        }
+    }
 
-	if expectedImageTag != "" {
-		cmd = exec.Command("docker", "inspect", "--format", "{{.Config.Image}}", containerName)
-		output, err = cmd.CombinedOutput()
-		if err != nil {
-			return false, fmt.Errorf("failed to get container image tag: %w", err)
-		}
-		currentImageTag := strings.TrimSpace(string(output))
-		logger.Printf("Container %s current image tag: %s, expected: %s", containerName, currentImageTag, expectedImageTag)
-		if currentImageTag != expectedImageTag {
-			logger.Printf("Container %s: Image tag changed from %s to %s", containerName, currentImageTag, expectedImageTag)
-			return true, nil
-		}
-	}
+    if expectedImageTag != "" {
+        cmd = exec.Command("docker", "inspect", "--format", "{{.Config.Image}}", containerName)
+        output, err = cmd.CombinedOutput()
+        if err != nil {
+            return false, fmt.Errorf("failed to get container image tag: %w", err)
+        }
+        currentImageTag := strings.TrimSpace(string(output))
+        logger.Printf("Container %s current image tag: %s, expected: %s", containerName, currentImageTag, expectedImageTag)
+        if currentImageTag != expectedImageTag {
+            logger.Printf("Container %s: Image tag changed from %s to %s", containerName, currentImageTag, expectedImageTag)
+            return true, nil
+        }
+    }
 
-	logger.Printf("Container %s is up-to-date, no need to recreate", containerName)
-	return false, nil
+    logger.Printf("Container %s is up-to-date, no need to recreate", containerName)
+    return false, nil
 }
 
-// CheckContainerExists checks if a Docker container exists
 func CheckContainerExists(containerName string) (bool, error) {
 	hostname, errHost := os.Hostname()
 	if errHost != nil {

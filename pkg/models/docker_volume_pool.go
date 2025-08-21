@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -116,7 +117,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 
 		// Initialize container map with names from task.settings.containers_map when available; otherwise generate defaults
 		containerMap := make(map[string]string)
-		for i, solution := range config.Solutions {
+		for _, solution := range config.Solutions {
 			base := strings.TrimSuffix(solution, filepath.Ext(solution))
 			if taskSettings.ContainersMap != nil {
 				if c, ok := taskSettings.ContainersMap[base]; ok && c.ContainerName != "" {
@@ -124,7 +125,8 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 					continue
 				}
 			}
-			containerMap[solution] = GenerateDVContainerName(stepExec.TaskID, i+1)
+			// Fallback: stable name based on base key (original/golden/solutionN)
+			containerMap[solution] = GenerateDVContainerNameForBase(stepExec.TaskID, base)
 		}
 		config.Triggers.Containers = containerMap
 		logger.Printf("Initialized Triggers.Containers (aligned with task.settings when possible): %v", config.Triggers.Containers)
@@ -159,9 +161,30 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	ensureInSolutions("original")
 	ensureInSolutions("golden.patch")
 
+	// Normalize solution order deterministically to avoid index-based name drift
+	normalizeSolutions := func(in []string) []string {
+		seen := make(map[string]bool)
+		push := func(s string, out *[]string) {
+			if s == "" { return }
+			if !seen[s] { *out = append(*out, s); seen[s] = true }
+		}
+		out := make([]string, 0, len(in))
+		// Preferred fixed order for stability
+		push("original", &out)
+		push("golden.patch", &out)
+		for i := 1; i <= 4; i++ { push(fmt.Sprintf("solution%d.patch", i), &out) }
+		// Add any remaining entries in alphabetical order
+		extra := make([]string, 0, len(in))
+		for _, s := range in { if !seen[s] { extra = append(extra, s) } }
+		sort.Strings(extra)
+		out = append(out, extra...)
+		return out
+	}
+	config.Solutions = normalizeSolutions(config.Solutions)
+
 	// Ensure Triggers.Containers has entries for all solutions (including original/golden)
 	if config.Triggers.Containers == nil { config.Triggers.Containers = make(map[string]string) }
-	for i, solution := range config.Solutions {
+	for _, solution := range config.Solutions {
 		if _, ok := config.Triggers.Containers[solution]; !ok || config.Triggers.Containers[solution] == "" {
 			base := strings.TrimSuffix(solution, filepath.Ext(solution))
 			if taskSettings.ContainersMap != nil {
@@ -170,7 +193,8 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 					continue
 				}
 			}
-			config.Triggers.Containers[solution] = GenerateDVContainerName(stepExec.TaskID, i+1)
+			// Fallback: stable name based on base key
+			config.Triggers.Containers[solution] = GenerateDVContainerNameForBase(stepExec.TaskID, base)
 		}
 	}
 
@@ -239,10 +263,11 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	// Debug: log final solutions and containers map before creation loop
 	logger.Printf("Final Solutions list: %v", config.Solutions)
 	logger.Printf("Final Triggers.Containers: %v", config.Triggers.Containers)
-	for i, solutionFile := range config.Solutions {
+	for _, solutionFile := range config.Solutions {
 		containerName, ok := config.Triggers.Containers[solutionFile]
 		if !ok || containerName == "" {
-			containerName = GenerateDVContainerName(stepExec.TaskID, i+1)
+			base := strings.TrimSuffix(solutionFile, filepath.Ext(solutionFile))
+			containerName = GenerateDVContainerNameForBase(stepExec.TaskID, base)
 			config.Triggers.Containers[solutionFile] = containerName
 			logger.Printf("Generated container name for %s: %s", solutionFile, containerName)
 		}
@@ -255,12 +280,8 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		}
 
 		// Remove existing container if it exists
-		if exists, _ := CheckContainerExists(containerName); exists {
-			logger.Printf("Removing existing container: %s", containerName)
-			if err := RemoveDockerContainer(containerName, logger); err != nil {
-				return fmt.Errorf("failed to remove existing container: %w", err)
-			}
-		}
+		// Note: Do not remove the container unconditionally here.
+		// Removal is handled below only when recreation is needed.
 
 		// Check if we need to recreate the container
 		shouldRecreate, err := ShouldRecreateContainer(containerName, config.Triggers.ImageTag, config.Triggers.ImageID, logger)
@@ -844,14 +865,30 @@ func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile 
 // GenerateDVContainerName generates a consistent container name for Docker volume pool steps
 // Format: task_<taskID>_volume_<index> where index is 1-based
 func GenerateDVContainerName(taskID int, index int) string {
-	return fmt.Sprintf("task_%d_volume_%d", taskID, index)
+    return fmt.Sprintf("task_%d_volume_%d", taskID, index)
+}
+
+// GenerateDVContainerNameForBase generates a stable container name for a logical base key
+// base is one of: original, golden, solution1..solutionN (trimmed of file extension)
+func GenerateDVContainerNameForBase(taskID int, base string) string {
+    switch base {
+    case "original":
+        return fmt.Sprintf("task_%d_volume_original", taskID)
+    case "golden":
+        return fmt.Sprintf("task_%d_volume_golden", taskID)
+    default:
+        // For solutionN or any other stable key, embed the key
+        // e.g., task_123_volume_solution1
+        cleaned := strings.ReplaceAll(base, "/", "_")
+        cleaned = strings.ReplaceAll(cleaned, " ", "_")
+        return fmt.Sprintf("task_%d_volume_%s", taskID, cleaned)
+    }
 }
 
 // ShouldRecreateContainer checks if a container needs to be recreated based on image tag or ID changes
 func ShouldRecreateContainer(containerName, expectedImageTag, expectedImageID string, logger *log.Logger) (bool, error) {
-	logger.Printf("Checking if container %s needs recreation (expected tag: %s, expected ID: %s)", containerName, expectedImageTag, expectedImageID)
-
-	exists, err := CheckContainerExists(containerName)
+    logger.Printf("Checking if container %s needs recreation (expected tag: %s, expected ID: %s)", containerName, expectedImageTag, expectedImageID)
+    exists, err := CheckContainerExists(containerName)
 	if err != nil {
 		return false, fmt.Errorf("failed to check if container exists: %w", err)
 	}

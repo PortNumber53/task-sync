@@ -270,17 +270,54 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 			}
 		}
 
-		// Start missing containers to satisfy all desired keys
+		// Start missing containers to satisfy all desired keys (reuse by deterministic name when possible)
 		for _, key := range desiredKeys {
 			if _, exists := runningContainers[key]; exists {
 				continue
 			}
-			randomSuffix, _ := models.GenerateRandomString(4)
-			containerName := fmt.Sprintf("tasksync_%d_%s_%s", step.TaskID, randomSuffix, key)
+			            // Deterministic container name per task and key for stable reuse (shared with docker_volume_pool)
+            containerName := models.GenerateDVContainerNameForBase(step.TaskID, key)
+			// If a container with this name already exists, try to reuse it
+			if out, err := exec.Command("docker", "inspect", containerName).CombinedOutput(); err == nil {
+				var inspectResult []struct {
+					Config struct{ Image string `json:"Image"` } `json:"Config"`
+					State  struct{ Running bool `json:"Running"` } `json:"State"`
+					ID     string `json:"Id"`
+				}
+				if json.Unmarshal(out, &inspectResult) == nil && len(inspectResult) > 0 {
+					img := inspectResult[0].Config.Image
+					running := inspectResult[0].State.Running
+					id := inspectResult[0].ID
+					if img == imageTag {
+						if running {
+							runningContainers[key] = models.ContainerInfo{ContainerID: id, ContainerName: containerName}
+							usedIDs[id] = true
+							continue
+						}
+						if out2, sErr := exec.Command("docker", "start", containerName).CombinedOutput(); sErr == nil {
+							models.StepLogger.Printf("Step %d: started existing container for key %s: %s", step.StepID, key, strings.TrimSpace(string(out2)))
+							if out3, e2 := exec.Command("docker", "inspect", containerName).CombinedOutput(); e2 == nil {
+								var res2 []struct{ ID string `json:"Id"` }
+								if json.Unmarshal(out3, &res2) == nil && len(res2) > 0 {
+									id2 := res2[0].ID
+									runningContainers[key] = models.ContainerInfo{ContainerID: id2, ContainerName: containerName}
+									usedIDs[id2] = true
+									continue
+								}
+							}
+						} else {
+							models.StepLogger.Printf("Step %d: failed to start existing container %s for key %s: %v Output: %s", step.StepID, containerName, key, sErr, string(out2))
+						}
+					}
+					// Image mismatch or failed start; remove so we can recreate cleanly below
+					exec.Command("docker", "rm", "-f", containerName).Run()
+				}
+			}
+
 			// Compute a per-key bind mount so each logical container sees the correct workspace
 			// - original      -> <base_path>/original        mounted at <app_folder>
 			// - solution{1-4} -> <base_path>/volume_solutionX mounted at <app_folder>
-			// - golden        -> <base_path>/volume_golden    mounted at <app_folder>/golden
+			// - golden        -> <base_path>/volume_golden    mounted at <app_folder>
 			hostPath := ""
 			switch key {
 			case "original":
@@ -293,8 +330,6 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 			}
 
 			// Determine container mount point
-			// All containers, including golden, should mount at <app_folder>
-			// Golden's host path already points to volume_golden
 			mountPoint := taskSettings.AppFolder
 
 			// Ensure absolute paths for docker -v mapping
@@ -382,29 +417,22 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 		// After containers are started/validated, run a git status check in each container.
 		// The step will be considered successful only if all containers can run git status.
 		gitStatusFailures := []string{}
-		for _, key := range desiredKeys {
-			if _, ok := runningContainers[key]; ok {
-				continue
+		for key, c := range runningContainers {
+			execCmd := exec.Command("docker", "exec", "-w", taskSettings.AppFolder, c.ContainerID, "git", "status")
+			if out, err := execCmd.CombinedOutput(); err != nil {
+				models.StepLogger.Printf("Step %d: git status failed in %s (%s): %v Output: %s", step.StepID, key, c.ContainerID, err, string(out))
+				gitStatusFailures = append(gitStatusFailures, fmt.Sprintf("%s(%s)", key, c.ContainerID))
 			}
-			// Construct a deterministic name for the new container
-			containerName := fmt.Sprintf("task_%d_%s", step.TaskID, key)
-			// If this name is already in use (from previous runs), remove it first to avoid conflicts
-			inspectNameCmd := exec.Command("docker", "inspect", containerName)
-			if _, err := inspectNameCmd.CombinedOutput(); err == nil {
-				exec.Command("docker", "rm", "-f", containerName).Run()
-			}
-			// Build docker run command based on provided parameters
-			// ...
 		}
 
-		// Write new state:
-		// 1) Update task.settings with containers map and docker_run_parameters
+		// Write new state map for containers before updating task settings
 		taskSettings.ContainersMap = make(map[string]models.ContainerInfo)
 		for _, key := range desiredKeys {
 			if c, ok := runningContainers[key]; ok {
 				taskSettings.ContainersMap[key] = c
 			}
 		}
+
 		// Migrate docker run parameters to task.settings ONLY if the task does not already have them
 		migratedParams := false
 		if len(taskSettings.DockerRunParameters) == 0 && len(dockerRunParams) > 0 {

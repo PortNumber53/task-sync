@@ -289,6 +289,7 @@ type DockerVolumePoolConfig struct {
 	GradingSetupScript string `json:"grading_setup_script"`
 	KeepForever bool `json:"keep_forever"`
 	Force bool `json:"force"`
+	Golden bool `json:"golden,omitempty"`
 }
 
 // stepLogger is a global logger for step-related messages.

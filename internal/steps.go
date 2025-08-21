@@ -474,6 +474,28 @@ func ProcessSpecificStep(db *sql.DB, stepID int, force bool, golden bool) error 
 		stepExec.Settings = string(updatedSettings)
 	}
 
+	// Inject the golden flag into the settings if it's true (read by docker_extract_volume and docker_volume_pool)
+	if golden {
+		for key := range settings {
+			var stepConfig map[string]interface{}
+			if err := json.Unmarshal(settings[key], &stepConfig); err != nil {
+				return fmt.Errorf("failed to unmarshal step config for golden injection: %w", err)
+			}
+			stepConfig["golden"] = true
+			updatedConfig, err := json.Marshal(stepConfig)
+			if err != nil {
+				return fmt.Errorf("failed to marshal step config after golden injection: %w", err)
+			}
+			settings[key] = updatedConfig
+			break
+		}
+		updatedSettings, err := json.Marshal(settings)
+		if err != nil {
+			return fmt.Errorf("failed to marshal updated settings after golden injection: %w", err)
+		}
+		stepExec.Settings = string(updatedSettings)
+	}
+
 	var stepType string
 	processors := getStepProcessors(force, golden)
 	for key := range settings {
@@ -701,18 +723,42 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	}
 	logger.Printf("Command succeeded: rsync from /original/ to /solution4/ completed")
 
-	// Mirror solution1 behavior for golden workspace
-	rsyncCmdGolden := "rsync -a --delete-during /original/ /golden/"
-	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmdGolden)
-	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmdGolden)
-	output, err = execCmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Command failed: %s", string(output))
-		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupCmd.Run()
-		return fmt.Errorf("rsync from /original/ to /golden/ failed: %w", err)
+	// Mirror solution1 behavior for golden workspace, but gate based on flag and existing content
+	// Determine golden flag from config and directory state
+	goldenDir := filepath.Join(se.BasePath, "volume_golden")
+	goldenExists := false
+	goldenNonEmpty := false
+	if fi, statErr := os.Stat(goldenDir); statErr == nil && fi.IsDir() {
+		goldenExists = true
+		if entries, rdErr := os.ReadDir(goldenDir); rdErr == nil && len(entries) > 0 {
+			goldenNonEmpty = true
+		}
 	}
-	logger.Printf("Command succeeded: rsync from /original/ to /golden/ completed")
+	shouldSyncGolden := false
+	if !goldenExists || !goldenNonEmpty {
+		// First-time create or empty directory: always sync regardless of flag
+		shouldSyncGolden = true
+		logger.Printf("Golden directory state exists=%v nonEmpty=%v -> syncing regardless of flag", goldenExists, goldenNonEmpty)
+	} else if config.Golden {
+		// Existing and populated, sync only when golden flag is set
+		shouldSyncGolden = true
+		logger.Printf("Golden directory exists and is populated, golden flag set -> syncing")
+	} else {
+		logger.Printf("Golden directory exists and is populated, golden flag not set -> skipping golden rsync")
+	}
+	if shouldSyncGolden {
+		rsyncCmdGolden := "rsync -a --delete-during /original/ /golden/"
+		execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmdGolden)
+		logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmdGolden)
+		output, err = execCmd.CombinedOutput()
+		if err != nil {
+			logger.Printf("Command failed: %s", string(output))
+			cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+			cleanupCmd.Run()
+			return fmt.Errorf("rsync from /original/ to /golden/ failed: %w", err)
+		}
+		logger.Printf("Command succeeded: rsync from /original/ to /golden/ completed")
+	}
 
 	// After successful execution, update file hashes
 	if err := models.UpdateFileHashes(db, se.StepID, se.BasePath, config.Triggers.Files, logger); err != nil {
@@ -720,6 +766,14 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	} else {
 		logger.Printf("File hashes updated successfully for step %d", se.StepID)
 	}
+
+    // Do not persist runtime golden flag for docker_extract_volume
+    // Explicitly set settings.docker_extract_volume.golden = false in DB
+    if _, err := db.Exec("UPDATE steps SET settings = jsonb_set(settings, '{docker_extract_volume,golden}', 'false'::jsonb, true) WHERE id = $1", se.StepID); err != nil {
+        logger.Printf("Warning: failed to reset docker_extract_volume.golden flag for step %d: %v", se.StepID, err)
+    } else {
+        logger.Printf("Cleanup: disabling docker_extract_volume.golden (set to false)")
+    }
 
 	return nil
 }

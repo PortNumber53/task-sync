@@ -227,6 +227,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 
 	// Check each container individually and evaluate all of them (do not break early)
 	for patchName, containerName := range config.Triggers.Containers {
+		base := strings.TrimSuffix(patchName, filepath.Ext(patchName))
 		exists, err := CheckContainerExists(containerName)
 		if err != nil {
 			logger.Printf("Error checking if container %s exists: %v", containerName, err)
@@ -237,6 +238,12 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		if !exists {
 			logger.Printf("Container %s (for %s) does not exist, will recreate", containerName, patchName)
 			recreateNeeded = true
+			continue
+		}
+
+		// Golden gating: if golden container exists and golden flag is not set, skip considering it for recreation
+		if base == "golden" && exists && !config.Golden {
+			logger.Printf("Golden container %s exists and golden flag not set -> skipping recreation checks for golden", containerName)
 			continue
 		}
 
@@ -301,6 +308,14 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		solutionVolumePath := filepath.Join(stepExec.BasePath, fmt.Sprintf("volume_%s", baseName))
 		if solutionFile == "original" {
 			solutionVolumePath = filepath.Join(stepExec.BasePath, "original")
+		}
+
+		// Golden gating at execution time: if golden container exists and flag not set, skip any actions for golden
+		if baseName == "golden" && !config.Golden {
+			if exists, _ := CheckContainerExists(containerName); exists {
+				logger.Printf("Golden container %s exists and golden flag not set -> skipping start/recreate/patch for golden", containerName)
+				continue
+			}
 		}
 
 		// Remove existing container if it exists
@@ -518,6 +533,11 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		logger.Printf("Cleanup: disabling docker_volume_pool.force (was true)")
 	}
 	settings.DockerVolumePool.Force = false
+	// Do not persist runtime golden flag
+	if settings.DockerVolumePool.Golden {
+		logger.Printf("Cleanup: disabling docker_volume_pool.golden (was true)")
+	}
+	settings.DockerVolumePool.Golden = false
 
 	// Temporary cleanup: remove artifacts, pool_size, solutions and any '--platform' parameters from settings
 	if settings.DockerVolumePool.Artifacts != nil {

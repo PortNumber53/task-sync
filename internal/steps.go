@@ -97,7 +97,7 @@ func ProcessSteps(db *sql.DB) error {
 }
 
 // ProcessStepsForTask processes all steps for a specific task by ID, respecting dependencies.
-func ProcessStepsForTask(db *sql.DB, taskID int, golden bool) error {
+func ProcessStepsForTask(db *sql.DB, taskID int, golden bool, original bool) error {
 	// Fetch all steps for the given task, ordered by ID (can be improved to topological sort if needed)
 	rows, err := db.Query(`SELECT id FROM steps WHERE task_id = $1 ORDER BY id`, taskID)
 	if err != nil {
@@ -120,7 +120,7 @@ func ProcessStepsForTask(db *sql.DB, taskID int, golden bool) error {
 
 	for _, stepID := range stepIDs {
 		fmt.Printf("Processing step ID %d...\n", stepID)
-		if err := ProcessSpecificStep(db, stepID, false, golden); err != nil {
+		if err := ProcessSpecificStep(db, stepID, false, golden, original); err != nil {
 			fmt.Printf("Error processing step %d: %v\n", stepID, err)
 			// Continue processing other steps even if one fails
 		}
@@ -411,7 +411,7 @@ func printChildren(nodes []*StepNode, prefix string) {
 }
 
 // ProcessSpecificStep processes a single step by its ID.
-func ProcessSpecificStep(db *sql.DB, stepID int, force bool, golden bool) error {
+func ProcessSpecificStep(db *sql.DB, stepID int, force bool, golden bool, original bool) error {
 	// Fetch the full step details including task_id
 	var stepExec models.StepExec
 	err := db.QueryRow("SELECT s.id, s.task_id, s.title, s.settings, t.base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1", stepID).Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings, &stepExec.BasePath)
@@ -492,6 +492,28 @@ func ProcessSpecificStep(db *sql.DB, stepID int, force bool, golden bool) error 
 		updatedSettings, err := json.Marshal(settings)
 		if err != nil {
 			return fmt.Errorf("failed to marshal updated settings after golden injection: %w", err)
+		}
+		stepExec.Settings = string(updatedSettings)
+	}
+
+	// Inject the original flag into the settings if it's true
+	if original {
+		for key := range settings {
+			var stepConfig map[string]interface{}
+			if err := json.Unmarshal(settings[key], &stepConfig); err != nil {
+				return fmt.Errorf("failed to unmarshal step config for original injection: %w", err)
+			}
+			stepConfig["original"] = true
+			updatedConfig, err := json.Marshal(stepConfig)
+			if err != nil {
+				return fmt.Errorf("failed to marshal step config after original injection: %w", err)
+			}
+			settings[key] = updatedConfig
+			break
+		}
+		updatedSettings, err := json.Marshal(settings)
+		if err != nil {
+			return fmt.Errorf("failed to marshal updated settings after original injection: %w", err)
 		}
 		stepExec.Settings = string(updatedSettings)
 	}
@@ -663,17 +685,39 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	}
 	logger.Printf("Command succeeded: rsync installed")
 
-	rsyncCmd1 := fmt.Sprintf("rsync -a --delete-during %s/ /original/", config.AppFolder)
-	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd1)
-	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd1)
-	output, err = execCmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Command failed: %s", string(output))
-		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupCmd.Run()
-		return fmt.Errorf("rsync from /src/ to /original/ failed: %w", err)
-	}
-	logger.Printf("Command succeeded: rsync from %s to /original/ completed", config.AppFolder)
+    // Gate rsync into /original similar to golden behavior
+    originalDir := filepath.Join(se.BasePath, "original")
+    origExists := false
+    origNonEmpty := false
+    if fi, statErr := os.Stat(originalDir); statErr == nil && fi.IsDir() {
+        origExists = true
+        if entries, rdErr := os.ReadDir(originalDir); rdErr == nil && len(entries) > 0 {
+            origNonEmpty = true
+        }
+    }
+    shouldSyncOriginal := false
+    if !origExists || !origNonEmpty {
+        shouldSyncOriginal = true
+        logger.Printf("Original directory state exists=%v nonEmpty=%v -> syncing regardless of flag", origExists, origNonEmpty)
+    } else if config.Original {
+        shouldSyncOriginal = true
+        logger.Printf("Original directory exists and is populated, original flag set -> syncing")
+    } else {
+        logger.Printf("Original directory exists and is populated, original flag not set -> skipping original rsync")
+    }
+    if shouldSyncOriginal {
+        rsyncCmd1 := fmt.Sprintf("rsync -a --delete-during %s/ /original/", config.AppFolder)
+        execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd1)
+        logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd1)
+        output, err = execCmd.CombinedOutput()
+        if err != nil {
+            logger.Printf("Command failed: %s", string(output))
+            cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+            cleanupCmd.Run()
+            return fmt.Errorf("rsync from src to /original/ failed: %w", err)
+        }
+        logger.Printf("Command succeeded: rsync from %s to /original/ completed", config.AppFolder)
+    }
 
 	rsyncCmd2 := "rsync -a --delete-during /original/ /solution1/"
 	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd2)
@@ -773,6 +817,13 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
         logger.Printf("Warning: failed to reset docker_extract_volume.golden flag for step %d: %v", se.StepID, err)
     } else {
         logger.Printf("Cleanup: disabling docker_extract_volume.golden (set to false)")
+    }
+
+    // Do not persist runtime original flag for docker_extract_volume
+    if _, err := db.Exec("UPDATE steps SET settings = jsonb_set(settings, '{docker_extract_volume,original}', 'false'::jsonb, true) WHERE id = $1", se.StepID); err != nil {
+        logger.Printf("Warning: failed to reset docker_extract_volume.original flag for step %d: %v", se.StepID, err)
+    } else {
+        logger.Printf("Cleanup: disabling docker_extract_volume.original (set to false)")
     }
 
 	return nil

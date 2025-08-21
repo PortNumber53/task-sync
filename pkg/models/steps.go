@@ -290,6 +290,7 @@ type DockerVolumePoolConfig struct {
 	KeepForever bool `json:"keep_forever"`
 	Force bool `json:"force"`
 	Golden bool `json:"golden,omitempty"`
+	Original bool `json:"original,omitempty"`
 }
 
 // stepLogger is a global logger for step-related messages.

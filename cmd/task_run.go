@@ -25,14 +25,17 @@ func HandleTaskRunID(db *sql.DB) {
 	}
     // Parse flags after task ID
     golden := false
+    original := false
     for i := 4; i < len(os.Args); i++ {
         if os.Args[i] == "--golden" {
             golden = true
+        } else if os.Args[i] == "--original" {
+            original = true
         }
     }
 
     fmt.Printf("Running all steps for task ID %d...\n", taskID)
-    if err := internal.ProcessStepsForTask(db, taskID, golden); err != nil {
+    if err := internal.ProcessStepsForTask(db, taskID, golden, original); err != nil {
         fmt.Printf("Error processing steps for task: %v\n", err)
         os.Exit(1)
     }

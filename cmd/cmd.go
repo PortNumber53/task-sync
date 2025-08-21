@@ -585,17 +585,20 @@ func HandleStepRunID(db *sql.DB) {
     // Parse flags after ID
     force := false
     golden := false
+    original := false
     for i := 4; i < len(os.Args); i++ {
         switch os.Args[i] {
         case "--force":
             force = true
         case "--golden":
             golden = true
+        case "--original":
+            original = true
         }
     }
 
 	fmt.Printf("Running step ID %d...\n", stepID)
-    if err := internal.ProcessSpecificStep(db, stepID, force, golden); err != nil {
+    if err := internal.ProcessSpecificStep(db, stepID, force, golden, original); err != nil {
         fmt.Printf("Error processing step: %v\n", err)
         os.Exit(1)
     }

@@ -246,6 +246,11 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			logger.Printf("Golden container %s exists and golden flag not set -> skipping recreation checks for golden", containerName)
 			continue
 		}
+		// Original gating: if original container exists and original flag is not set, skip considering it for recreation
+		if base == "original" && exists && !config.Original {
+			logger.Printf("Original container %s exists and original flag not set -> skipping recreation checks for original", containerName)
+			continue
+		}
 
 		// Check if container needs recreation due to image changes
 		shouldRecreate, err := ShouldRecreateContainer(containerName, config.Triggers.ImageTag, config.Triggers.ImageID, logger)
@@ -314,6 +319,13 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		if baseName == "golden" && !config.Golden {
 			if exists, _ := CheckContainerExists(containerName); exists {
 				logger.Printf("Golden container %s exists and golden flag not set -> skipping start/recreate/patch for golden", containerName)
+				continue
+			}
+		}
+		// Original gating at execution time: if original container exists and flag not set, skip any actions for original
+		if baseName == "original" && !config.Original {
+			if exists, _ := CheckContainerExists(containerName); exists {
+				logger.Printf("Original container %s exists and original flag not set -> skipping start/recreate/patch for original", containerName)
 				continue
 			}
 		}
@@ -538,6 +550,11 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		logger.Printf("Cleanup: disabling docker_volume_pool.golden (was true)")
 	}
 	settings.DockerVolumePool.Golden = false
+	// Do not persist runtime original flag
+	if settings.DockerVolumePool.Original {
+		logger.Printf("Cleanup: disabling docker_volume_pool.original (was true)")
+	}
+	settings.DockerVolumePool.Original = false
 
 	// Temporary cleanup: remove artifacts, pool_size, solutions and any '--platform' parameters from settings
 	if settings.DockerVolumePool.Artifacts != nil {

@@ -315,17 +315,17 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			solutionVolumePath = filepath.Join(stepExec.BasePath, "original")
 		}
 
-		// Golden gating at execution time: if golden container exists and flag not set, skip any actions for golden
+		// Golden gating at execution time: if golden container exists and golden flag not set, and not forcing, skip actions for golden
 		if baseName == "golden" && !config.Golden {
-			if exists, _ := CheckContainerExists(containerName); exists {
-				logger.Printf("Golden container %s exists and golden flag not set -> skipping start/recreate/patch for golden", containerName)
+			if exists, _ := CheckContainerExists(containerName); exists && !forceRecreate {
+				logger.Printf("Golden container %s exists and golden flag not set (and not forced) -> skipping start/recreate/patch for golden", containerName)
 				continue
 			}
 		}
-		// Original gating at execution time: if original container exists and flag not set, skip any actions for original
+		// Original gating at execution time: if original container exists and original flag not set, and not forcing, skip actions for original
 		if baseName == "original" && !config.Original {
-			if exists, _ := CheckContainerExists(containerName); exists {
-				logger.Printf("Original container %s exists and original flag not set -> skipping start/recreate/patch for original", containerName)
+			if exists, _ := CheckContainerExists(containerName); exists && !forceRecreate {
+				logger.Printf("Original container %s exists and original flag not set (and not forced) -> skipping start/recreate/patch for original", containerName)
 				continue
 			}
 		}
@@ -518,7 +518,12 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		if workingDir == "" {
 			workingDir = taskSettings.AppFolder
 		}
-		if err := ApplyGitCleanupAndPatch(containerName, workingDir, patchFile, config.HeldOutTestFile, config.GradingSetupScript, logger); err != nil {
+		// Resolve held-out tests patch relative to task base path when provided
+		heldOutPath := config.HeldOutTestFile
+		if heldOutPath != "" && !filepath.IsAbs(heldOutPath) {
+			heldOutPath = filepath.Join(stepExec.BasePath, heldOutPath)
+		}
+		if err := ApplyGitCleanupAndPatch(containerName, workingDir, patchFile, heldOutPath, config.GradingSetupScript, logger); err != nil {
 			return fmt.Errorf("failed to apply git cleanup and patches to container %s: %w", containerName, err)
 		}
 

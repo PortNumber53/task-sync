@@ -18,18 +18,18 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
 	var err error
 
 	if stepID != 0 {
-		query = `SELECT s.id, s.task_id, s.settings, t.base_path
+		query = `SELECT s.id, s.task_id, s.settings, COALESCE(t.local_path, '') AS base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE s.id = $1 AND s.settings ? 'docker_pool'`
 		rows, err = db.Query(query, stepID)
 	} else {
-		query = `SELECT s.id, s.task_id, s.settings, t.base_path
+		query = `SELECT s.id, s.task_id, s.settings, COALESCE(t.local_path, '') AS base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE t.status = 'active'
-		AND t.base_path IS NOT NULL
-		AND t.base_path <> ''
+		AND t.local_path IS NOT NULL
+		AND t.local_path <> ''
 		AND s.settings ? 'docker_pool'`
 		rows, err = db.Query(query)
 	}
@@ -354,18 +354,18 @@ func processDockerPoolSteps(db *sql.DB, stepID int) error {
             }
 
 			// Compute a per-key bind mount so each logical container sees the correct workspace
-			// - original      -> <base_path>/original        mounted at <app_folder>
-			// - solution{1-4} -> <base_path>/volume_solutionX mounted at <app_folder>
-			// - golden        -> <base_path>/volume_golden    mounted at <app_folder>
-			hostPath := ""
-			switch key {
-			case "original":
-				hostPath = filepath.Join(step.BasePath, "original")
-			case "golden":
-				hostPath = filepath.Join(step.BasePath, "volume_golden")
-			default:
-				// solution1..solution4
-				hostPath = filepath.Join(step.BasePath, fmt.Sprintf("volume_%s", key))
+			            // - original      -> <base_path>/original        mounted at <app_folder>
+            // - solution{1-4} -> <base_path>/volume_solutionX mounted at <app_folder>
+            // - golden        -> <base_path>/volume_golden    mounted at <app_folder>
+            hostPath := ""
+            switch key {
+            case "original":
+                hostPath = filepath.Join(step.BasePath, "original")
+            case "golden":
+                hostPath = filepath.Join(step.BasePath, "volume_golden")
+            default:
+                // solution1..solution4
+                hostPath = filepath.Join(step.BasePath, fmt.Sprintf("volume_%s", key))
 			}
 
 			// Determine container mount point

@@ -186,7 +186,7 @@ func GetAssignedContainersForStep(stepSettings string, taskSettings *TaskSetting
 	if taskSettings != nil {
 		// Prefer containers_map in key order original, golden, solution1..solution4
 		preferredKeys := []string{"original", "golden", "solution1", "solution2", "solution3", "solution4"}
-		if taskSettings.ContainersMap != nil && len(taskSettings.ContainersMap) > 0 {
+		if len(taskSettings.ContainersMap) > 0 {
 			i := 0
 			for _, k := range preferredKeys {
 				if c, ok := taskSettings.ContainersMap[k]; ok {

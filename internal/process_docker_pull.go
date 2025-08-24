@@ -19,10 +19,10 @@ func processDockerPullSteps(db *sql.DB, stepID int) {
 	var err error
 
 	if stepID != 0 {
-		query = `SELECT s.id, s.task_id, s.settings, t.base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1 AND s.settings ? 'docker_pull'`
+		query = `SELECT s.id, s.task_id, s.settings, COALESCE(t.local_path, '') AS base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1 AND s.settings ? 'docker_pull'`
 		rows, err = db.Query(query, stepID)
 	} else {
-		query = `SELECT s.id, s.task_id, s.settings, t.base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND s.settings ? 'docker_pull'`
+		query = `SELECT s.id, s.task_id, s.settings, COALESCE(t.local_path, '') AS base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE t.status = 'active' AND s.settings ? 'docker_pull'`
 		rows, err = db.Query(query)
 	}
 

@@ -26,7 +26,7 @@ type TaskSettings struct {
 	ContainersMap map[string]ContainerInfo `json:"containers_map,omitempty"`
 	// New location for docker run parameters
 	DockerRunParameters []string `json:"docker_run_parameters,omitempty"`
-	BasePath string `json:"base_path,omitempty"` // Renamed from LocalPath
+	BasePath string `json:"base_path,omitempty"` // DEPRECATED: use tasks.local_path. Kept only for backward-compatible settings JSON reads.
 	Rubrics map[string]string `json:"rubrics,omitempty"` // Legacy: Stores rubric UUID -> hash
 	RubricSet map[string]string `json:"rubric_set,omitempty"` // New: criterionID -> hash including counter & command
 	// Add other fields as needed based on project requirements

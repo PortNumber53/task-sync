@@ -118,6 +118,8 @@ func HandleStep() {
 		HandleStepCopy(db)
 	case "run":
 		HandleStepRunID(db)
+	case "golden":
+		HandleStepGolden(db)
 	case "cleanup-rubric-shells":
 		HandleStepCleanupRubricShells(db)
 	default:
@@ -290,6 +292,19 @@ func HandleTask() {
 		}
 		defer db.Close()
 		HandleTaskRunID(db)
+	case "golden":
+		pgURL, err := internal.GetPgURLFromEnv()
+		if err != nil {
+			fmt.Printf("Database configuration error: %v\n", err)
+			os.Exit(1)
+		}
+		db, err := sql.Open("postgres", pgURL)
+		if err != nil {
+			fmt.Printf("Database connection error: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+		HandleTaskGolden(db)
 	case "reset-containers":
 		pgURL, err := internal.GetPgURLFromEnv()
 		if err != nil {
@@ -455,6 +470,26 @@ func HandleTaskList() {
     }
 }
 
+// HandleTaskGolden runs the golden workflow for a given task ID.
+func HandleTaskGolden(db *sql.DB) {
+    if len(os.Args) < 4 {
+        fmt.Println("Error: golden subcommand requires a task ID.")
+        helpPkg.PrintTaskHelp()
+        os.Exit(1)
+    }
+    taskID, err := strconv.Atoi(os.Args[3])
+    if err != nil {
+        fmt.Printf("Error: invalid task ID '%s'. Must be an integer.\n", os.Args[3])
+        os.Exit(1)
+    }
+
+    if err := internal.RunTaskGolden(db, taskID); err != nil {
+        fmt.Printf("Error running task golden for task %d: %v\n", taskID, err)
+        os.Exit(1)
+    }
+    fmt.Printf("Task %d golden execution finished successfully.\n", taskID)
+}
+
 func HandleTaskResetContainers(db *sql.DB) {
 	if len(os.Args) < 4 {
 		fmt.Println("Error: reset-containers requires a task ID.")
@@ -603,4 +638,49 @@ func HandleStepRunID(db *sql.DB) {
         os.Exit(1)
     }
 	fmt.Println("Step processed successfully.")
+}
+
+// HandleStepGolden runs a specific rubric_shell step ID in Golden-only mode.
+// Usage: task-sync step golden <STEP_ID> [--force]
+func HandleStepGolden(db *sql.DB) {
+    if len(os.Args) < 4 {
+        fmt.Println("Error: golden subcommand requires a step ID.")
+        helpPkg.PrintStepGoldenHelp()
+        os.Exit(1)
+    }
+
+    stepIDStr := os.Args[3]
+    stepID, err := strconv.Atoi(stepIDStr)
+    if err != nil {
+        fmt.Printf("Error: invalid step ID '%s'. Must be an integer.\n", stepIDStr)
+        os.Exit(1)
+    }
+
+    // Parse optional flags after ID
+    force := false
+    for i := 4; i < len(os.Args); i++ {
+        switch os.Args[i] {
+        case "--force":
+            force = true
+        case "-h", "--help":
+            helpPkg.PrintStepGoldenHelp()
+            os.Exit(0)
+        }
+    }
+
+    // Ensure loggers are initialized like other step handlers
+    var logWriter io.Writer = os.Stdout
+    internal.InitStepLogger(logWriter)
+    models.InitStepLogger(logWriter)
+
+    // Restrict rubric_shell processor to Golden-only assignments for this invocation
+    restore := internal.SetRubricRunModeForCLI("golden-only")
+    defer restore()
+
+    fmt.Printf("Running step ID %d in Golden-only mode...\n", stepID)
+    if err := internal.ProcessSpecificStep(db, stepID, force, true /*golden*/, false /*original*/); err != nil {
+        fmt.Printf("Error processing step: %v\n", err)
+        os.Exit(1)
+    }
+    fmt.Println("Step (Golden-only) processed successfully.")
 }

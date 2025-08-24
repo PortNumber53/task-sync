@@ -414,7 +414,7 @@ func printChildren(nodes []*StepNode, prefix string) {
 func ProcessSpecificStep(db *sql.DB, stepID int, force bool, golden bool, original bool) error {
 	// Fetch the full step details including task_id
 	var stepExec models.StepExec
-	err := db.QueryRow("SELECT s.id, s.task_id, s.title, s.settings, t.base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1", stepID).Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings, &stepExec.BasePath)
+	err := db.QueryRow("SELECT s.id, s.task_id, s.title, s.settings, COALESCE(t.local_path, '') AS base_path FROM steps s JOIN tasks t ON s.task_id = t.id WHERE s.id = $1", stepID).Scan(&stepExec.StepID, &stepExec.TaskID, &stepExec.Title, &stepExec.Settings, &stepExec.BasePath)
 	if err != nil {
 		hostname, errHost := os.Hostname()
 		if errHost != nil {
@@ -646,13 +646,25 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 		logger.Printf("Command failed: %s", string(output))
 		return fmt.Errorf("failed to create docker volume: %w", err)
 	}
+	// Ensure base path is set and absolute to avoid invalid "-v <relative>:/mount" which Docker treats as named volumes
+	base := se.BasePath
+	if base == "" {
+		return fmt.Errorf("task local_path is empty; please set tasks.local_path for task %d to a valid absolute path", se.TaskID)
+	}
+	if !filepath.IsAbs(base) {
+		if abs, absErr := filepath.Abs(base); absErr == nil {
+			base = abs
+		} else {
+			return fmt.Errorf("failed to resolve absolute local_path %q: %w", base, absErr)
+		}
+	}
 
-	appHostPath := filepath.Join(se.BasePath, "original/") + "/"
-	solution1Path := filepath.Join(se.BasePath, "volume_solution1/") + "/"
-	solution2Path := filepath.Join(se.BasePath, "volume_solution2/") + "/"
-	solution3Path := filepath.Join(se.BasePath, "volume_solution3/") + "/"
-	solution4Path := filepath.Join(se.BasePath, "volume_solution4/") + "/"
-	goldenPath := filepath.Join(se.BasePath, "volume_golden/") + "/"
+	appHostPath := filepath.Join(base, "original") + "/"
+	solution1Path := filepath.Join(base, "volume_solution1") + "/"
+	solution2Path := filepath.Join(base, "volume_solution2") + "/"
+	solution3Path := filepath.Join(base, "volume_solution3") + "/"
+	solution4Path := filepath.Join(base, "volume_solution4") + "/"
+	goldenPath := filepath.Join(base, "volume_golden") + "/"
 	containerName := fmt.Sprintf("extract_vol_container_%d", se.StepID)
 	// Best-effort cleanup in case a previous run left the helper container
 	preCleanup := CommandFunc("docker", "rm", "-f", containerName)

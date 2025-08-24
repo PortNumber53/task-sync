@@ -16,7 +16,7 @@ import (
 // processAllRubricSetSteps finds and executes all rubric_set steps.
 func processAllRubricSetSteps(db *sql.DB, logger *log.Logger) error {
 	query := `
-		SELECT s.id, s.task_id, s.title, s.settings, t.base_path
+		SELECT s.id, s.task_id, s.title, s.settings, COALESCE(t.local_path, '') AS base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE s.settings ? 'rubric_set'

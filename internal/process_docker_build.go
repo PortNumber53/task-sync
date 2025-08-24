@@ -19,7 +19,7 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 	if stepID != 0 {
 		var step models.StepExec
 		query := `
-            SELECT s.id, s.task_id, s.title, s.settings, t.base_path
+            SELECT s.id, s.task_id, s.title, s.settings, COALESCE(t.local_path, '') AS base_path
             FROM steps s
             JOIN tasks t ON s.task_id = t.id
             WHERE s.id = $1 AND s.settings ? 'docker_build'
@@ -36,7 +36,7 @@ func processDockerBuildSteps(db *sql.DB, stepLogger *log.Logger, stepID int) {
 		steps = append(steps, step)
 	} else {
 		query := `
-            SELECT s.id, s.task_id, s.title, s.settings, t.base_path
+            SELECT s.id, s.task_id, s.title, s.settings, COALESCE(t.local_path, '') AS base_path
             FROM steps s
             JOIN tasks t ON s.task_id = t.id
             WHERE t.status = 'active' AND s.settings ? 'docker_build'

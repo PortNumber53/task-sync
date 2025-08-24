@@ -32,8 +32,8 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	var taskSettings TaskSettings
 	if db == nil {
 		// Test context: avoid DB usage. Do not rely on step.container_folder.
-		// Default to the commonly used app folder for this project.
-		taskSettings.AppFolder = "/app/ansible"
+		// Do not hardcode app_folder here; it must come from tasks.settings.app_folder.
+		// Leave taskSettings.AppFolder empty so downstream logic or callers must provide it.
 	} else {
 		ts, err := GetTaskSettings(db, stepExec.TaskID)
 		if err != nil {

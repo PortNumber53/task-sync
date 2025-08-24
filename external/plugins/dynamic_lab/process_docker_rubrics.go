@@ -72,12 +72,12 @@ func calculateFileHash(filePath string) (string, error) {
 
 // processDockerRubricsSteps processes docker rubrics steps for active tasks
 func processDockerRubricsSteps(db *sql.DB) {
-	query := `SELECT s.id, s.task_id, s.settings, t.base_path
+	query := `SELECT s.id, s.task_id, s.settings, COALESCE(t.local_path, '') AS base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE t.status = 'active'
-		AND t.base_path IS NOT NULL
-		AND t.base_path <> ''
+		AND t.local_path IS NOT NULL
+		AND t.local_path <> ''
 		AND s.settings::text LIKE '%docker_rubrics%'`
 
 	rows, err := db.Query(query)

@@ -403,18 +403,33 @@ func ReportTask(db *sql.DB, taskID int) error {
 									resultMap[k] = str
 								}
 							}
-							for _, patch := range []string{"solution1.patch", "solution2.patch", "solution3.patch", "solution4.patch", "original", "golden.patch"} {
-								if output, ok := resultMap[patch]; ok {
+							// Helper to append icon for a specific key
+							appendIcon := func(output string, ok bool) {
+								if ok {
 									if strings.Contains(output, passMarker) {
 										icons += "✅ "
-									} else if strings.Contains(output, failMarker) {
-										icons += "❌ "
-									} else {
-										icons += "❔ "
+										return
 									}
-								} else {
-									icons += "❔ "
+									if strings.Contains(output, failMarker) {
+										icons += "❌ "
+										return
+									}
 								}
+								icons += "❔ "
+							}
+
+							// Solutions 1..4
+							appendIcon(resultMap["solution1.patch"], resultMap["solution1.patch"] != "")
+							appendIcon(resultMap["solution2.patch"], resultMap["solution2.patch"] != "")
+							appendIcon(resultMap["solution3.patch"], resultMap["solution3.patch"] != "")
+							appendIcon(resultMap["solution4.patch"], resultMap["solution4.patch"] != "")
+							// Original
+							appendIcon(resultMap["original"], resultMap["original"] != "")
+							// Golden: prefer 'golden', fallback to 'golden.patch'
+							if out, ok := resultMap["golden"]; ok && out != "" {
+								appendIcon(out, true)
+							} else {
+								appendIcon(resultMap["golden.patch"], resultMap["golden.patch"] != "")
 							}
 						} else {
 							icons = "❔ ❔ ❔ ❔ ❔ ❔ "
@@ -464,7 +479,10 @@ func ReportTask(db *sql.DB, taskID int) error {
     if size, ok := sizeMap["original"]; ok {
         fmt.Printf("Original   combined output: %*s bytes\n", maxWidth, addCommas(size))
     }
-    if size, ok := sizeMap["golden.patch"]; ok {
+    // Golden combined output: prefer 'golden' then fallback to 'golden.patch'
+    if size, ok := sizeMap["golden"]; ok {
+        fmt.Printf("Golden     combined output: %*s bytes\n", maxWidth, addCommas(size))
+    } else if size, ok := sizeMap["golden.patch"]; ok {
         fmt.Printf("Golden     combined output: %*s bytes\n", maxWidth, addCommas(size))
     }
     return nil

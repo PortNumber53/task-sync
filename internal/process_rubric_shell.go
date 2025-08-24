@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -14,11 +15,29 @@ import (
 	"github.com/PortNumber53/task-sync/pkg/models"
 )
 
+// rubricRunMode controls which assignments are included by ProcessRubricShellStep
+// "" (empty): default behavior for task run -> solutions only
+// "golden-only": only golden container logic
+var rubricRunMode string
+
+// setRubricRunMode temporarily sets rubricRunMode and returns a restore func
+func setRubricRunMode(mode string) func() {
+    prev := rubricRunMode
+    rubricRunMode = mode
+    return func() { rubricRunMode = prev }
+}
+
+// SetRubricRunModeForCLI exposes rubricRunMode setter for CLI commands and returns
+// a restore function to revert to the previous mode when done.
+func SetRubricRunModeForCLI(mode string) func() {
+    return setRubricRunMode(mode)
+}
+
 // processAllRubricShellSteps finds and executes all rubric_shell steps.
 func processAllRubricShellSteps(db *sql.DB, logger *log.Logger, force bool, golden bool) error {
 	// Query for all steps of type 'rubric_shell'.
 	query := `
-		SELECT s.id, s.task_id, s.title, s.settings, t.base_path
+		SELECT s.id, s.task_id, s.title, s.settings, COALESCE(t.local_path, '') AS base_path
 		FROM steps s
 		JOIN tasks t ON s.task_id = t.id
 		WHERE s.settings ? 'rubric_shell'
@@ -142,42 +161,66 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 	}
 	logger.Printf("Rubric_shell step %d for criterion '%s' will execute: rubric_set hash now '%s', last run '%s'", se.StepID, rsConfig.CriterionID, rubricSetHash, rsConfig.HashLastRun)
 
-	// Build assignments strictly from task.settings.containers_map (ignore any step-level assignments)
-	rsConfig.Assignments = nil
-	if taskSettings != nil && taskSettings.ContainersMap != nil {
-		// Only include solutionN patches that actually exist in rsConfig.Files
-		for i := 1; i <= 4; i++ {
-			patch := fmt.Sprintf("solution%d.patch", i)
-			if _, ok := rsConfig.Files[patch]; !ok {
-				continue
-			}
-			key := fmt.Sprintf("solution%d", i)
-			if c, ok := taskSettings.ContainersMap[key]; ok && c.ContainerName != "" {
+    // Build assignments strictly from task.settings.containers_map (ignore any step-level assignments)
+    rsConfig.Assignments = nil
+    if taskSettings != nil && taskSettings.ContainersMap != nil {
+        // Debug: show available containers_map entries
+        logger.Printf("[TRACE] task.settings.containers_map keys: %v", func() []string {
+            keys := make([]string, 0, len(taskSettings.ContainersMap))
+            for k := range taskSettings.ContainersMap { keys = append(keys, k) }
+            return keys
+        }())
+        // Solutions are included by default for normal task run (golden == false),
+        // and also when --golden is specified for task run (golden == true) unless in golden-only mode.
+        if rubricRunMode != "golden-only" {
+            for i := 1; i <= 4; i++ {
+                patch := fmt.Sprintf("solution%d.patch", i)
+                if _, ok := rsConfig.Files[patch]; !ok {
+                    continue
+                }
+                key := fmt.Sprintf("solution%d", i)
+                if c, ok := taskSettings.ContainersMap[key]; ok && c.ContainerName != "" {
+                    rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
+                        Patch:     patch,
+                        Container: c.ContainerName,
+                    })
+                }
+            }
+        }
+
+		// Golden path: include when (a) global golden flag set OR (b) golden-only mode.
+        // Do NOT require golden.patch to exist here; golden mode may run without it.
+        if golden || rubricRunMode == "golden-only" {
+            goldenName := ""
+            if c, ok := taskSettings.ContainersMap["golden"]; ok && c.ContainerName != "" {
+                goldenName = c.ContainerName
+            } else {
+                // Fallback: infer golden container name
+                infer := models.GenerateDVContainerNameForBase(se.TaskID, "golden")
+                running, _ := models.CheckContainerExists(infer)
+                if running {
+                    goldenName = infer
+                    logger.Printf("[GOLDEN] containers_map missing golden; inferred running container '%s'", infer)
+                } else {
+                    logger.Printf("[GOLDEN] No golden container found in containers_map and inference '%s' not running", infer)
+                }
+            }
+            if goldenName != "" {
+                rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
+                    Patch:     "golden.patch",
+                    Container: goldenName,
+                })
+            }
+        }
+
+		// Original baseline: include only for task run --golden (not for golden-only mode, not for plain runs)
+		if rubricRunMode != "golden-only" && golden {
+			if c, ok := taskSettings.ContainersMap["original"]; ok && c.ContainerName != "" {
 				rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
-					Patch:     patch,
+					Patch:     "original",
 					Container: c.ContainerName,
 				})
 			}
-		}
-		// Add golden path if allowed by --golden and golden.patch key exists in files
-		if golden {
-			if _, ok := rsConfig.Files["golden.patch"]; ok {
-				if c, ok := taskSettings.ContainersMap["golden"]; ok && c.ContainerName != "" {
-					rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
-						Patch:     "golden.patch",
-						Container: c.ContainerName,
-					})
-				}
-			}
-		} else {
-			logger.Printf("[GOLDEN] --golden not set; skipping golden container assignment if present")
-		}
-		// Add original path (no patch application), always if container is available
-		if c, ok := taskSettings.ContainersMap["original"]; ok && c.ContainerName != "" {
-			rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
-				Patch:     "original",
-				Container: c.ContainerName,
-			})
 		}
 	}
 	// If golden not enabled, ensure any accidental golden assignments are filtered out
@@ -268,16 +311,16 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 				mode = "original"
 			}
 
-			patchFile := patchFileMap[assignment.Container]
-			if mode != "original" {
-				if patchFile == "" {
-					logger.Printf("ERROR: No patch file found in rsConfig.Files for container '%s' (assignment patch '%s') in step %d. Skipping.", assignment.Container, assignment.Patch, se.StepID)
-					resultsMu.Lock()
-					results[assignment.Patch] = "Error: No patch file found"
-					resultsMu.Unlock()
-					return
-				}
-			}
+			            patchFile := patchFileMap[assignment.Container]
+            if mode == "solution" {
+                if patchFile == "" {
+                    logger.Printf("ERROR: No patch file found in rsConfig.Files for container '%s' (assignment patch '%s') in step %d. Skipping.", assignment.Container, assignment.Patch, se.StepID)
+                    resultsMu.Lock()
+                    results[assignment.Patch] = "Error: No patch file found"
+                    resultsMu.Unlock()
+                    return
+                }
+            }
 
 			if mode == "original" {
 				logger.Printf("Processing ORIGINAL baseline in container %s for criterion %s", assignment.Container, rsConfig.CriterionID)
@@ -307,11 +350,16 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 			logger.Printf("Processing solution patch %s (resolved file: %s) in container %s for criterion %s", assignment.Patch, patchFile, assignment.Container, rsConfig.CriterionID)
 
 			// Perform the test sequence: reset git, apply solution/golden patch, apply held-out tests patch, run command
-			output, err := runTestSequence(se.BasePath, appFolder, rsConfig, assignment.Container, patchFile, rsConfig.Command, rsConfig.Rerun, logger)
+			output, err := runTestSequence(se.BasePath, appFolder, rsConfig, assignment.Container, assignment.Patch, rsConfig.Command, rsConfig.Rerun, logger)
 			if err != nil {
-				logger.Printf("ERROR: Test sequence failed for patch %s: %v", patchFile, err)
+				logger.Printf("ERROR: Test sequence failed for patch %s: %v", assignment.Patch, err)
+				// Use stable key: 'golden' for golden runs, else the patch filename
+				resultKey := assignment.Patch
+				if assignment.Patch == "golden.patch" {
+					resultKey = "golden"
+				}
 				resultsMu.Lock()
-				results[patchFile] = fmt.Sprintf("Error: %v\nOutput:\n%s", err, output)
+				results[resultKey] = fmt.Sprintf("Error: %v\nOutput:\n%s", err, output)
 				resultsMu.Unlock()
 			} else {
 				status := "Unknown"
@@ -322,8 +370,13 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 				} else {
 					status = "Success"
 				}
+				// Use stable key: 'golden' for golden runs, else the patch filename
+				resultKey := assignment.Patch
+				if assignment.Patch == "golden.patch" {
+					resultKey = "golden"
+				}
 				resultsMu.Lock()
-				results[patchFile] = fmt.Sprintf("%s\nOutput: %s", status, output)
+				results[resultKey] = fmt.Sprintf("%s\nOutput: %s", status, output)
 				resultsMu.Unlock()
 				logger.Printf("Test %s for patch %s: %s\nOutput: %s", status, assignment.Patch, status, output)
 			}
@@ -375,41 +428,85 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 	return nil
 }
 
-// Helper function to run the test sequence (adapt based on existing code)
 func runTestSequence(basePath string, appFolder string, rsConfig models.RubricShellConfig, container string, patch string, command string, rerun bool, logger *log.Logger) (string, error) {
 	// Add debug log for base_path
 	logger.Printf("Debug: runTestSequence base_path '%s' for patch %s", basePath, patch)
 
 	// Step 1: Ensure clean git state in the container
-	// Execute git cleanup commands in proper directory
-	cleanupCmds := [][]string{
-		{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git checkout -- ."},
-		{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git clean -fdx"},
-		{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git reset --hard HEAD"},
-		{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git checkout -- ."},
-		{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git clean -fdx"},
-		{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git stash clear"},
-		{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && find '" + appFolder + "' -name '*.orig' -delete"},
-		{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && find '" + appFolder + "' -name '*.rej' -delete"},
-	}
-
-	logger.Printf("[NORMAL] Performing git cleanup in container %s", container)
-
-	for i, c := range cleanupCmds {
-		// Guard: remove a stale .git/index.lock if present before each cleanup step
-		guardCmdSlice := []string{"docker", "exec", "-w", appFolder, container, "sh", "-c", "if [ -e .git/index.lock ]; then echo '[guard] removing .git/index.lock'; rm -f .git/index.lock; fi"}
-		logger.Printf("Debug: runTestSequence guard before cleanup %d: %v", i+1, guardCmdSlice)
-		guardCmd := exec.Command(guardCmdSlice[0], guardCmdSlice[1:]...)
-		if gout, gerr := guardCmd.CombinedOutput(); gerr != nil {
-			logger.Printf("Warning: guard before cleanup %d failed: %v\nOutput: %s", i+1, gerr, string(gout))
-			// Continue regardless; attempt the cleanup command anyway
+	// Golden mode: revert ONLY files/folders touched by held_out_tests.patch
+	if patch == "golden.patch" {
+		// Compute touched paths from held_out_tests.patch
+		touched, perr := parsePatchTouchedPaths(basePath, "held_out_tests.patch")
+		if perr != nil {
+			logger.Printf("[GOLDEN] WARNING: failed to parse held_out_tests.patch for selective cleanup: %v (skipping cleanup)", perr)
+		} else if len(touched) == 0 {
+			logger.Printf("[GOLDEN] No paths parsed from held_out_tests.patch; skipping cleanup")
+		} else {
+			// Build a space-separated, single-quoted path list
+			quoted := make([]string, 0, len(touched))
+			for _, p := range touched {
+				// Prevent leading ./ duplication; ensure relative paths
+				p = strings.TrimPrefix(p, "./")
+				if p == "" {
+					continue
+				}
+				quoted = append(quoted, "'"+strings.ReplaceAll(p, "'", "'\\''")+"'")
+			}
+			if len(quoted) > 0 {
+				argList := strings.Join(quoted, " ")
+				cmds := []string{
+					"sync && if [ -e .git/index.lock ]; then rm -f .git/index.lock; fi",
+					"sync && git checkout -- " + argList,
+					"sync && git reset --hard HEAD -- " + argList,
+					// Use -d (directories) only where applicable; git clean supports pathspecs
+					"sync && git clean -fd -- " + argList,
+				}
+				// Also remove .orig/.rej only under touched paths
+				for _, p := range quoted {
+					cmds = append(cmds, "sync && find "+p+" -name '*.orig' -delete || true")
+					cmds = append(cmds, "sync && find "+p+" -name '*.rej' -delete || true")
+				}
+				logger.Printf("[GOLDEN] Performing selective cleanup for paths from held_out_tests.patch in container %s: %v", container, touched)
+				for i, sc := range cmds {
+					logger.Printf("Debug: selective cleanup %d: %s", i+1, sc)
+					cmd := exec.Command("docker", "exec", "-w", appFolder, container, "sh", "-c", sc)
+					if out, err := cmd.CombinedOutput(); err != nil {
+						logger.Printf("Warning: selective cleanup step %d failed: %v\nOutput: %s", i+1, err, string(out))
+					}
+				}
+			}
+		}
+	} else {
+		// Solutions and others: keep existing broader cleanup
+		cleanupCmds := [][]string{
+			{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git checkout -- ."},
+			{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git clean -fdx"},
+			{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git reset --hard HEAD"},
+			{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git checkout -- ."},
+			{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git clean -fdx"},
+			{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && git stash clear"},
+			{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && find '" + appFolder + "' -name '*.orig' -delete"},
+			{"docker", "exec", "-w", appFolder, container, "sh", "-c", "sync && find '" + appFolder + "' -name '*.rej' -delete"},
 		}
 
-		logger.Printf("Debug: runTestSequence cleanup command %d: %v", i+1, c)
-		cmd := exec.Command(c[0], c[1:]...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			logger.Printf("Warning: cleanup command %d failed: %v\nOutput: %s", i+1, err, string(out))
-			// Continue with other cleanup commands even if one fails
+		logger.Printf("[NORMAL] Performing git cleanup in container %s", container)
+
+		for i, c := range cleanupCmds {
+			// Guard: remove a stale .git/index.lock if present before each cleanup step
+			guardCmdSlice := []string{"docker", "exec", "-w", appFolder, container, "sh", "-c", "if [ -e .git/index.lock ]; then echo '[guard] removing .git/index.lock'; rm -f .git/index.lock; fi"}
+			logger.Printf("Debug: runTestSequence guard before cleanup %d: %v", i+1, guardCmdSlice)
+			guardCmd := exec.Command(guardCmdSlice[0], guardCmdSlice[1:]...)
+			if gout, gerr := guardCmd.CombinedOutput(); gerr != nil {
+				logger.Printf("Warning: guard before cleanup %d failed: %v\nOutput: %s", i+1, gerr, string(gout))
+				// Continue regardless; attempt the cleanup command anyway
+			}
+
+			logger.Printf("Debug: runTestSequence cleanup command %d: %v", i+1, c)
+			cmd := exec.Command(c[0], c[1:]...)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				logger.Printf("Warning: cleanup command %d failed: %v\nOutput: %s", i+1, err, string(out))
+				// Continue with other cleanup commands even if one fails
+			}
 		}
 	}
 
@@ -420,51 +517,35 @@ func runTestSequence(basePath string, appFolder string, rsConfig models.RubricSh
 		if cpErr != nil {
 			return string(cpOut), fmt.Errorf("copy pre_patch.patch failed: %w", cpErr)
 		}
-		execOut, execErr := exec.Command("docker", "exec", container, "bash", "-c", escapeSingleQuotes("bash "+tmpPrePatchPath)).CombinedOutput()
+		// Ensure executable and run with working directory set to appFolder
+		cmdStr := "chmod +x " + tmpPrePatchPath + " && " + tmpPrePatchPath
+		execOut, execErr := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "-lc", escapeSingleQuotes(cmdStr)).CombinedOutput()
 		if execErr != nil {
-			return string(execOut), fmt.Errorf("execute pre_patch.patch failed: %w", execErr)
+			return string(execOut), fmt.Errorf("execute pre_patch script failed: %w", execErr)
 		}
-		logger.Printf("Applied pre_patch.patch in container %s", container)
+		logger.Printf("Executed pre_patch script in container %s", container)
 	}
 
-	// Step 3: Apply solution/golden patch using git apply
-	if _, ok := rsConfig.Files[patch]; ok {
-		// Special-case: if golden.patch exists but is empty, skip applying and continue
-		if patch == "golden.patch" {
-			fullPath := filepath.Join(basePath, patch)
-			if fi, err := os.Stat(fullPath); err == nil && fi.Size() == 0 {
-				logger.Printf("Golden patch is empty; skipping apply in container %s", container)
-			} else {
-				containerPatchPath := "/tmp/" + patch
-				cpOut, cpErr := exec.Command("docker", "cp", filepath.Join(basePath, patch), fmt.Sprintf("%s:%s", container, containerPatchPath)).CombinedOutput()
-				if cpErr != nil {
-					// For golden, continue even if we fail to copy/apply the patch
-					logger.Printf("WARNING: Copy golden patch failed (continuing without it): %v\nOutput: %s", cpErr, string(cpOut))
-				} else {
-					applyOut, applyErr := exec.Command("docker", "exec", container, "git", "apply", containerPatchPath).CombinedOutput()
-					if applyErr != nil {
-						logger.Printf("WARNING: Golden patch apply failed for criterion %s (continuing without it): %v\nOutput: %s", rsConfig.CriterionID, applyErr, string(applyOut))
-					} else {
-						logger.Printf("Applied solution patch %s in container %s", patch, container)
-					}
-				}
-			}
-		} else {
+	// Step 3: Apply solution patch using git apply (skip golden by design)
+	if patch == "golden.patch" {
+		logger.Printf("[GOLDEN] Skipping golden.patch application by design in container %s", container)
+	} else {
+		if _, ok := rsConfig.Files[patch]; ok {
 			containerPatchPath := "/tmp/" + patch
 			cpOut, cpErr := exec.Command("docker", "cp", filepath.Join(basePath, patch), fmt.Sprintf("%s:%s", container, containerPatchPath)).CombinedOutput()
 			if cpErr != nil {
 				return string(cpOut), fmt.Errorf("copy solution patch %s failed: %w", patch, cpErr)
 			}
-			applyOut, applyErr := exec.Command("docker", "exec", container, "git", "apply", containerPatchPath).CombinedOutput()
+			applyOut, applyErr := exec.Command("docker", "exec", "-w", appFolder, container, "git", "apply", containerPatchPath).CombinedOutput()
 			if applyErr != nil {
 				logger.Printf("ERROR: Solution patch %s apply failed for criterion %s: %v\nOutput: %s", patch, rsConfig.CriterionID, applyErr, string(applyOut))
 				return string(applyOut), fmt.Errorf("solution patch %s apply failed: %w", patch, applyErr)
 			}
 			logger.Printf("Applied solution patch %s in container %s", patch, container)
+		} else {
+			logger.Printf("Solution patch '%s' not found in rsConfig.Files", patch)
+			return "", fmt.Errorf("solution patch '%s' not found in rsConfig.Files", patch)
 		}
-	} else {
-		logger.Printf("Solution patch '%s' not found in rsConfig.Files", patch)
-		return "", fmt.Errorf("solution patch '%s' not found in rsConfig.Files", patch)
 	}
 
 	// Step 4: Apply held-out tests patch using git apply
@@ -531,78 +612,129 @@ func runTestSequence(basePath string, appFolder string, rsConfig models.RubricSh
 
 // escapeSingleQuotes escapes single quotes for safe use inside bash -c '<cmd>'
 func escapeSingleQuotes(s string) string {
-	return strings.ReplaceAll(s, "'", "'\\''")
+    return strings.ReplaceAll(s, "'", "'\\''")
 }
 
 // runOriginalSequence runs the rubric on the unmodified ORIGINAL container state.
 // It performs git cleanup, applies only held_out_tests.patch, and runs the command.
 func runOriginalSequence(basePath string, appFolder string, rsConfig models.RubricShellConfig, container string, command string, rerun bool, logger *log.Logger) (string, error) {
-	// Step 1: Ensure clean git state in the container
-	cleanupCmds := [][]string{
-		{"docker", "exec", "-w", appFolder, container, "git", "clean", "-fdx"},
-		{"docker", "exec", "-w", appFolder, container, "git", "reset", "--hard", "HEAD"},
-		{"docker", "exec", "-w", appFolder, container, "git", "checkout", "--", "."},
-		{"docker", "exec", "-w", appFolder, container, "git", "stash", "clear"},
-		{"docker", "exec", "-w", appFolder, container, "find", appFolder, "-name", "*.orig", "-delete"},
-		{"docker", "exec", "-w", appFolder, container, "find", appFolder, "-name", "*.rej", "-delete"},
-	}
-	logger.Printf("[NORMAL] Performing git cleanup in container %s (ORIGINAL)", container)
-	for i, c := range cleanupCmds {
-		cmd := exec.Command(c[0], c[1:]...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			logger.Printf("Warning: cleanup command %d failed (ORIGINAL): %v\nOutput: %s", i+1, err, string(out))
-		}
-	}
+    // Step 1: Ensure clean git state in the container
+    cleanupCmds := [][]string{
+        {"docker", "exec", "-w", appFolder, container, "git", "clean", "-fdx"},
+        {"docker", "exec", "-w", appFolder, container, "git", "reset", "--hard", "HEAD"},
+        {"docker", "exec", "-w", appFolder, container, "git", "checkout", "--", "."},
+        {"docker", "exec", "-w", appFolder, container, "git", "stash", "clear"},
+        {"docker", "exec", "-w", appFolder, container, "find", appFolder, "-name", "*.orig", "-delete"},
+        {"docker", "exec", "-w", appFolder, container, "find", appFolder, "-name", "*.rej", "-delete"},
+    }
+    logger.Printf("[NORMAL] Performing git cleanup in container %s (ORIGINAL)", container)
+    for i, c := range cleanupCmds {
+        cmd := exec.Command(c[0], c[1:]...)
+        if out, err := cmd.CombinedOutput(); err != nil {
+            logger.Printf("Warning: cleanup command %d failed (ORIGINAL): %v\nOutput: %s", i+1, err, string(out))
+        }
+    }
 
-	// Step 2: Apply held-out tests patch using git apply
-	if _, ok := rsConfig.Files["held_out_tests.patch"]; ok {
-		fullHeldOutTestsPath := filepath.Join(basePath, "held_out_tests.patch")
-		if _, err := os.Stat(fullHeldOutTestsPath); os.IsNotExist(err) {
-			return "", fmt.Errorf("held_out_tests.patch does not exist at %s", fullHeldOutTestsPath)
-		} else if err != nil {
-			return "", fmt.Errorf("error checking held_out_tests.patch: %w", err)
-		}
-		logger.Printf("Confirmed held_out_tests.patch exists at %s (ORIGINAL)", fullHeldOutTestsPath)
-		containerHeldOutTestsPatchPath := filepath.Join(appFolder, "held_out_tests.patch")
-		cmd := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath))
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("copy held-out tests patch failed (ORIGINAL): %w", err)
-		}
-		cmd = exec.Command("docker", "exec", "-w", appFolder, container, "git", "apply", containerHeldOutTestsPatchPath)
-		if err := cmd.Run(); err != nil {
-			logger.Printf("ERROR: Held-out tests patch apply failed for criterion %s (ORIGINAL): %v", rsConfig.CriterionID, err)
-			return "", fmt.Errorf("held-out tests patch apply failed (ORIGINAL): %w", err)
-		}
-		logger.Printf("Applied held_out_tests.patch in container %s (ORIGINAL)", container)
-	} else {
-		logger.Println("held_out_tests.patch not found in rsConfig.Files (ORIGINAL)")
-		return "", fmt.Errorf("held_out_tests.patch not found in rsConfig.Files (ORIGINAL)")
-	}
+    // Step 2: Apply held-out tests patch using git apply
+    if _, ok := rsConfig.Files["held_out_tests.patch"]; ok {
+        fullHeldOutTestsPath := filepath.Join(basePath, "held_out_tests.patch")
+        if _, err := os.Stat(fullHeldOutTestsPath); os.IsNotExist(err) {
+            return "", fmt.Errorf("held_out_tests.patch does not exist at %s", fullHeldOutTestsPath)
+        } else if err != nil {
+            return "", fmt.Errorf("error checking held_out_tests.patch: %w", err)
+        }
+        logger.Printf("Confirmed held_out_tests.patch exists at %s (ORIGINAL)", fullHeldOutTestsPath)
+        containerHeldOutTestsPatchPath := filepath.Join(appFolder, "held_out_tests.patch")
+        cmd := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath))
+        if err := cmd.Run(); err != nil {
+            return "", fmt.Errorf("copy held-out tests patch failed (ORIGINAL): %w", err)
+        }
+        cmd = exec.Command("docker", "exec", "-w", appFolder, container, "git", "apply", containerHeldOutTestsPatchPath)
+        if err := cmd.Run(); err != nil {
+            logger.Printf("ERROR: Held-out tests patch apply failed for criterion %s (ORIGINAL): %v", rsConfig.CriterionID, err)
+            return "", fmt.Errorf("held-out tests patch apply failed (ORIGINAL): %w", err)
+        }
+        logger.Printf("Applied held_out_tests.patch in container %s (ORIGINAL)", container)
+    } else {
+        logger.Println("held_out_tests.patch not found in rsConfig.Files (ORIGINAL)")
+        return "", fmt.Errorf("held_out_tests.patch not found in rsConfig.Files (ORIGINAL)")
+    }
 
-	// Step 3: Run the rubric test command and capture output
-	scriptFile, err := os.CreateTemp("", "rubric-script-*.sh")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp script file (ORIGINAL): %w", err)
-	}
-	defer os.Remove(scriptFile.Name())
-	scriptContent := fmt.Sprintf("#!/bin/bash\n%s", command)
-	if _, err := scriptFile.WriteString(scriptContent); err != nil {
-		return "", fmt.Errorf("failed to write to temp script file (ORIGINAL): %w", err)
-	}
-	scriptFile.Close()
-	if err := os.Chmod(scriptFile.Name(), 0755); err != nil {
-		return "", fmt.Errorf("failed to make script executable (ORIGINAL): %w", err)
-	}
-	containerScriptPath := "/tmp/run_rubric.sh"
-	copyCmd := exec.Command("docker", "cp", scriptFile.Name(), fmt.Sprintf("%s:%s", container, containerScriptPath))
-	if err := copyCmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to copy script to container (ORIGINAL): %w", err)
-	}
-	cmd := exec.Command("docker", "exec", "-w", appFolder, container, "/bin/bash", containerScriptPath)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Error running rubric script (ORIGINAL): %v\nOutput:\n%s", err, string(output))
-		return string(output), err
-	}
-	return string(output), nil
+    // Step 3: Run the rubric test command and capture output
+    scriptFile, err := os.CreateTemp("", "rubric-script-*.sh")
+    if err != nil {
+        return "", fmt.Errorf("failed to create temp script file (ORIGINAL): %w", err)
+    }
+    defer os.Remove(scriptFile.Name())
+    scriptContent := fmt.Sprintf("#!/bin/bash\n%s", command)
+    if _, err := scriptFile.WriteString(scriptContent); err != nil {
+        return "", fmt.Errorf("failed to write to temp script file (ORIGINAL): %w", err)
+    }
+    scriptFile.Close()
+    if err := os.Chmod(scriptFile.Name(), 0755); err != nil {
+        return "", fmt.Errorf("failed to make script executable (ORIGINAL): %w", err)
+    }
+    containerScriptPath := "/tmp/run_rubric.sh"
+    copyCmd := exec.Command("docker", "cp", scriptFile.Name(), fmt.Sprintf("%s:%s", container, containerScriptPath))
+    if err := copyCmd.Run(); err != nil {
+        return "", fmt.Errorf("failed to copy script to container (ORIGINAL): %w", err)
+    }
+    cmd := exec.Command("docker", "exec", "-w", appFolder, container, "/bin/bash", containerScriptPath)
+    output, err := cmd.CombinedOutput()
+    if err != nil {
+        logger.Printf("Error running rubric script (ORIGINAL): %v\nOutput:\n%s", err, string(output))
+        return string(output), err
+    }
+    return string(output), nil
+}
+
+// parsePatchTouchedPaths reads a unified diff patch file at basePath/patchFileName and
+// returns a de-duplicated list of file or directory paths that are touched by the patch.
+func parsePatchTouchedPaths(basePath string, patchFileName string) ([]string, error) {
+    patchPath := filepath.Join(basePath, patchFileName)
+    f, err := os.Open(patchPath)
+    if err != nil {
+        return nil, err
+    }
+    defer f.Close()
+
+    scanner := bufio.NewScanner(f)
+    seen := make(map[string]struct{})
+    addPath := func(p string) {
+        if strings.HasPrefix(p, "a/") || strings.HasPrefix(p, "b/") {
+            p = p[2:]
+        }
+        p = strings.TrimSpace(p)
+        if p == "" || p == "/dev/null" {
+            return
+        }
+        seen[p] = struct{}{}
+    }
+
+    for scanner.Scan() {
+        line := scanner.Text()
+        if strings.HasPrefix(line, "diff --git ") {
+            parts := strings.Fields(line)
+            if len(parts) >= 4 {
+                addPath(parts[2])
+                addPath(parts[3])
+            }
+            continue
+        }
+        if strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- ") {
+            fields := strings.Fields(line)
+            if len(fields) >= 2 {
+                addPath(fields[1])
+            }
+        }
+    }
+    if err := scanner.Err(); err != nil {
+        return nil, err
+    }
+
+    paths := make([]string, 0, len(seen))
+    for p := range seen {
+        paths = append(paths, p)
+    }
+    return paths, nil
 }

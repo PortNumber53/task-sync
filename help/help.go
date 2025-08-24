@@ -200,6 +200,7 @@ Available Commands:
   info       Show detailed information about a step
   list       List all steps
   run        Run a specific step by ID
+  golden     Run a specific rubric_shell step in Golden-only mode
 
 Use "task-sync step <command> --help" for more information about a command.
 `
@@ -243,6 +244,29 @@ Examples:
 
   # Show this help message
   task-sync task delete --help`
+    fmt.Println(helpText)
+}
+
+// PrintStepGoldenHelp prints help for the step golden command
+func PrintStepGoldenHelp() {
+    helpText := `Run a specific rubric_shell step in Golden-only mode.
+
+Usage:
+  task-sync step golden STEP_ID [--force]
+
+Arguments:
+  STEP_ID    ID of the rubric_shell step to run
+
+Options:
+  --force    Force run even if hashes indicate up-to-date
+  -h, --help Show this help message and exit
+
+Examples:
+  # Run rubric_shell step 42 against the Golden container only
+  task-sync step golden 42
+
+  # Force re-run, ignoring up-to-date checks
+  task-sync step golden 42 --force`
     fmt.Println(helpText)
 }
 

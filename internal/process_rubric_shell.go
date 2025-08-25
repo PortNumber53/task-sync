@@ -380,6 +380,21 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 				resultsMu.Unlock()
 				logger.Printf("Test %s for patch %s: %s\nOutput: %s", status, assignment.Patch, status, output)
 			}
+
+			// If this was the GOLDEN container run and a held_out_test_clean_up command is configured
+			// execute it now to clean up held-out test changes. Do not alter any other cleanup logic.
+			if assignment.Patch == "golden.patch" && taskSettings != nil && taskSettings.HeldOutTestCleanUp != "" {
+				logger.Printf("[GOLDEN] Executing held_out_test_clean_up command in container %s", assignment.Container)
+				cleanupCmd := exec.Command(
+					"docker", "exec", "-w", appFolder, assignment.Container,
+					"bash", "--login", "-c", escapeSingleQuotes(taskSettings.HeldOutTestCleanUp),
+				)
+				if out, cerr := cleanupCmd.CombinedOutput(); cerr != nil {
+					logger.Printf("[GOLDEN] WARNING: held_out_test_clean_up failed: %v\nOutput: %s", cerr, string(out))
+				} else {
+					logger.Printf("[GOLDEN] held_out_test_clean_up completed successfully")
+				}
+			}
 		}()
 	}
 	wg.Wait()
@@ -601,7 +616,9 @@ func runTestSequence(basePath string, appFolder string, rsConfig models.RubricSh
 	}
 
 	// Execute the script inside the container.
-	cmd := exec.Command("docker", "exec", "-w", appFolder, container, "/bin/bash", containerScriptPath)
+	// Use a non-login shell to preserve the container's default environment (avoids losing PYTHONPATH/site-packages).
+	// Running with --login was causing Ansible to miss its Python deps (e.g., jinja2).
+	cmd := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "-c", containerScriptPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.Printf("Error running rubric script: %v\nOutput:\n%s", err, string(output))
@@ -679,7 +696,7 @@ func runOriginalSequence(basePath string, appFolder string, rsConfig models.Rubr
     if err := copyCmd.Run(); err != nil {
         return "", fmt.Errorf("failed to copy script to container (ORIGINAL): %w", err)
     }
-    cmd := exec.Command("docker", "exec", "-w", appFolder, container, "/bin/bash", containerScriptPath)
+    cmd := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "--login", "-c", escapeSingleQuotes(containerScriptPath))
     output, err := cmd.CombinedOutput()
     if err != nil {
         logger.Printf("Error running rubric script (ORIGINAL): %v\nOutput:\n%s", err, string(output))

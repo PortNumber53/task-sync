@@ -15,10 +15,11 @@ type Docker struct {
 // TaskSettings holds the settings for a task.
 type TaskSettings struct {
 	Docker Docker `json:"docker"`
-	AssignContainers map[string]string `json:"assign_containers"`
-	AssignedContainers map[string]string `json:"assigned_containers"`
+	AssignContainers map[string]string `json:"assign_containers,omitempty"`
+	AssignedContainers map[string]string `json:"assigned_containers,omitempty"`
 	VolumeName string `json:"volume_name"`
 	AppFolder string `json:"app_folder"` // Stores the application folder path for docker_extract_volume
+	HeldOutTestCleanUp string `json:"held_out_test_clean_up,omitempty"` // Shell command to clean up held-out test changes for Golden container
 	Platform string `json:"platform,omitempty"` // Target platform for docker builds (e.g., linux/amd64)
 	// Legacy containers array (kept for backward compatibility; we will not write to it going forward)
 	Containers []ContainerInfo `json:"containers,omitempty"`
@@ -86,6 +87,22 @@ func UpdateTaskSettings(db *sql.DB, taskID int, newSettings *TaskSettings) error
 	// This simple merge overwrites top-level keys. For nested structures like 'docker', we need a deeper merge.
 	for k, v := range newMap {
 		currentMap[k] = v
+	}
+
+	// Sanitize legacy/empty container assignment keys to avoid storing null/empty objects
+	// Remove assign_containers if it is null or an empty object
+	if raw, ok := currentMap["assign_containers"]; ok {
+		var tmp map[string]interface{}
+		if len(raw) == 0 || string(raw) == "null" || (json.Unmarshal(raw, &tmp) == nil && len(tmp) == 0) {
+			delete(currentMap, "assign_containers")
+		}
+	}
+	// Remove assigned_containers if it is null or an empty object
+	if raw, ok := currentMap["assigned_containers"]; ok {
+		var tmp map[string]interface{}
+		if len(raw) == 0 || string(raw) == "null" || (json.Unmarshal(raw, &tmp) == nil && len(tmp) == 0) {
+			delete(currentMap, "assigned_containers")
+		}
 	}
 
 	// Special handling for 'docker' field to merge its contents

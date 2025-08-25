@@ -201,15 +201,12 @@ func ResetTaskContainers(db *sql.DB, taskID int) error {
         }
     }
 
-    // Set legacy containers to empty array
-    settings["containers"] = []interface{}{}
-    // Set assigned_containers to empty object
-    settings["assigned_containers"] = map[string]interface{}{}
-    // Set new containers_map to empty object
+    // Remove legacy containers keys
+    delete(settings, "containers")
+    delete(settings, "assigned_containers")
+    // Initialize or clear the canonical containers_map as an empty object
     settings["containers_map"] = map[string]interface{}{}
     // Preserve docker_run_parameters; do not modify here
-    // Set new containers_map to empty object
-    settings["containers_map"] = map[string]interface{}{}
 
 	updatedSettingsJSON, err := json.Marshal(settings)
 	if err != nil {

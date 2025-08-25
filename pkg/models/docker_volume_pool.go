@@ -213,12 +213,25 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 	config.Solutions = normalizeSolutions(config.Solutions)
 
-	// Ensure Triggers.Containers has entries for all solutions (including original/golden)
-	if config.Triggers.Containers == nil { config.Triggers.Containers = make(map[string]string) }
+    // Ensure Triggers.Containers has entries for all solutions (including original/golden)
+    if config.Triggers.Containers == nil { config.Triggers.Containers = make(map[string]string) }
     for _, solution := range config.Solutions {
         if _, ok := config.Triggers.Containers[solution]; !ok || config.Triggers.Containers[solution] == "" {
             base := strings.TrimSuffix(solution, filepath.Ext(solution))
             config.Triggers.Containers[solution] = resolveContainerName(base)
+        }
+    }
+
+    // Enforce canonical container names for golden and original regardless of prior/legacy values
+    // -> task_<taskID>_volume_golden and task_<taskID>_volume_original
+    for k, v := range config.Triggers.Containers {
+        base := strings.TrimSuffix(k, filepath.Ext(k))
+        if base == "golden" || base == "original" {
+            wanted := GenerateDVContainerNameForBase(stepExec.TaskID, base)
+            if v != wanted {
+                logger.Printf("Normalizing container name for %s: %s -> %s", k, v, wanted)
+                config.Triggers.Containers[k] = wanted
+            }
         }
     }
 

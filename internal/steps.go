@@ -533,10 +533,16 @@ func ProcessSpecificStep(db *sql.DB, stepID int, force bool, golden bool, origin
 
 	stepLogger := log.New(os.Stdout, fmt.Sprintf("STEP %d [%s]: ", stepID, stepType), log.Ldate|log.Ltime|log.Lshortfile)
 
-	// If --force, clear step results before running
+	// If --force, clear results for most step types, but NOT for rubric_shell.
+	// rubric_shell uses merge semantics (models.StoreStepResult) to preserve
+	// existing results (e.g., solutions vs golden vs original) across runs.
 	if force {
-		if err := ClearStepResults(db, stepID); err != nil {
-			stepLogger.Printf("Warning: could not clear step results for step %d: %v", stepID, err)
+		if stepType != "rubric_shell" {
+			if err := ClearStepResults(db, stepID); err != nil {
+				stepLogger.Printf("Warning: could not clear step results for step %d: %v", stepID, err)
+			}
+		} else {
+			stepLogger.Printf("[TRACE] Skipping ClearStepResults for rubric_shell step %d under --force; preserving merged results.", stepID)
 		}
 	}
 
@@ -638,14 +644,33 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	}
 	logger.Printf("Updated task settings with volume name: %s", volumeName)
 
-	// Create Docker volume
-	cmd := CommandFunc("docker", "volume", "create", volumeName)
-	logger.Printf("Executing command: docker volume create %s", volumeName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Command failed: %s", string(output))
-		return fmt.Errorf("failed to create docker volume: %w", err)
+	// Determine if volume already exists
+	volInspect := CommandFunc("docker", "volume", "inspect", volumeName)
+	volExists := volInspect.Run() == nil
+
+	// Decide if we should perform helper-container + rsync
+	shouldSync := config.Force
+	var output []byte
+	var cmd *exec.Cmd
+	if !volExists {
+		// Create Docker volume if it does not exist yet
+		cmd = CommandFunc("docker", "volume", "create", volumeName)
+		logger.Printf("Executing command: docker volume create %s", volumeName)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			logger.Printf("Command failed: %s", string(output))
+			return fmt.Errorf("failed to create docker volume: %w", err)
+		}
+		shouldSync = true
+		logger.Printf("Volume %s created; enabling rsync operations", volumeName)
+	} else {
+		if shouldSync {
+			logger.Printf("Volume %s already exists but --force is set; proceeding with rsync", volumeName)
+		} else {
+			logger.Printf("Volume %s already exists and --force not set; skipping helper container and rsync", volumeName)
+		}
 	}
+
 	// Ensure base path is set and absolute to avoid invalid "-v <relative>:/mount" which Docker treats as named volumes
 	base := se.BasePath
 	if base == "" {
@@ -665,156 +690,158 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 	solution3Path := filepath.Join(base, "volume_solution3") + "/"
 	solution4Path := filepath.Join(base, "volume_solution4") + "/"
 	goldenPath := filepath.Join(base, "volume_golden") + "/"
-	containerName := fmt.Sprintf("extract_vol_container_%d", se.StepID)
-	// Best-effort cleanup in case a previous run left the helper container
-	preCleanup := CommandFunc("docker", "rm", "-f", containerName)
-	logger.Printf("Ensuring no leftover helper container: docker rm -f %s", containerName)
-	_ = preCleanup.Run()
-	cmd = CommandFunc("docker", "run", "-d", "--platform", "linux/amd64", "--name", containerName, "-v", volumeName+":/original_volume", "-v", appHostPath+":/original", "-v", solution1Path+":/solution1", "-v", solution2Path+":/solution2", "-v", solution3Path+":/solution3", "-v", solution4Path+":/solution4", "-v", goldenPath+":/golden", imageID, "tail", "-f", "/dev/null")
-	logger.Printf("Executing command: docker run -d --platform linux/amd64 --name %s -v %s:/original_volume -v %s:/original -v %s:/solution1 -v %s:/solution2 -v %s:/solution3 -v %s:/solution4 -v %s:/golden %s tail -f /dev/null", containerName, volumeName, appHostPath, solution1Path, solution2Path, solution3Path, solution4Path, goldenPath, imageID)
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Command failed: %s", string(output))
-		return fmt.Errorf("failed to start container: %w", err)
-	}
-	logger.Printf("Command succeeded: container started %s", containerName)
-	// Always clean up the helper container after we're done
-	defer func() {
-		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		logger.Printf("Cleaning up helper container: docker rm -f %s", containerName)
-		_ = cleanupCmd.Run()
-	}()
-
-	installCmd := "apt-get update && apt-get install -y rsync"
-	execCmd := CommandFunc("docker", "exec", containerName, "bash", "-c", installCmd)
-	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, installCmd)
-	output, err = execCmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Command failed: %s", string(output))
-		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupCmd.Run()
-		return fmt.Errorf("failed to install rsync: %w", err)
-	}
-	logger.Printf("Command succeeded: rsync installed")
-
-    // Gate rsync into /original similar to golden behavior
-    originalDir := filepath.Join(se.BasePath, "original")
-    origExists := false
-    origNonEmpty := false
-    if fi, statErr := os.Stat(originalDir); statErr == nil && fi.IsDir() {
-        origExists = true
-        if entries, rdErr := os.ReadDir(originalDir); rdErr == nil && len(entries) > 0 {
-            origNonEmpty = true
-        }
-    }
-    shouldSyncOriginal := false
-    if !origExists || !origNonEmpty {
-        shouldSyncOriginal = true
-        logger.Printf("Original directory state exists=%v nonEmpty=%v -> syncing regardless of flag", origExists, origNonEmpty)
-    } else if config.Original {
-        shouldSyncOriginal = true
-        logger.Printf("Original directory exists and is populated, original flag set -> syncing")
-    } else {
-        logger.Printf("Original directory exists and is populated, original flag not set -> skipping original rsync")
-    }
-    if shouldSyncOriginal {
-        rsyncCmd1 := fmt.Sprintf("rsync -a --delete-during %s/ /original/", config.AppFolder)
-        execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd1)
-        logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd1)
-        output, err = execCmd.CombinedOutput()
-        if err != nil {
-            logger.Printf("Command failed: %s", string(output))
-            cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-            cleanupCmd.Run()
-            return fmt.Errorf("rsync from src to /original/ failed: %w", err)
-        }
-        logger.Printf("Command succeeded: rsync from %s to /original/ completed", config.AppFolder)
-    }
-
-	rsyncCmd2 := "rsync -a --delete-during /original/ /solution1/"
-	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd2)
-	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd2)
-	output, err = execCmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Command failed: %s", string(output))
-		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupCmd.Run()
-		return fmt.Errorf("rsync from /original/ to /solution1/ failed: %w", err)
-	}
-	logger.Printf("Command succeeded: rsync from /original/ to /solution1/ completed")
-
-	rsyncCmd3 := "rsync -a --delete-during /original/ /solution2/"
-	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd3)
-	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd3)
-	output, err = execCmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Command failed: %s", string(output))
-		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupCmd.Run()
-		return fmt.Errorf("rsync from /original/ to /solution2/ failed: %w", err)
-	}
-	logger.Printf("Command succeeded: rsync from /original/ to /solution2/ completed")
-
-	rsyncCmd4 := "rsync -a --delete-during /original/ /solution3/"
-	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd4)
-	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd4)
-	output, err = execCmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Command failed: %s", string(output))
-		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupCmd.Run()
-		return fmt.Errorf("rsync from /original/ to /solution3/ failed: %w", err)
-	}
-	logger.Printf("Command succeeded: rsync from /original/ to /solution3/ completed")
-
-	rsyncCmd5 := "rsync -a --delete-during /original/ /solution4/"
-	execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd5)
-	logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd5)
-	output, err = execCmd.CombinedOutput()
-	if err != nil {
-		logger.Printf("Command failed: %s", string(output))
-		cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
-		cleanupCmd.Run()
-		return fmt.Errorf("rsync from /original/ to /solution4/ failed: %w", err)
-	}
-	logger.Printf("Command succeeded: rsync from /original/ to /solution4/ completed")
-
-	// Mirror solution1 behavior for golden workspace, but gate based on flag and existing content
-	// Determine golden flag from config and directory state
-	goldenDir := filepath.Join(se.BasePath, "volume_golden")
-	goldenExists := false
-	goldenNonEmpty := false
-	if fi, statErr := os.Stat(goldenDir); statErr == nil && fi.IsDir() {
-		goldenExists = true
-		if entries, rdErr := os.ReadDir(goldenDir); rdErr == nil && len(entries) > 0 {
-			goldenNonEmpty = true
+	if shouldSync {
+		containerName := fmt.Sprintf("extract_vol_container_%d", se.StepID)
+		// Best-effort cleanup in case a previous run left the helper container
+		preCleanup := CommandFunc("docker", "rm", "-f", containerName)
+		logger.Printf("Ensuring no leftover helper container: docker rm -f %s", containerName)
+		_ = preCleanup.Run()
+		cmd = CommandFunc("docker", "run", "-d", "--platform", "linux/amd64", "--name", containerName, "-v", volumeName+":/original_volume", "-v", appHostPath+":/original", "-v", solution1Path+":/solution1", "-v", solution2Path+":/solution2", "-v", solution3Path+":/solution3", "-v", solution4Path+":/solution4", "-v", goldenPath+":/golden", imageID, "tail", "-f", "/dev/null")
+		logger.Printf("Executing command: docker run -d --platform linux/amd64 --name %s -v %s:/original_volume -v %s:/original -v %s:/solution1 -v %s:/solution2 -v %s:/solution3 -v %s:/solution4 -v %s:/golden %s tail -f /dev/null", containerName, volumeName, appHostPath, solution1Path, solution2Path, solution3Path, solution4Path, goldenPath, imageID)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			logger.Printf("Command failed: %s", string(output))
+			return fmt.Errorf("failed to start container: %w", err)
 		}
-	}
-	shouldSyncGolden := false
-	if !goldenExists || !goldenNonEmpty {
-		// First-time create or empty directory: always sync regardless of flag
-		shouldSyncGolden = true
-		logger.Printf("Golden directory state exists=%v nonEmpty=%v -> syncing regardless of flag", goldenExists, goldenNonEmpty)
-	} else if config.Golden {
-		// Existing and populated, sync only when golden flag is set
-		shouldSyncGolden = true
-		logger.Printf("Golden directory exists and is populated, golden flag set -> syncing")
-	} else {
-		logger.Printf("Golden directory exists and is populated, golden flag not set -> skipping golden rsync")
-	}
-	if shouldSyncGolden {
-		rsyncCmdGolden := "rsync -a --delete-during /original/ /golden/"
-		execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmdGolden)
-		logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmdGolden)
+		logger.Printf("Command succeeded: container started %s", containerName)
+		// Always clean up the helper container after we're done
+		defer func() {
+			cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+			logger.Printf("Cleaning up helper container: docker rm -f %s", containerName)
+			_ = cleanupCmd.Run()
+		}()
+
+		installCmd := "apt-get update && apt-get install -y rsync"
+		execCmd := CommandFunc("docker", "exec", containerName, "bash", "-c", installCmd)
+		logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, installCmd)
 		output, err = execCmd.CombinedOutput()
 		if err != nil {
 			logger.Printf("Command failed: %s", string(output))
 			cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
 			cleanupCmd.Run()
-			return fmt.Errorf("rsync from /original/ to /golden/ failed: %w", err)
+			return fmt.Errorf("failed to install rsync: %w", err)
 		}
-		logger.Printf("Command succeeded: rsync from /original/ to /golden/ completed")
-	}
+		logger.Printf("Command succeeded: rsync installed")
+
+		// Gate rsync into /original similar to golden behavior
+		originalDir := filepath.Join(se.BasePath, "original")
+		origExists := false
+		origNonEmpty := false
+		if fi, statErr := os.Stat(originalDir); statErr == nil && fi.IsDir() {
+			origExists = true
+			if entries, rdErr := os.ReadDir(originalDir); rdErr == nil && len(entries) > 0 {
+				origNonEmpty = true
+			}
+		}
+		shouldSyncOriginal := false
+		if !origExists || !origNonEmpty {
+			shouldSyncOriginal = true
+			logger.Printf("Original directory state exists=%v nonEmpty=%v -> syncing regardless of flag", origExists, origNonEmpty)
+		} else if config.Original {
+			shouldSyncOriginal = true
+			logger.Printf("Original directory exists and is populated, original flag set -> syncing")
+		} else {
+			logger.Printf("Original directory exists and is populated, original flag not set -> skipping original rsync")
+		}
+		if shouldSyncOriginal {
+			rsyncCmd1 := fmt.Sprintf("rsync -a --delete-during %s/ /original/", config.AppFolder)
+			execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd1)
+			logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd1)
+			output, err = execCmd.CombinedOutput()
+			if err != nil {
+				logger.Printf("Command failed: %s", string(output))
+				cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+				cleanupCmd.Run()
+				return fmt.Errorf("rsync from src to /original/ failed: %w", err)
+			}
+			logger.Printf("Command succeeded: rsync from %s to /original/ completed", config.AppFolder)
+		}
+
+		rsyncCmd2 := "rsync -a --delete-during /original/ /solution1/"
+		execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd2)
+		logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd2)
+		output, err = execCmd.CombinedOutput()
+		if err != nil {
+			logger.Printf("Command failed: %s", string(output))
+			cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+			cleanupCmd.Run()
+			return fmt.Errorf("rsync from /original/ to /solution1/ failed: %w", err)
+		}
+		logger.Printf("Command succeeded: rsync from /original/ to /solution1/ completed")
+
+		rsyncCmd3 := "rsync -a --delete-during /original/ /solution2/"
+		execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd3)
+		logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd3)
+		output, err = execCmd.CombinedOutput()
+		if err != nil {
+			logger.Printf("Command failed: %s", string(output))
+			cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+			cleanupCmd.Run()
+			return fmt.Errorf("rsync from /original/ to /solution2/ failed: %w", err)
+		}
+		logger.Printf("Command succeeded: rsync from /original/ to /solution2/ completed")
+
+		rsyncCmd4 := "rsync -a --delete-during /original/ /solution3/"
+		execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd4)
+		logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd4)
+		output, err = execCmd.CombinedOutput()
+		if err != nil {
+			logger.Printf("Command failed: %s", string(output))
+			cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+			cleanupCmd.Run()
+			return fmt.Errorf("rsync from /original/ to /solution3/ failed: %w", err)
+		}
+		logger.Printf("Command succeeded: rsync from /original/ to /solution3/ completed")
+
+		rsyncCmd5 := "rsync -a --delete-during /original/ /solution4/"
+		execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmd5)
+		logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmd5)
+		output, err = execCmd.CombinedOutput()
+		if err != nil {
+			logger.Printf("Command failed: %s", string(output))
+			cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+			cleanupCmd.Run()
+			return fmt.Errorf("rsync from /original/ to /solution4/ failed: %w", err)
+		}
+		logger.Printf("Command succeeded: rsync from /original/ to /solution4/ completed")
+
+		// Mirror solution1 behavior for golden workspace, but gate based on flag and existing content
+		// Determine golden flag from config and directory state
+		goldenDir := filepath.Join(se.BasePath, "volume_golden")
+		goldenExists := false
+		goldenNonEmpty := false
+		if fi, statErr := os.Stat(goldenDir); statErr == nil && fi.IsDir() {
+			goldenExists = true
+			if entries, rdErr := os.ReadDir(goldenDir); rdErr == nil && len(entries) > 0 {
+				goldenNonEmpty = true
+			}
+		}
+		shouldSyncGolden := false
+		if !goldenExists || !goldenNonEmpty {
+			// First-time create or empty directory: always sync regardless of flag
+			shouldSyncGolden = true
+			logger.Printf("Golden directory state exists=%v nonEmpty=%v -> syncing regardless of flag", goldenExists, goldenNonEmpty)
+		} else if config.Golden {
+			// Existing and populated, sync only when golden flag is set
+			shouldSyncGolden = true
+			logger.Printf("Golden directory exists and is populated, golden flag set -> syncing")
+		} else {
+			logger.Printf("Golden directory exists and is populated, golden flag not set -> skipping golden rsync")
+		}
+		if shouldSyncGolden {
+			rsyncCmdGolden := "rsync -a --delete-during /original/ /golden/"
+			execCmd = CommandFunc("docker", "exec", containerName, "bash", "-c", rsyncCmdGolden)
+			logger.Printf("Executing command: docker exec %s bash -c '%s'", containerName, rsyncCmdGolden)
+			output, err = execCmd.CombinedOutput()
+			if err != nil {
+				logger.Printf("Command failed: %s", string(output))
+				cleanupCmd := CommandFunc("docker", "rm", "-f", containerName)
+				cleanupCmd.Run()
+				return fmt.Errorf("rsync from /original/ to /golden/ failed: %w", err)
+			}
+			logger.Printf("Command succeeded: rsync from /original/ to /golden/ completed")
+		}
+	} // end if shouldSync
 
 	// After successful execution, update file hashes
 	if err := models.UpdateFileHashes(db, se.StepID, se.BasePath, config.Triggers.Files, logger); err != nil {
@@ -823,13 +850,14 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
 		logger.Printf("File hashes updated successfully for step %d", se.StepID)
 	}
 
-    // Do not persist runtime golden flag for docker_extract_volume
-    // Explicitly set settings.docker_extract_volume.golden = false in DB
-    if _, err := db.Exec("UPDATE steps SET settings = jsonb_set(settings, '{docker_extract_volume,golden}', 'false'::jsonb, true) WHERE id = $1", se.StepID); err != nil {
-        logger.Printf("Warning: failed to reset docker_extract_volume.golden flag for step %d: %v", se.StepID, err)
-    } else {
-        logger.Printf("Cleanup: disabling docker_extract_volume.golden (set to false)")
-    }
+	// Do not persist runtime golden flag for docker_extract_volume
+	// Explicitly set settings.docker_extract_volume.golden = false in DB
+	if _, err := db.Exec("UPDATE steps SET settings = jsonb_set(settings, '{docker_extract_volume,golden}', 'false'::jsonb, true) WHERE id = $1", se.StepID); err != nil {
+		logger.Printf("Warning: failed to reset docker_extract_volume.golden flag for step %d: %v", se.StepID, err)
+	} else {
+		logger.Printf("Cleanup: disabling docker_extract_volume.golden (set to false)")
+	}
+    // (deduped) already reset docker_extract_volume.golden above
 
     // Do not persist runtime original flag for docker_extract_volume
     if _, err := db.Exec("UPDATE steps SET settings = jsonb_set(settings, '{docker_extract_volume,original}', 'false'::jsonb, true) WHERE id = $1", se.StepID); err != nil {

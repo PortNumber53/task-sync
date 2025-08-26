@@ -21,6 +21,29 @@ Use "task-sync [command] --help" for more information about a command.
 	fmt.Println(helpText)
 }
 
+// PrintStepOriginalHelp prints help for the step original command
+func PrintStepOriginalHelp() {
+    helpText := `Run a specific rubric_shell step in Original-only mode.
+
+Usage:
+  task-sync step original STEP_ID [--force]
+
+Arguments:
+  STEP_ID    ID of the rubric_shell step to run
+
+Options:
+  --force    Force run even if hashes indicate up-to-date
+  -h, --help Show this help message and exit
+
+Examples:
+  # Run rubric_shell step 42 against the Original container only
+  task-sync step original 42
+
+  # Force re-run, ignoring up-to-date checks
+  task-sync step original 42 --force`
+    fmt.Println(helpText)
+}
+
 // PrintMigrateHelp prints help for the migrate command
 func PrintMigrateHelp() {
 	helpText := `Manage database migrations.
@@ -201,6 +224,7 @@ Available Commands:
   list       List all steps
   run        Run a specific step by ID
   golden     Run a specific rubric_shell step in Golden-only mode
+  original   Run a specific rubric_shell step in Original-only mode
 
 Use "task-sync step <command> --help" for more information about a command.
 `

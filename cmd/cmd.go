@@ -70,6 +70,10 @@ func HandleStep() {
 			helpPkg.PrintStepInfoHelp()
 		case "run":
 			helpPkg.PrintStepRunIDHelp()
+		case "golden":
+			helpPkg.PrintStepGoldenHelp()
+		case "original":
+			helpPkg.PrintStepOriginalHelp()
 		default:
 			helpPkg.PrintStepHelp()
 		}
@@ -120,6 +124,8 @@ func HandleStep() {
 		HandleStepRunID(db)
 	case "golden":
 		HandleStepGolden(db)
+	case "original":
+		HandleStepOriginal(db)
 	case "cleanup-rubric-shells":
 		HandleStepCleanupRubricShells(db)
 	default:
@@ -684,3 +690,49 @@ func HandleStepGolden(db *sql.DB) {
     }
     fmt.Println("Step (Golden-only) processed successfully.")
 }
+
+// HandleStepOriginal runs a specific rubric_shell step ID in Original-only mode.
+// Usage: task-sync step original <STEP_ID> [--force]
+func HandleStepOriginal(db *sql.DB) {
+    if len(os.Args) < 4 {
+        fmt.Println("Error: original subcommand requires a step ID.")
+        helpPkg.PrintStepOriginalHelp()
+        os.Exit(1)
+    }
+
+    stepIDStr := os.Args[3]
+    stepID, err := strconv.Atoi(stepIDStr)
+    if err != nil {
+        fmt.Printf("Error: invalid step ID '%s'. Must be an integer.\n", stepIDStr)
+        os.Exit(1)
+    }
+
+    // Parse optional flags after ID
+    force := false
+    for i := 4; i < len(os.Args); i++ {
+        switch os.Args[i] {
+        case "--force":
+            force = true
+        case "-h", "--help":
+            helpPkg.PrintStepOriginalHelp()
+            os.Exit(0)
+        }
+    }
+
+    // Ensure loggers are initialized like other step handlers
+    var logWriter io.Writer = os.Stdout
+    internal.InitStepLogger(logWriter)
+    models.InitStepLogger(logWriter)
+
+    // Restrict rubric_shell processor to Original-only assignments for this invocation
+    restore := internal.SetRubricRunModeForCLI("original-only")
+    defer restore()
+
+    fmt.Printf("Running step ID %d in Original-only mode...\n", stepID)
+    if err := internal.ProcessSpecificStep(db, stepID, force, false /*golden*/, true /*original*/); err != nil {
+        fmt.Printf("Error processing step: %v\n", err)
+        os.Exit(1)
+    }
+    fmt.Println("Step (Original-only) processed successfully.")
+}
+

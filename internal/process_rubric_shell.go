@@ -172,9 +172,9 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 			}
 			return keys
 		}())
-		// Solutions are included by default for normal task run (golden == false),
-		// and also when --golden is specified for task run (golden == true) unless in golden-only mode.
-		if rubricRunMode != "golden-only" {
+		// Solutions are included by default except in special modes.
+		// Exclude when rubricRunMode is "golden-only" or "original-only".
+		if rubricRunMode != "golden-only" && rubricRunMode != "original-only" {
 			for i := 1; i <= 4; i++ {
 				patch := fmt.Sprintf("solution%d.patch", i)
 				if _, ok := rsConfig.Files[patch]; !ok {
@@ -215,8 +215,17 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 			}
 		}
 
-		// Original baseline: include only for task run --golden (not for golden-only mode, not for plain runs)
-		if rubricRunMode != "golden-only" && golden {
+		// Original baseline inclusion rules:
+		// - When rubricRunMode == "original-only": always include Original if present
+		// - Else: include only for task run with --golden (and not golden-only mode)
+		if rubricRunMode == "original-only" {
+			if c, ok := taskSettings.ContainersMap["original"]; ok && c.ContainerName != "" {
+				rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
+					Patch:     "original",
+					Container: c.ContainerName,
+				})
+			}
+		} else if rubricRunMode != "golden-only" && golden {
 			if c, ok := taskSettings.ContainersMap["original"]; ok && c.ContainerName != "" {
 				rsConfig.Assignments = append(rsConfig.Assignments, models.RubricShellAssignment{
 					Patch:     "original",
@@ -226,13 +235,24 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 		}
 	}
 	// If golden not enabled, ensure any accidental golden assignments are filtered out
-	if !golden && len(rsConfig.Assignments) > 0 {
+	if !golden && rubricRunMode != "golden-only" && len(rsConfig.Assignments) > 0 {
 		filtered := rsConfig.Assignments[:0]
 		for _, a := range rsConfig.Assignments {
 			if a.Patch == "golden.patch" {
 				continue
 			}
 			filtered = append(filtered, a)
+		}
+		rsConfig.Assignments = filtered
+	}
+
+	// In original-only mode, keep only the Original assignment
+	if rubricRunMode == "original-only" && len(rsConfig.Assignments) > 0 {
+		filtered := rsConfig.Assignments[:0]
+		for _, a := range rsConfig.Assignments {
+			if a.Patch == "original" {
+				filtered = append(filtered, a)
+			}
 		}
 		rsConfig.Assignments = filtered
 	}
@@ -619,8 +639,8 @@ func runTestSequence(basePath string, appFolder string, rsConfig models.RubricSh
 		return "", fmt.Errorf("failed to copy script to container: %w", err)
 	}
 
-	// Execute the script: cd into <appFolder>, activate venv if present, then run the script
-	execSnippet := fmt.Sprintf("set -eo pipefail; cd %s; if [ -f %s/ansible/bin/activate ]; then . %s/ansible/bin/activate; elif [ -f %s/bin/activate ]; then . %s/bin/activate; fi; echo PY=$(which python); echo APB=$(which ansible-playbook); echo DEBUG: before running script; bash %s", appFolder, appFolder, appFolder, appFolder, appFolder, containerScriptPath)
+	// Execute the script directly; working dir is set via docker exec -w
+	execSnippet := containerScriptPath
 	logger.Printf("Executing rubric script: %s", execSnippet)
 	cmd := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "-lc", execSnippet)
 	output, err := cmd.CombinedOutput()
@@ -634,37 +654,35 @@ func runTestSequence(basePath string, appFolder string, rsConfig models.RubricSh
 // runOriginalSequence runs the rubric on the unmodified ORIGINAL container state.
 // It performs git cleanup, applies only held_out_tests.patch, and runs the command.
 func runOriginalSequence(basePath string, appFolder string, rsConfig models.RubricShellConfig, container string, command string, rerun bool, logger *log.Logger) (string, error) {
-    // ... (rest of the code remains the same)
-
-    // Step 3: Run the rubric test command and capture output
-    scriptFile, err := os.CreateTemp("", "rubric-script-*.sh")
-    if err != nil {
-        return "", fmt.Errorf("failed to create temp script file (ORIGINAL): %w", err)
-    }
-    defer os.Remove(scriptFile.Name())
-    scriptContent := fmt.Sprintf("#!/bin/bash\n%s", command)
-    if _, err := scriptFile.WriteString(scriptContent); err != nil {
-        return "", fmt.Errorf("failed to write to temp script file (ORIGINAL): %w", err)
-    }
-    scriptFile.Close()
-    if err := os.Chmod(scriptFile.Name(), 0755); err != nil {
-        return "", fmt.Errorf("failed to make script executable (ORIGINAL): %w", err)
-    }
-    containerScriptPath := "/tmp/run_rubric.sh"
-    copyCmd := exec.Command("docker", "cp", scriptFile.Name(), fmt.Sprintf("%s:%s", container, containerScriptPath))
-    if err := copyCmd.Run(); err != nil {
-        return "", fmt.Errorf("failed to copy script to container (ORIGINAL): %w", err)
-    }
-    // Execute similar to interactive run: cd into <appFolder>, activate venv if present (prefer <appFolder>/ansible), then run the script
-    execSnippet := fmt.Sprintf("set -eo pipefail; cd %s; if [ -f %s/ansible/bin/activate ]; then . %s/ansible/bin/activate; elif [ -f %s/bin/activate ]; then . %s/bin/activate; fi; echo PY=$(which python); echo APB=$(which ansible-playbook); bash %s", appFolder, appFolder, appFolder, appFolder, appFolder, containerScriptPath)
-    logger.Printf("Executing rubric script (ORIGINAL): %s", execSnippet)
-    cmd := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "-lc", execSnippet)
-    output, err := cmd.CombinedOutput()
-    if err != nil {
-        logger.Printf("Error running rubric script (ORIGINAL): %v\nOutput:\n%s", err, string(output))
-        return string(output), err
-    }
-    return string(output), nil
+	// Step 3: Run the rubric test command and capture output
+	scriptFile, err := os.CreateTemp("", "rubric-script-*.sh")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp script file (ORIGINAL): %w", err)
+	}
+	defer os.Remove(scriptFile.Name())
+	scriptContent := fmt.Sprintf("#!/bin/bash\n%s", command)
+	if _, err := scriptFile.WriteString(scriptContent); err != nil {
+		return "", fmt.Errorf("failed to write to temp script file (ORIGINAL): %w", err)
+	}
+	scriptFile.Close()
+	if err := os.Chmod(scriptFile.Name(), 0755); err != nil {
+		return "", fmt.Errorf("failed to make script executable (ORIGINAL): %w", err)
+	}
+	containerScriptPath := "/tmp/run_rubric.sh"
+	copyCmd := exec.Command("docker", "cp", scriptFile.Name(), fmt.Sprintf("%s:%s", container, containerScriptPath))
+	if err := copyCmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to copy script to container (ORIGINAL): %w", err)
+	}
+	// Execute the script directly; working dir is set via docker exec -w
+	execSnippet := containerScriptPath
+	logger.Printf("Executing rubric script (ORIGINAL): %s", execSnippet)
+	cmd := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "-lc", execSnippet)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Error running rubric script (ORIGINAL): %v\nOutput:\n%s", err, string(output))
+		return string(output), err
+	}
+	return string(output), nil
 }
 
 // parsePatchTouchedPaths reads a unified diff patch file at basePath/patchFileName and

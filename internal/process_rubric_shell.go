@@ -407,8 +407,8 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 			// execute it now to clean up held-out test changes. Do not alter any other cleanup logic.
 			if assignment.Patch == "golden.patch" && taskSettings != nil && taskSettings.HeldOutTestCleanUp != "" {
 				logger.Printf("[GOLDEN] Executing held_out_test_clean_up command in container %s", assignment.Container)
-				// Run cleanup from <appFolder>/ansible to match rubric execution context
-				workDir := filepath.Join(appFolder, "ansible")
+				// Run cleanup from appFolder to match rubric execution context used elsewhere
+				workDir := appFolder
 				cleanupCmd := exec.Command(
 					"docker", "exec", "-w", workDir, assignment.Container,
 					"bash", "-c", taskSettings.HeldOutTestCleanUp,

@@ -596,12 +596,14 @@ func runTestSequence(basePath string, appFolder string, rsConfig models.RubricSh
 			return "", fmt.Errorf("error checking held_out_tests.patch: %w", err)
 		}
 		logger.Printf("Confirmed held_out_tests.patch exists at %s", fullHeldOutTestsPath)
-		containerHeldOutTestsPatchPath := filepath.Join(appFolder, "held_out_tests.patch")
-		cpOut, cpErr := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath)).CombinedOutput()
-		if cpErr != nil {
-			return string(cpOut), fmt.Errorf("copy held-out tests patch failed: %w", cpErr)
-		}
-		applyOut, applyErr := exec.Command("docker", "exec", "-w", appFolder, container, "git", "apply", containerHeldOutTestsPatchPath).CombinedOutput()
+		// Copy held_out_tests.patch under /tmp inside the container to avoid polluting the project folder
+        containerHeldOutTestsPatchPath := "/tmp/held_out_tests.patch"
+        cpOut, cpErr := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath)).CombinedOutput()
+        if cpErr != nil {
+            return string(cpOut), fmt.Errorf("copy held-out tests patch failed: %w", cpErr)
+        }
+        // Apply from /tmp while keeping working directory at appFolder
+        applyOut, applyErr := exec.Command("docker", "exec", "-w", appFolder, container, "git", "apply", containerHeldOutTestsPatchPath).CombinedOutput()
 		if applyErr != nil {
 			logger.Printf("ERROR: Held-out tests patch apply failed for criterion %s: %v\nOutput: %s", rsConfig.CriterionID, applyErr, string(applyOut))
 			return string(applyOut), fmt.Errorf("held-out tests patch apply failed: %w", applyErr)

@@ -10,3 +10,7 @@
 - Help improvements: `step original --help` now shows dedicated usage via `help.PrintStepOriginalHelp()`
 - Fixed accidental duplicate function definitions in `cmd/cmd.go` and cleaned up malformed code blocks
 - Build verified: `go build ./...` succeeds
+
+- Rubric Shell: removed hard-coded `ansible` subdirectory for GOLDEN `held_out_test_clean_up` execution.
+  - Change: use `appFolder` as working directory in `internal/process_rubric_shell.go` to match rubric execution context.
+  - Impact: avoids incorrect assumptions about repo layout and prevents accidental path-related side effects.

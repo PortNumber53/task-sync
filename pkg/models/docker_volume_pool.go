@@ -73,31 +73,31 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	}
 
 	// Helper: resolve preferred container name for a base key
-    // Preference order:
-    // 1) Name from task.settings.containers_map (if present)
-    // 2) Existing canonical name (GenerateDVContainerNameForBase)
-    // 3) Existing legacy name (tasksync_<taskID>_<base>)
-    // 4) Canonical name
-    resolveContainerName := func(base string) string {
-        // From task settings map
-        if taskSettings.ContainersMap != nil {
-            if c, ok := taskSettings.ContainersMap[base]; ok && c.ContainerName != "" {
-                return c.ContainerName
-            }
-        }
-        canonical := GenerateDVContainerNameForBase(stepExec.TaskID, base)
-        // Prefer existing canonical
-        if exists, _ := CheckContainerExists(canonical); exists {
-            return canonical
-        }
-        // Legacy fallback
-        legacy := fmt.Sprintf("tasksync_%d_%s", stepExec.TaskID, base)
-        if exists, _ := CheckContainerExists(legacy); exists {
-            return legacy
-        }
-        // Default to canonical
-        return canonical
-    }
+	// Preference order:
+	// 1) Name from task.settings.containers_map (if present)
+	// 2) Existing canonical name (GenerateDVContainerNameForBase)
+	// 3) Existing legacy name (tasksync_<taskID>_<base>)
+	// 4) Canonical name
+	resolveContainerName := func(base string) string {
+		// From task settings map
+		if taskSettings.ContainersMap != nil {
+			if c, ok := taskSettings.ContainersMap[base]; ok && c.ContainerName != "" {
+				return c.ContainerName
+			}
+		}
+		canonical := GenerateDVContainerNameForBase(stepExec.TaskID, base)
+		// Prefer existing canonical
+		if exists, _ := CheckContainerExists(canonical); exists {
+			return canonical
+		}
+		// Legacy fallback
+		legacy := fmt.Sprintf("tasksync_%d_%s", stepExec.TaskID, base)
+		if exists, _ := CheckContainerExists(legacy); exists {
+			return legacy
+		}
+		// Default to canonical
+		return canonical
+	}
 
 	// Initialize or update Triggers.Containers if empty or if any container name is empty
 	recreateContainers := false
@@ -121,7 +121,9 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			derived := make([]string, 0, 6)
 			if taskSettings.ContainersMap != nil {
 				for key, val := range taskSettings.ContainersMap {
-					if val.ContainerName == "" { continue }
+					if val.ContainerName == "" {
+						continue
+					}
 					if key == "original" {
 						derived = append(derived, "original")
 						continue
@@ -144,8 +146,14 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			}
 			if len(derived) == 0 && len(config.Triggers.Containers) > 0 {
 				for k := range config.Triggers.Containers {
-					if k == "golden" { derived = append(derived, "golden.patch"); continue }
-					if k == "original" { derived = append(derived, "original"); continue }
+					if k == "golden" {
+						derived = append(derived, "golden.patch")
+						continue
+					}
+					if k == "original" {
+						derived = append(derived, "original")
+						continue
+					}
 					derived = append(derived, k)
 				}
 			}
@@ -153,14 +161,14 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 			logger.Printf("Initialized solutions: %v", config.Solutions)
 		}
 
-        // Initialize container map preferring existing containers to avoid duplication/recreation
-        containerMap := make(map[string]string)
-        for _, solution := range config.Solutions {
-            base := strings.TrimSuffix(solution, filepath.Ext(solution))
-            containerMap[solution] = resolveContainerName(base)
-        }
-        config.Triggers.Containers = containerMap
-        logger.Printf("Initialized Triggers.Containers (aligned with task.settings when possible): %v", config.Triggers.Containers)
+		// Initialize container map preferring existing containers to avoid duplication/recreation
+		containerMap := make(map[string]string)
+		for _, solution := range config.Solutions {
+			base := strings.TrimSuffix(solution, filepath.Ext(solution))
+			containerMap[solution] = resolveContainerName(base)
+		}
+		config.Triggers.Containers = containerMap
+		logger.Printf("Initialized Triggers.Containers (aligned with task.settings when possible): %v", config.Triggers.Containers)
 
 		// Force recreation of containers since we just initialized the container map
 		recreateNeeded = true
@@ -186,7 +194,11 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 
 	// Guarantee presence of original and golden in Solutions list
 	ensureInSolutions := func(name string) {
-		for _, s := range config.Solutions { if s == name { return } }
+		for _, s := range config.Solutions {
+			if s == name {
+				return
+			}
+		}
 		config.Solutions = append(config.Solutions, name)
 	}
 	ensureInSolutions("original")
@@ -196,44 +208,57 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	normalizeSolutions := func(in []string) []string {
 		seen := make(map[string]bool)
 		push := func(s string, out *[]string) {
-			if s == "" { return }
-			if !seen[s] { *out = append(*out, s); seen[s] = true }
+			if s == "" {
+				return
+			}
+			if !seen[s] {
+				*out = append(*out, s)
+				seen[s] = true
+			}
 		}
 		out := make([]string, 0, len(in))
 		// Preferred fixed order for stability
 		push("original", &out)
 		push("golden.patch", &out)
-		for i := 1; i <= 4; i++ { push(fmt.Sprintf("solution%d.patch", i), &out) }
+		for i := 1; i <= 4; i++ {
+			push(fmt.Sprintf("solution%d.patch", i), &out)
+		}
 		// Add any remaining entries in alphabetical order
 		extra := make([]string, 0, len(in))
-		for _, s := range in { if !seen[s] { extra = append(extra, s) } }
+		for _, s := range in {
+			if !seen[s] {
+				extra = append(extra, s)
+			}
+		}
 		sort.Strings(extra)
 		out = append(out, extra...)
 		return out
 	}
 	config.Solutions = normalizeSolutions(config.Solutions)
 
-    // Ensure Triggers.Containers has entries for all solutions (including original/golden)
-    if config.Triggers.Containers == nil { config.Triggers.Containers = make(map[string]string) }
-    for _, solution := range config.Solutions {
-        if _, ok := config.Triggers.Containers[solution]; !ok || config.Triggers.Containers[solution] == "" {
-            base := strings.TrimSuffix(solution, filepath.Ext(solution))
-            config.Triggers.Containers[solution] = resolveContainerName(base)
-        }
-    }
+	// Ensure Triggers.Containers has entries for all solutions (including original/golden)
+	if config.Triggers.Containers == nil {
+		config.Triggers.Containers = make(map[string]string)
+	}
+	for _, solution := range config.Solutions {
+		if _, ok := config.Triggers.Containers[solution]; !ok || config.Triggers.Containers[solution] == "" {
+			base := strings.TrimSuffix(solution, filepath.Ext(solution))
+			config.Triggers.Containers[solution] = resolveContainerName(base)
+		}
+	}
 
-    // Enforce canonical container names for golden and original regardless of prior/legacy values
-    // -> task_<taskID>_volume_golden and task_<taskID>_volume_original
-    for k, v := range config.Triggers.Containers {
-        base := strings.TrimSuffix(k, filepath.Ext(k))
-        if base == "golden" || base == "original" {
-            wanted := GenerateDVContainerNameForBase(stepExec.TaskID, base)
-            if v != wanted {
-                logger.Printf("Normalizing container name for %s: %s -> %s", k, v, wanted)
-                config.Triggers.Containers[k] = wanted
-            }
-        }
-    }
+	// Enforce canonical container names for golden and original regardless of prior/legacy values
+	// -> task_<taskID>_volume_golden and task_<taskID>_volume_original
+	for k, v := range config.Triggers.Containers {
+		base := strings.TrimSuffix(k, filepath.Ext(k))
+		if base == "golden" || base == "original" {
+			wanted := GenerateDVContainerNameForBase(stepExec.TaskID, base)
+			if v != wanted {
+				logger.Printf("Normalizing container name for %s: %s -> %s", k, v, wanted)
+				config.Triggers.Containers[k] = wanted
+			}
+		}
+	}
 
 	// Check if we need to recreate containers based on image tag/ID changes or missing containers
 	recreateNeeded = false // Reset the flag before checking containers
@@ -299,8 +324,14 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 	// If solutions are still empty but we have container assignments, derive from those keys.
 	if len(config.Solutions) == 0 && len(config.Triggers.Containers) > 0 {
 		for k := range config.Triggers.Containers {
-			if k == "golden" { config.Solutions = append(config.Solutions, "golden.patch"); continue }
-			if k == "original" { config.Solutions = append(config.Solutions, "original"); continue }
+			if k == "golden" {
+				config.Solutions = append(config.Solutions, "golden.patch")
+				continue
+			}
+			if k == "original" {
+				config.Solutions = append(config.Solutions, "original")
+				continue
+			}
 			config.Solutions = append(config.Solutions, k)
 		}
 		logger.Printf("Derived solutions from Triggers.Containers keys: %v", config.Solutions)
@@ -536,7 +567,7 @@ func RunDockerVolumePoolStep(db *sql.DB, stepExec *StepExec, logger *log.Logger)
 		if heldOutPath != "" && !filepath.IsAbs(heldOutPath) {
 			heldOutPath = filepath.Join(stepExec.BasePath, heldOutPath)
 		}
-		if err := ApplyGitCleanupAndPatch(containerName, workingDir, patchFile, heldOutPath, config.GradingSetupScript, logger); err != nil {
+		if err := ApplyGitCleanupAndPatch(containerName, workingDir, patchFile, heldOutPath, config.GradingSetupScript, stepExec.BasePath, logger); err != nil {
 			return fmt.Errorf("failed to apply git cleanup and patches to container %s: %w", containerName, err)
 		}
 
@@ -675,143 +706,143 @@ func FetchAppFolderFromDependency(db *sql.DB, stepExec *StepExec, config *Docker
 
 // AddKeepAliveCommand adds a keep-alive command to parameters if keepForever is true
 func AddKeepAliveCommand(params []string, keepForever bool, logger *log.Logger) []string {
-    hasKeepAliveCmd := false
-    for _, param := range params {
-        if (strings.Contains(param, "while true") && strings.Contains(param, "sleep")) ||
-            strings.Contains(param, "sleep infinity") ||
-            strings.Contains(param, "tail -f") {
-            hasKeepAliveCmd = true
-            break
-        }
-    }
-    if keepForever && !hasKeepAliveCmd {
-        // If using bash entrypoint, prefer -lc so we can pass a single string command
-        usesBash := false
-        for i := 0; i < len(params)-1; i++ {
-            if params[i] == "--entrypoint" && strings.Contains(params[i+1], "bash") {
-                usesBash = true
-                break
-            }
-        }
-        // Remove stray --login which conflicts with -lc
-        sanitized := make([]string, 0, len(params))
-        for _, p := range params {
-            if p == "--login" {
-                continue
-            }
-            sanitized = append(sanitized, p)
-        }
-        params = sanitized
+	hasKeepAliveCmd := false
+	for _, param := range params {
+		if (strings.Contains(param, "while true") && strings.Contains(param, "sleep")) ||
+			strings.Contains(param, "sleep infinity") ||
+			strings.Contains(param, "tail -f") {
+			hasKeepAliveCmd = true
+			break
+		}
+	}
+	if keepForever && !hasKeepAliveCmd {
+		// If using bash entrypoint, prefer -lc so we can pass a single string command
+		usesBash := false
+		for i := 0; i < len(params)-1; i++ {
+			if params[i] == "--entrypoint" && strings.Contains(params[i+1], "bash") {
+				usesBash = true
+				break
+			}
+		}
+		// Remove stray --login which conflicts with -lc
+		sanitized := make([]string, 0, len(params))
+		for _, p := range params {
+			if p == "--login" {
+				continue
+			}
+			sanitized = append(sanitized, p)
+		}
+		params = sanitized
 
-        script := "while true; do sleep 30; done"
-        if usesBash {
-            // Pass as: bash -lc "<script>"
-            params = append(params, "-lc", script)
-        } else {
-            // Fall back to sh -c
-            params = append(params, "sh", "-c", script)
-        }
-        logger.Printf("Added keep-alive command to parameters: %v", params)
-    }
-    return params
+		script := "while true; do sleep 30; done"
+		if usesBash {
+			// Pass as: bash -lc "<script>"
+			params = append(params, "-lc", script)
+		} else {
+			// Fall back to sh -c
+			params = append(params, "sh", "-c", script)
+		}
+		logger.Printf("Added keep-alive command to parameters: %v", params)
+	}
+	return params
 }
 
 // RunDockerCommand executes a Docker command with given parameters
 func RunDockerCommand(params []string, containerName string, logger *log.Logger, detached bool) error {
-    // Log raw params before processing
-    logger.Printf("RunDockerCommand: raw params for %s: %v (detached=%v)", containerName, params, detached)
+	// Log raw params before processing
+	logger.Printf("RunDockerCommand: raw params for %s: %v (detached=%v)", containerName, params, detached)
 
-    // Remove any user-provided --name to avoid duplication/conflict
-    cleaned := make([]string, 0, len(params))
-    skipNext := false
-    for i := 0; i < len(params); i++ {
-        if skipNext {
-            skipNext = false
-            continue
-        }
-        if params[i] == "--name" {
-            skipNext = true // skip its value
-            continue
-        }
-        cleaned = append(cleaned, params[i])
-    }
-    params = cleaned
+	// Remove any user-provided --name to avoid duplication/conflict
+	cleaned := make([]string, 0, len(params))
+	skipNext := false
+	for i := 0; i < len(params); i++ {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if params[i] == "--name" {
+			skipNext = true // skip its value
+			continue
+		}
+		cleaned = append(cleaned, params[i])
+	}
+	params = cleaned
 
-    // Flatten params: split on spaces except for -c keep-alive command
-    flattened := []string{}
-    for i := 0; i < len(params); i++ {
-        // Preserve script as a single token after -c or -lc
-        if (params[i] == "-c" || params[i] == "-lc") && i+1 < len(params) {
-            flattened = append(flattened, params[i], params[i+1])
-            i++
-            continue
-        }
-        parts := strings.Split(params[i], " ")
-        for _, part := range parts {
-            trimmedPart := strings.TrimSpace(part)
-            if trimmedPart != "" {
-                flattened = append(flattened, trimmedPart)
-            }
-        }
-    }
-    // Avoid duplicate -d if already provided in parameters
-    hasDetach := false
-    for _, p := range flattened {
-        if p == "-d" || p == "--detach" {
-            hasDetach = true
-            break
-        }
-    }
-    if detached && !hasDetach {
-        flattened = append([]string{"-d"}, flattened...)
-    }
-    cmdArgs := append([]string{"run", "--name", containerName}, flattened...)
-    logger.Printf("RunDockerCommand: flattened args for %s: %v", containerName, flattened)
-    logger.Printf("Constructed Docker command for container %s: docker %s", containerName, strings.Join(cmdArgs, " "))
+	// Flatten params: split on spaces except for -c keep-alive command
+	flattened := []string{}
+	for i := 0; i < len(params); i++ {
+		// Preserve script as a single token after -c or -lc
+		if (params[i] == "-c" || params[i] == "-lc") && i+1 < len(params) {
+			flattened = append(flattened, params[i], params[i+1])
+			i++
+			continue
+		}
+		parts := strings.Split(params[i], " ")
+		for _, part := range parts {
+			trimmedPart := strings.TrimSpace(part)
+			if trimmedPart != "" {
+				flattened = append(flattened, trimmedPart)
+			}
+		}
+	}
+	// Avoid duplicate -d if already provided in parameters
+	hasDetach := false
+	for _, p := range flattened {
+		if p == "-d" || p == "--detach" {
+			hasDetach = true
+			break
+		}
+	}
+	if detached && !hasDetach {
+		flattened = append([]string{"-d"}, flattened...)
+	}
+	cmdArgs := append([]string{"run", "--name", containerName}, flattened...)
+	logger.Printf("RunDockerCommand: flattened args for %s: %v", containerName, flattened)
+	logger.Printf("Constructed Docker command for container %s: docker %s", containerName, strings.Join(cmdArgs, " "))
 
-    cmd := exec.Command("docker", cmdArgs...)
-    output, err := cmd.CombinedOutput()
-    if err != nil {
-        logger.Printf("Error running Docker command for container %s: %v, output: %s", containerName, err, string(output))
-        if vout, verr := exec.Command("docker", "--version").CombinedOutput(); verr == nil {
-            logger.Printf("docker --version: %s", strings.TrimSpace(string(vout)))
-        }
-        if iout, ierr := exec.Command("docker", "info", "--format", "{{json .Server.Version}} {{json .OSType}} {{json .Driver}} {{json .LoggingDriver}}").CombinedOutput(); ierr == nil {
-            logger.Printf("docker info (subset): %s", strings.TrimSpace(string(iout)))
-        }
-        return fmt.Errorf("failed to run Docker command: %w", err)
-    }
-    // Log output even on success (usually the container ID)
-    logger.Printf("Docker run output for container %s: %s", containerName, strings.TrimSpace(string(output)))
-    logger.Printf("Successfully ran Docker command for container %s", containerName)
+	cmd := exec.Command("docker", cmdArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Printf("Error running Docker command for container %s: %v, output: %s", containerName, err, string(output))
+		if vout, verr := exec.Command("docker", "--version").CombinedOutput(); verr == nil {
+			logger.Printf("docker --version: %s", strings.TrimSpace(string(vout)))
+		}
+		if iout, ierr := exec.Command("docker", "info", "--format", "{{json .Server.Version}} {{json .OSType}} {{json .Driver}} {{json .LoggingDriver}}").CombinedOutput(); ierr == nil {
+			logger.Printf("docker info (subset): %s", strings.TrimSpace(string(iout)))
+		}
+		return fmt.Errorf("failed to run Docker command: %w", err)
+	}
+	// Log output even on success (usually the container ID)
+	logger.Printf("Docker run output for container %s: %s", containerName, strings.TrimSpace(string(output)))
+	logger.Printf("Successfully ran Docker command for container %s", containerName)
 
-    if detached {
-        if err := WaitForContainerRunning(containerName, 15, logger); err != nil {
-            logger.Printf("Container %s did not reach running state: %v", containerName, err)
-            return err
-        }
-        logger.Printf("Container %s is running", containerName)
-        // Inspect resource limits and mounts to diagnose issues
-        if insp, ierr := exec.Command("docker", "inspect", "--format",
-            "Status={{.State.Status}} OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} Error={{.State.Error}} Memory={{.HostConfig.Memory}} PidsLimit={{.HostConfig.PidsLimit}} Mounts={{range .Mounts}}{{.Destination}}<-{{.Source}};{{end}}",
-            containerName).CombinedOutput(); ierr == nil {
-            logger.Printf("Post-run inspect %s: %s", containerName, strings.TrimSpace(string(insp)))
-        }
-    }
-    return nil
+	if detached {
+		if err := WaitForContainerRunning(containerName, 15, logger); err != nil {
+			logger.Printf("Container %s did not reach running state: %v", containerName, err)
+			return err
+		}
+		logger.Printf("Container %s is running", containerName)
+		// Inspect resource limits and mounts to diagnose issues
+		if insp, ierr := exec.Command("docker", "inspect", "--format",
+			"Status={{.State.Status}} OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} Error={{.State.Error}} Memory={{.HostConfig.Memory}} PidsLimit={{.HostConfig.PidsLimit}} Mounts={{range .Mounts}}{{.Destination}}<-{{.Source}};{{end}}",
+			containerName).CombinedOutput(); ierr == nil {
+			logger.Printf("Post-run inspect %s: %s", containerName, strings.TrimSpace(string(insp)))
+		}
+	}
+	return nil
 }
 
 // WaitForContainerRunning waits for a container to reach running state
 func WaitForContainerRunning(containerName string, timeoutSeconds int, logger *log.Logger) error {
-    for i := 0; i < timeoutSeconds; i++ {
-        inspectCmd := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", containerName)
-        out, err := inspectCmd.CombinedOutput()
-        if err == nil && strings.TrimSpace(string(out)) == "true" {
-            return nil
-        }
-        time.Sleep(time.Second)
-    }
-    return fmt.Errorf("container %s did not reach running state within %d seconds", containerName, timeoutSeconds)
+	for i := 0; i < timeoutSeconds; i++ {
+		inspectCmd := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", containerName)
+		out, err := inspectCmd.CombinedOutput()
+		if err == nil && strings.TrimSpace(string(out)) == "true" {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("container %s did not reach running state within %d seconds", containerName, timeoutSeconds)
 }
 
 // RemoveDockerContainer removes a Docker container forcefully
@@ -828,22 +859,28 @@ func RemoveDockerContainer(name string, logger *log.Logger) error {
 
 // ApplyGitCleanupAndPatch applies git cleanup and patches in a container.
 // If workingDir is non-empty, commands execute with docker exec -w <workingDir>.
-func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile string, heldOutTestFile string, gradingSetupScript string, logger *log.Logger) error {
-    logger.Printf("ApplyGitCleanupAndPatch: container=%s workingDir=%s patchFile=%s heldOutTestFile=%s gradingSetupScript=%s", containerName, workingDir, patchFile, heldOutTestFile, gradingSetupScript)
-    commands := []string{
-        "cd " + workingDir,
-        // Preflight diagnostics to aid debugging of failures
-        "pwd",
-        "ls -la",
-        "git config --global --add safe.directory '" + workingDir + "' || true",
-        "git status -s || true",
-        // Cleanup before applying patches
-        "git reset --hard HEAD",
-        "git checkout -- .",
-        "git clean -fd",
-    }
+func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile string, heldOutTestFile string, gradingSetupScript string, basePath string, logger *log.Logger) error {
+	logger.Printf("ApplyGitCleanupAndPatch: container=%s workingDir=%s patchFile=%s heldOutTestFile=%s gradingSetupScript=%s basePath=%s", containerName, workingDir, patchFile, heldOutTestFile, gradingSetupScript, basePath)
+	commands := []string{
+		"cd " + workingDir,
+		// Preflight diagnostics to aid debugging of failures
+		"pwd",
+		"ls -la",
+		"git config --global --add safe.directory '" + workingDir + "' || true",
+		"git status -s || true",
+		// Cleanup before applying patches
+		"git reset --hard HEAD",
+		"git checkout -- .",
+		"git clean -fd",
+	}
 
 	if gradingSetupScript != "" {
+		// Normalize gradingSetupScript to tasks.local_path (basePath) when relative
+		if !filepath.IsAbs(gradingSetupScript) {
+			orig := gradingSetupScript
+			gradingSetupScript = filepath.Join(basePath, gradingSetupScript)
+			logger.Printf("Resolved grading_setup_script relative to tasks.local_path: %s -> %s", orig, gradingSetupScript)
+		}
 		if _, err := os.Stat(gradingSetupScript); err == nil {
 			copyCmd := exec.Command("docker", "cp", gradingSetupScript, fmt.Sprintf("%s:/tmp/grading_setup.patch", containerName))
 			if output, err := copyCmd.CombinedOutput(); err != nil {
@@ -852,17 +889,28 @@ func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile 
 			}
 			commands = append(commands, "git apply /tmp/grading_setup.patch")
 		} else {
-			logger.Printf("Grading setup script %s not found, skipping", gradingSetupScript)
+			logger.Printf("Grading setup script %s not found (tasks.local_path=%s), skipping", gradingSetupScript, basePath)
 		}
 	}
 
 	if patchFile != "" {
+		// run ls -la in the container
+		tmpCheckCmd := exec.Command("docker", "exec", containerName, "ls", "-la")
+		if tempOutput, err := tmpCheckCmd.CombinedOutput(); err != nil {
+			logger.Printf("Failed to run ls -la in container %s: %v, output: %s", containerName, err, string(tempOutput))
+		}
+
 		copyCmd := exec.Command("docker", "cp", patchFile, fmt.Sprintf("%s:/tmp/solution.patch", containerName))
 		if output, err := copyCmd.CombinedOutput(); err != nil {
 			logger.Printf("Failed to copy patch file to container %s: %v, output: %s", containerName, err, string(output))
 			return fmt.Errorf("failed to copy patch file: %w", err)
 		}
 		commands = append(commands, "git apply /tmp/solution.patch")
+
+		tmpCheckCmd1 := exec.Command("docker", "exec", containerName, "ls", "-la")
+		if tempOutput, err := tmpCheckCmd1.CombinedOutput(); err != nil {
+			logger.Printf("Failed to run ls -la in container %s: %v, output: %s", containerName, err, string(tempOutput))
+		}
 	}
 
 	if heldOutTestFile != "" {
@@ -878,62 +926,62 @@ func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile 
 		}
 	}
 
-    for _, cmdStr := range commands {
-        // Guard: remove a stale .git/index.lock if present before each git-related step
-        guard := "if [ -e .git/index.lock ]; then echo '[guard] removing .git/index.lock'; rm -f .git/index.lock; fi"
-        if strings.Contains(cmdStr, "git ") || strings.HasPrefix(cmdStr, "git") {
-            var guardCmd *exec.Cmd
-            if workingDir != "" {
-                guardCmd = exec.Command("docker", "exec", "-w", workingDir, containerName, "bash", "-c", guard)
-            } else {
-                guardCmd = exec.Command("docker", "exec", containerName, "bash", "-c", guard)
-            }
-            if gout, gerr := guardCmd.CombinedOutput(); gerr != nil {
-                logger.Printf("Warning: guard before '%s' failed in %s: %v\nOutput: %s", cmdStr, containerName, gerr, string(gout))
-                // Continue regardless; attempt the command anyway
-            }
-        }
+	for _, cmdStr := range commands {
+		// Guard: remove a stale .git/index.lock if present before each git-related step
+		guard := "if [ -e .git/index.lock ]; then echo '[guard] removing .git/index.lock'; rm -f .git/index.lock; fi"
+		if strings.Contains(cmdStr, "git ") || strings.HasPrefix(cmdStr, "git") {
+			var guardCmd *exec.Cmd
+			if workingDir != "" {
+				guardCmd = exec.Command("docker", "exec", "-w", workingDir, containerName, "bash", "-c", guard)
+			} else {
+				guardCmd = exec.Command("docker", "exec", containerName, "bash", "-c", guard)
+			}
+			if gout, gerr := guardCmd.CombinedOutput(); gerr != nil {
+				logger.Printf("Warning: guard before '%s' failed in %s: %v\nOutput: %s", cmdStr, containerName, gerr, string(gout))
+				// Continue regardless; attempt the command anyway
+			}
+		}
 
-        var execCmd *exec.Cmd
-        var execArgs []string
-        if workingDir != "" {
-            execArgs = []string{"exec", "-w", workingDir, containerName, "bash", "-c", cmdStr}
-            execCmd = exec.Command("docker", execArgs...)
-        } else {
-            execArgs = []string{"exec", containerName, "bash", "-c", cmdStr}
-            execCmd = exec.Command("docker", execArgs...)
-        }
-        logger.Printf("About to exec in %s: docker %s", containerName, strings.Join(execArgs, " "))
-        output, err := execCmd.CombinedOutput()
-        if err != nil {
-            // Do not abort on git apply failures; capture and continue
-            if strings.Contains(cmdStr, "git apply") {
-                logger.Printf("Non-fatal apply failure in %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
-                continue
-            }
-            logger.Printf("Command failed in container %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
-            // Extra diagnostics on failure: container state and recent logs
-            if inspectOut, ierr := exec.Command("docker", "inspect", "--format", "Status={{.State.Status}} OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} Error={{.State.Error}}", containerName).CombinedOutput(); ierr == nil {
-                logger.Printf("Container state %s: %s", containerName, strings.TrimSpace(string(inspectOut)))
-            } else {
-                logger.Printf("Failed to inspect container %s: %v", containerName, ierr)
-            }
-            if logsOut, lerr := exec.Command("docker", "logs", "--tail", "100", containerName).CombinedOutput(); lerr == nil {
-                logger.Printf("Recent logs from %s:\n%s", containerName, string(logsOut))
-            } else {
-                logger.Printf("Failed to get logs for %s: %v", containerName, lerr)
-            }
-            return fmt.Errorf("failed to execute command in container: %w", err)
-        }
-        // Log output for useful commands
-        if strings.HasPrefix(cmdStr, "git ") || cmdStr == "pwd" || strings.HasPrefix(cmdStr, "ls ") {
-            trimmed := strings.TrimSpace(string(output))
-            if trimmed != "" {
-                logger.Printf("Output (%s):\n%s", cmdStr, trimmed)
-            }
-        }
-        logger.Printf("Executed in container %s: %s", containerName, cmdStr)
-    }
+		var execCmd *exec.Cmd
+		var execArgs []string
+		if workingDir != "" {
+			execArgs = []string{"exec", "-w", workingDir, containerName, "bash", "-c", cmdStr}
+			execCmd = exec.Command("docker", execArgs...)
+		} else {
+			execArgs = []string{"exec", containerName, "bash", "-c", cmdStr}
+			execCmd = exec.Command("docker", execArgs...)
+		}
+		logger.Printf("About to exec in %s: docker %s", containerName, strings.Join(execArgs, " "))
+		output, err := execCmd.CombinedOutput()
+		if err != nil {
+			// Do not abort on git apply failures; capture and continue
+			if strings.Contains(cmdStr, "git apply") {
+				logger.Printf("Non-fatal apply failure in %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
+				continue
+			}
+			logger.Printf("Command failed in container %s: %s\nError: %v\nOutput: %s", containerName, cmdStr, err, string(output))
+			// Extra diagnostics on failure: container state and recent logs
+			if inspectOut, ierr := exec.Command("docker", "inspect", "--format", "Status={{.State.Status}} OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} Error={{.State.Error}}", containerName).CombinedOutput(); ierr == nil {
+				logger.Printf("Container state %s: %s", containerName, strings.TrimSpace(string(inspectOut)))
+			} else {
+				logger.Printf("Failed to inspect container %s: %v", containerName, ierr)
+			}
+			if logsOut, lerr := exec.Command("docker", "logs", "--tail", "100", containerName).CombinedOutput(); lerr == nil {
+				logger.Printf("Recent logs from %s:\n%s", containerName, string(logsOut))
+			} else {
+				logger.Printf("Failed to get logs for %s: %v", containerName, lerr)
+			}
+			return fmt.Errorf("failed to execute command in container: %w", err)
+		}
+		// Log output for useful commands
+		if strings.HasPrefix(cmdStr, "git ") || cmdStr == "pwd" || strings.HasPrefix(cmdStr, "ls ") {
+			trimmed := strings.TrimSpace(string(output))
+			if trimmed != "" {
+				logger.Printf("Output (%s):\n%s", cmdStr, trimmed)
+			}
+		}
+		logger.Printf("Executed in container %s: %s", containerName, cmdStr)
+	}
 
 	return nil
 }
@@ -941,30 +989,30 @@ func ApplyGitCleanupAndPatch(containerName string, workingDir string, patchFile 
 // GenerateDVContainerName generates a consistent container name for Docker volume pool steps
 // Format: task_<taskID>_volume_<index> where index is 1-based
 func GenerateDVContainerName(taskID int, index int) string {
-    return fmt.Sprintf("task_%d_volume_%d", taskID, index)
+	return fmt.Sprintf("task_%d_volume_%d", taskID, index)
 }
 
 // GenerateDVContainerNameForBase generates a stable container name for a logical base key
 // base is one of: original, golden, solution1..solutionN (trimmed of file extension)
 func GenerateDVContainerNameForBase(taskID int, base string) string {
-    switch base {
-    case "original":
-        return fmt.Sprintf("task_%d_volume_original", taskID)
-    case "golden":
-        return fmt.Sprintf("task_%d_volume_golden", taskID)
-    default:
-        // For solutionN or any other stable key, embed the key
-        // e.g., task_123_volume_solution1
-        cleaned := strings.ReplaceAll(base, "/", "_")
-        cleaned = strings.ReplaceAll(cleaned, " ", "_")
-        return fmt.Sprintf("task_%d_volume_%s", taskID, cleaned)
-    }
+	switch base {
+	case "original":
+		return fmt.Sprintf("task_%d_volume_original", taskID)
+	case "golden":
+		return fmt.Sprintf("task_%d_volume_golden", taskID)
+	default:
+		// For solutionN or any other stable key, embed the key
+		// e.g., task_123_volume_solution1
+		cleaned := strings.ReplaceAll(base, "/", "_")
+		cleaned = strings.ReplaceAll(cleaned, " ", "_")
+		return fmt.Sprintf("task_%d_volume_%s", taskID, cleaned)
+	}
 }
 
 // ShouldRecreateContainer checks if a container needs to be recreated based on image tag or ID changes
 func ShouldRecreateContainer(containerName, expectedImageTag, expectedImageID string, logger *log.Logger) (bool, error) {
-    logger.Printf("Checking if container %s needs recreation (expected tag: %s, expected ID: %s)", containerName, expectedImageTag, expectedImageID)
-    exists, err := CheckContainerExists(containerName)
+	logger.Printf("Checking if container %s needs recreation (expected tag: %s, expected ID: %s)", containerName, expectedImageTag, expectedImageID)
+	exists, err := CheckContainerExists(containerName)
 	if err != nil {
 		return false, fmt.Errorf("failed to check if container exists: %w", err)
 	}
@@ -973,50 +1021,50 @@ func ShouldRecreateContainer(containerName, expectedImageTag, expectedImageID st
 		return true, nil
 	}
 
-    cmd := exec.Command("docker", "inspect", "--format", "{{.Image}}", containerName)
-    output, err := cmd.CombinedOutput()
+	cmd := exec.Command("docker", "inspect", "--format", "{{.Image}}", containerName)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("failed to get container image: %w", err)
 	}
 	currentImageID := strings.TrimSpace(string(output))
 	logger.Printf("Container %s current image ID: %s", containerName, currentImageID)
 
-    if expectedImageID != "" {
-        // Resolve the expected image ID to its full digest (in case a short ID was provided)
-        cmd = exec.Command("docker", "inspect", "--format", "{{.ID}}", expectedImageID)
-        expectedFullImageID, err := cmd.CombinedOutput()
-        if err != nil {
-            // If we cannot resolve the expected ID, log and fall back to tag comparison below
-            logger.Printf("Warning: failed to resolve expected image ID %q: %v", expectedImageID, err)
-        } else {
-            trimmedExpectedID := strings.TrimSpace(string(expectedFullImageID))
-            logger.Printf("Comparing image IDs - Current: %s, Expected: %s", currentImageID, trimmedExpectedID)
-            if currentImageID != trimmedExpectedID {
-                logger.Printf("Container %s: Image ID changed from %s to %s", containerName, currentImageID, trimmedExpectedID)
-                return true, nil
-            }
-            // IDs match -> no recreation needed; ignore tag differences
-            logger.Printf("Container %s: Image ID matches expected; no recreation needed", containerName)
-            return false, nil
-        }
-    }
+	if expectedImageID != "" {
+		// Resolve the expected image ID to its full digest (in case a short ID was provided)
+		cmd = exec.Command("docker", "inspect", "--format", "{{.ID}}", expectedImageID)
+		expectedFullImageID, err := cmd.CombinedOutput()
+		if err != nil {
+			// If we cannot resolve the expected ID, log and fall back to tag comparison below
+			logger.Printf("Warning: failed to resolve expected image ID %q: %v", expectedImageID, err)
+		} else {
+			trimmedExpectedID := strings.TrimSpace(string(expectedFullImageID))
+			logger.Printf("Comparing image IDs - Current: %s, Expected: %s", currentImageID, trimmedExpectedID)
+			if currentImageID != trimmedExpectedID {
+				logger.Printf("Container %s: Image ID changed from %s to %s", containerName, currentImageID, trimmedExpectedID)
+				return true, nil
+			}
+			// IDs match -> no recreation needed; ignore tag differences
+			logger.Printf("Container %s: Image ID matches expected; no recreation needed", containerName)
+			return false, nil
+		}
+	}
 
-    if expectedImageTag != "" {
-        cmd = exec.Command("docker", "inspect", "--format", "{{.Config.Image}}", containerName)
-        output, err = cmd.CombinedOutput()
-        if err != nil {
-            return false, fmt.Errorf("failed to get container image tag: %w", err)
-        }
-        currentImageTag := strings.TrimSpace(string(output))
-        logger.Printf("Container %s current image tag: %s, expected: %s", containerName, currentImageTag, expectedImageTag)
-        if currentImageTag != expectedImageTag {
-            logger.Printf("Container %s: Image tag changed from %s to %s", containerName, currentImageTag, expectedImageTag)
-            return true, nil
-        }
-    }
+	if expectedImageTag != "" {
+		cmd = exec.Command("docker", "inspect", "--format", "{{.Config.Image}}", containerName)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			return false, fmt.Errorf("failed to get container image tag: %w", err)
+		}
+		currentImageTag := strings.TrimSpace(string(output))
+		logger.Printf("Container %s current image tag: %s, expected: %s", containerName, currentImageTag, expectedImageTag)
+		if currentImageTag != expectedImageTag {
+			logger.Printf("Container %s: Image tag changed from %s to %s", containerName, currentImageTag, expectedImageTag)
+			return true, nil
+		}
+	}
 
-    logger.Printf("Container %s is up-to-date, no need to recreate", containerName)
-    return false, nil
+	logger.Printf("Container %s is up-to-date, no need to recreate", containerName)
+	return false, nil
 }
 
 func CheckContainerExists(containerName string) (bool, error) {

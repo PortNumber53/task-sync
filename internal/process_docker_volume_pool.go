@@ -134,7 +134,7 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 		for patch, container := range config.Triggers.Containers {
 			if containerExists, _ := models.CheckContainerExists(container); containerExists {
 				patchPath := filepath.Join(stepExec.BasePath, patch) // patch key already includes .patch
-				if err := models.ApplyGitCleanupAndPatch(container, workingDir, patchPath, config.HeldOutTestFile, config.GradingSetupScript, stepLogger); err != nil {
+				if err := models.ApplyGitCleanupAndPatch(container, workingDir, patchPath, config.HeldOutTestFile, config.GradingSetupScript, stepExec.BasePath, stepLogger); err != nil {
 					return err
 				}
 			} else {

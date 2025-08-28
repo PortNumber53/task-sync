@@ -866,5 +866,12 @@ func ProcessDockerExtractVolumeStep(db *sql.DB, se *models.StepExec, logger *log
         logger.Printf("Cleanup: disabling docker_extract_volume.original (set to false)")
     }
 
+    // Do not persist runtime force flag for docker_extract_volume
+    if _, err := db.Exec("UPDATE steps SET settings = jsonb_set(settings, '{docker_extract_volume,force}', 'false'::jsonb, true) WHERE id = $1", se.StepID); err != nil {
+        logger.Printf("Warning: failed to reset docker_extract_volume.force flag for step %d: %v", se.StepID, err)
+    } else {
+        logger.Printf("Cleanup: disabling docker_extract_volume.force (set to false)")
+    }
+
 	return nil
 }

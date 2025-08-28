@@ -178,6 +178,8 @@ func ProcessModelTaskCheckStep(db *sql.DB, se *models.StepExec, logger *log.Logg
 
 	logger.Printf("Successfully generated file: %s", generatedFilePath)
 
-	// After successful execution, update file hashes
-	return updateModelTaskCheckFileHashes(db, se.StepID, se.BasePath, &config, logger)
+    // Ensure transient force flag is not persisted after a successful run
+    config.Force = false
+    // After successful execution, update file hashes and persist updated settings
+    return updateModelTaskCheckFileHashes(db, se.StepID, se.BasePath, &config, logger)
 }

@@ -597,13 +597,13 @@ func runTestSequence(basePath string, appFolder string, rsConfig models.RubricSh
 		}
 		logger.Printf("Confirmed held_out_tests.patch exists at %s", fullHeldOutTestsPath)
 		// Copy held_out_tests.patch under /tmp inside the container to avoid polluting the project folder
-        containerHeldOutTestsPatchPath := "/tmp/held_out_tests.patch"
-        cpOut, cpErr := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath)).CombinedOutput()
-        if cpErr != nil {
-            return string(cpOut), fmt.Errorf("copy held-out tests patch failed: %w", cpErr)
-        }
-        // Apply from /tmp while keeping working directory at appFolder
-        applyOut, applyErr := exec.Command("docker", "exec", "-w", appFolder, container, "git", "apply", containerHeldOutTestsPatchPath).CombinedOutput()
+		containerHeldOutTestsPatchPath := "/tmp/held_out_tests.patch"
+		cpOut, cpErr := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath)).CombinedOutput()
+		if cpErr != nil {
+			return string(cpOut), fmt.Errorf("copy held-out tests patch failed: %w", cpErr)
+		}
+		// Apply from /tmp while keeping working directory at appFolder
+		applyOut, applyErr := exec.Command("docker", "exec", "-w", appFolder, container, "git", "apply", containerHeldOutTestsPatchPath).CombinedOutput()
 		if applyErr != nil {
 			logger.Printf("ERROR: Held-out tests patch apply failed for criterion %s: %v\nOutput: %s", rsConfig.CriterionID, applyErr, string(applyOut))
 			return string(applyOut), fmt.Errorf("held-out tests patch apply failed: %w", applyErr)
@@ -644,7 +644,7 @@ func runTestSequence(basePath string, appFolder string, rsConfig models.RubricSh
 	// Execute the script directly; working dir is set via docker exec -w
 	execSnippet := containerScriptPath
 	logger.Printf("Executing rubric script: %s", execSnippet)
-	cmd := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "-lc", execSnippet)
+	cmd := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "-c", execSnippet)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.Printf("Error running rubric script: %v\nOutput:\n%s", err, string(output))
@@ -678,7 +678,7 @@ func runOriginalSequence(basePath string, appFolder string, rsConfig models.Rubr
 	// Execute the script directly; working dir is set via docker exec -w
 	execSnippet := containerScriptPath
 	logger.Printf("Executing rubric script (ORIGINAL): %s", execSnippet)
-	cmd := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "-lc", execSnippet)
+	cmd := exec.Command("docker", "exec", "-w", appFolder, container, "bash", "-c", execSnippet)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.Printf("Error running rubric script (ORIGINAL): %v\nOutput:\n%s", err, string(output))

@@ -42,7 +42,16 @@ func ProcessDockerVolumePoolStep(db *sql.DB, stepExec *models.StepExec, stepLogg
 	// Check for force flag
 	if config.Force {
 		stepLogger.Println("Force flag set; running step regardless of triggers")
-		return models.RunDockerVolumePoolStep(db, stepExec, stepLogger) // Updated call to exported function
+		if err := models.RunDockerVolumePoolStep(db, stepExec, stepLogger); err != nil { // Updated call to exported function
+			return err
+		}
+		// Reset transient force flag in persisted settings after successful run
+		if _, err := db.Exec("UPDATE steps SET settings = jsonb_set(settings, '{docker_volume_pool,force}', 'false'::jsonb, true) WHERE id = $1", stepExec.StepID); err != nil {
+			stepLogger.Printf("Warning: failed to reset docker_volume_pool.force flag for step %d: %v", stepExec.StepID, err)
+		} else {
+			stepLogger.Printf("Cleanup: disabling docker_volume_pool.force (set to false) for step %d", stepExec.StepID)
+		}
+		return nil
 	}
 
 	// Initialize or update Triggers.Containers if empty

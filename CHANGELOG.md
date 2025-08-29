@@ -1,5 +1,12 @@
 # Changelog
 
+## 2025-08-29
+
+- TaskSettings compatibility: accept both `held_out_test_clean_up` and legacy `held_out_test-clean_up` keys.
+  - Implemented custom JSON unmarshaller in `pkg/models/tasks.go`.
+  - Ensures Golden held-out cleanup hook runs even if older configs use the hyphenated key.
+  - Build verified: `go build ./...`.
+
 ## 2025-08-28
 
 - Force/Rerun flag auto-reset across step processors

@@ -12,6 +12,38 @@ type Docker struct {
 	ImageTag string `json:"image_tag"`
 }
 
+// UnmarshalJSON implements custom logic to support both underscore and hyphenated
+// keys for held_out_test_clean_up. This provides backward compatibility with
+// earlier configs that used "held_out_test-clean_up".
+func (ts *TaskSettings) UnmarshalJSON(data []byte) error {
+    // Define an alias to avoid infinite recursion
+    type Alias TaskSettings
+    var aux Alias
+    if err := json.Unmarshal(data, &aux); err != nil {
+        return err
+    }
+
+    // Copy back the parsed struct
+    *ts = TaskSettings(aux)
+
+    // If HeldOutTestCleanUp not set via standard key, look for the hyphenated key
+    if ts.HeldOutTestCleanUp == "" {
+        var raw map[string]json.RawMessage
+        if err := json.Unmarshal(data, &raw); err == nil {
+            if v, ok := raw["held_out_test-clean_up"]; ok {
+                var s string
+                if err := json.Unmarshal(v, &s); err == nil {
+                    ts.HeldOutTestCleanUp = s
+                }
+            }
+        }
+    }
+
+    return nil
+}
+
+ 
+
 // TaskSettings holds the settings for a task.
 type TaskSettings struct {
 	Docker Docker `json:"docker"`

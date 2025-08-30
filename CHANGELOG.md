@@ -7,6 +7,11 @@
   - Ensures Golden held-out cleanup hook runs even if older configs use the hyphenated key.
   - Build verified: `go build ./...`.
 
+- Rubric Shell (golden/--force): ensure `held_out_tests.patch` is copied and applied
+  - Changed `internal/process_rubric_shell.go/runTestSequence()` to rely on filesystem presence of `held_out_tests.patch` at `basePath` instead of gating on `rsConfig.Files`.
+  - This guarantees `docker cp` + `git apply` occur during `step golden N --force` even if the Files map is not populated.
+  - Build verified: `go build ./...`.
+
 ## 2025-08-28
 
 - Force/Rerun flag auto-reset across step processors

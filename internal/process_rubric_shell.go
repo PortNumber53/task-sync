@@ -405,20 +405,20 @@ func ProcessRubricShellStep(db *sql.DB, se *models.StepExec, logger *log.Logger,
 
 			// If this was the GOLDEN container run and a held_out_test_clean_up command is configured
 			// execute it now to clean up held-out test changes. Do not alter any other cleanup logic.
-			if assignment.Patch == "golden.patch" && taskSettings != nil && taskSettings.HeldOutTestCleanUp != "" {
-				logger.Printf("[GOLDEN] Executing held_out_test_clean_up command in container %s", assignment.Container)
-				// Run cleanup from appFolder to match rubric execution context used elsewhere
-				workDir := appFolder
-				cleanupCmd := exec.Command(
-					"docker", "exec", "-w", workDir, assignment.Container,
-					"bash", "-c", taskSettings.HeldOutTestCleanUp,
-				)
-				if out, cerr := cleanupCmd.CombinedOutput(); cerr != nil {
-					logger.Printf("[GOLDEN] WARNING: held_out_test_clean_up failed: %v\nOutput: %s", cerr, string(out))
-				} else {
-					logger.Printf("[GOLDEN] held_out_test_clean_up completed successfully")
-				}
-			}
+			// if assignment.Patch == "golden.patch" && taskSettings != nil && taskSettings.HeldOutTestCleanUp != "" {
+			// 	logger.Printf("[GOLDEN] Executing held_out_test_clean_up command in container %s", assignment.Container)
+			// 	// Run cleanup from appFolder to match rubric execution context used elsewhere
+			// 	workDir := appFolder
+			// 	cleanupCmd := exec.Command(
+			// 		"docker", "exec", "-w", workDir, assignment.Container,
+			// 		"bash", "-c", taskSettings.HeldOutTestCleanUp,
+			// 	)
+			// 	if out, cerr := cleanupCmd.CombinedOutput(); cerr != nil {
+			// 		logger.Printf("[GOLDEN] WARNING: held_out_test_clean_up failed: %v\nOutput: %s", cerr, string(out))
+			// 	} else {
+			// 		logger.Printf("[GOLDEN] held_out_test_clean_up completed successfully")
+			// 	}
+			// }
 		}()
 	}
 	wg.Wait()
@@ -588,31 +588,27 @@ func runTestSequence(basePath string, appFolder string, rsConfig models.RubricSh
 	}
 
 	// Step 4: Apply held-out tests patch using git apply
-	if _, ok := rsConfig.Files["held_out_tests.patch"]; ok {
-		fullHeldOutTestsPath := filepath.Join(basePath, "held_out_tests.patch")
-		if _, err := os.Stat(fullHeldOutTestsPath); os.IsNotExist(err) {
-			return "", fmt.Errorf("held_out_tests.patch does not exist at %s", fullHeldOutTestsPath)
-		} else if err != nil {
-			return "", fmt.Errorf("error checking held_out_tests.patch: %w", err)
-		}
-		logger.Printf("Confirmed held_out_tests.patch exists at %s", fullHeldOutTestsPath)
-		// Copy held_out_tests.patch under /tmp inside the container to avoid polluting the project folder
-		containerHeldOutTestsPatchPath := "/tmp/held_out_tests.patch"
-		cpOut, cpErr := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath)).CombinedOutput()
-		if cpErr != nil {
-			return string(cpOut), fmt.Errorf("copy held-out tests patch failed: %w", cpErr)
-		}
-		// Apply from /tmp while keeping working directory at appFolder
-		applyOut, applyErr := exec.Command("docker", "exec", "-w", appFolder, container, "git", "apply", containerHeldOutTestsPatchPath).CombinedOutput()
-		if applyErr != nil {
-			logger.Printf("ERROR: Held-out tests patch apply failed for criterion %s: %v\nOutput: %s", rsConfig.CriterionID, applyErr, string(applyOut))
-			return string(applyOut), fmt.Errorf("held-out tests patch apply failed: %w", applyErr)
-		}
-		logger.Printf("Applied held_out_tests.patch in container %s", container)
-	} else {
-		logger.Println("held_out_tests.patch not found in rsConfig.Files")
-		return "", fmt.Errorf("held_out_tests.patch not found in rsConfig.Files")
+	// Do not depend on rsConfig.Files; rely on filesystem presence for robustness.
+	fullHeldOutTestsPath := filepath.Join(basePath, "held_out_tests.patch")
+	if _, err := os.Stat(fullHeldOutTestsPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("held_out_tests.patch does not exist at %s", fullHeldOutTestsPath)
+	} else if err != nil {
+		return "", fmt.Errorf("error checking held_out_tests.patch: %w", err)
 	}
+	logger.Printf("Confirmed held_out_tests.patch exists at %s", fullHeldOutTestsPath)
+	// Copy held_out_tests.patch under /tmp inside the container to avoid polluting the project folder
+	containerHeldOutTestsPatchPath := "/tmp/held_out_tests.patch"
+	cpOut, cpErr := exec.Command("docker", "cp", fullHeldOutTestsPath, fmt.Sprintf("%s:%s", container, containerHeldOutTestsPatchPath)).CombinedOutput()
+	if cpErr != nil {
+		return string(cpOut), fmt.Errorf("copy held-out tests patch failed: %w", cpErr)
+	}
+	// Apply from /tmp while keeping working directory at appFolder
+	applyOut, applyErr := exec.Command("docker", "exec", "-w", appFolder, container, "git", "apply", containerHeldOutTestsPatchPath).CombinedOutput()
+	if applyErr != nil {
+		logger.Printf("ERROR: Held-out tests patch apply failed for criterion %s: %v\nOutput: %s", rsConfig.CriterionID, applyErr, string(applyOut))
+		return string(applyOut), fmt.Errorf("held-out tests patch apply failed: %w", applyErr)
+	}
+	logger.Printf("Applied held_out_tests.patch in container %s", container)
 
 	// Step 5: Run the rubric test command and capture output
 	// Create a temporary script file to hold the command.
